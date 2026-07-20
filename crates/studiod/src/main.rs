@@ -1,6 +1,7 @@
 mod charters;
 mod m3;
 mod m4;
+mod studio;
 mod tools;
 
 use anyhow::{bail, Context, Result};
@@ -510,6 +511,7 @@ fn main() -> Result<()> {
         "m3" => m3_proof(),
         "m4" => m4_proof(),
         "floor" => floor_only(),
+        "studio" => studio_mode(),
         "mcp-server" => mcp_server(),
         _ => {
             println!("usage: studiod <m1|m2|mcp-server>");
@@ -665,4 +667,12 @@ fn floor_only() -> Result<()> {
     println!("studio floor on http://127.0.0.1:7878/");
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(studio_server::serve(state, 7878))
+}
+
+fn studio_mode() -> Result<()> {
+    guard_nested_session()?;
+    fs::create_dir_all(studio_dir())?;
+    let store = std::sync::Arc::new(Store::open(studio_dir().join("studio-state.db"))?);
+    m4::register_roles(&store)?;
+    studio::serve_studio(store, id("run"), 7878)
 }

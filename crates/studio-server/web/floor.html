@@ -33,6 +33,25 @@
   .ev.terminal .t { color: var(--text); font-weight: 600; }
   .ev.bad .t { color: var(--error); }
   #help { padding: 8px 13px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11px; }
+  #compose { padding: 10px 13px; border-top: 1px solid var(--line); display: grid; gap: 6px; }
+  #compose select, #compose textarea, #compose button {
+    font: inherit; background: #0e1119; color: var(--text);
+    border: 1px solid var(--line); border-radius: 4px; padding: 5px 7px; }
+  #compose textarea { resize: vertical; min-height: 46px; }
+  #compose button { cursor: pointer; background: #1d2431; }
+  #compose button:hover { background: #26303f; }
+  #compose .row { display: grid; grid-template-columns: 1fr auto; gap: 6px; }
+  #sent { color: var(--dim); font-size: 11px; min-height: 14px; }
+  #detail { position: absolute; right: 12px; top: 12px; width: 250px; display: none;
+    background: #0a0d13ee; border: 1px solid var(--line); border-radius: 6px;
+    padding: 11px 12px; font-size: 12px; z-index: 6; }
+  #detail h2 { margin: 0 0 6px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+  #detail .k { color: var(--dim); }
+  #detail .row { display: flex; justify-content: space-between; gap: 8px; }
+  #detail .sum { margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--line); }
+  #detail button { margin-top: 9px; width: 100%; font: inherit; cursor: pointer;
+    background: #1d2431; color: var(--text); border: 1px solid var(--line);
+    border-radius: 4px; padding: 4px; }
   kbd { background: #222732; border-radius: 3px; padding: 0 4px; color: var(--text); }
   #tip { position: absolute; pointer-events: none; max-width: 290px; display: none;
     background: #08090dee; border: 1px solid var(--line); border-radius: 5px;
@@ -44,7 +63,7 @@
 </style>
 </head>
 <body>
-<div id="stage"><div id="tip"></div><div id="cam">isometric</div></div>
+<div id="stage"><div id="tip"></div><div id="cam">isometric</div><div id="detail"></div></div>
 <div id="side">
   <header><h1>Studio Floor</h1><div id="conn">connecting</div></header>
   <div id="stats">
@@ -55,12 +74,21 @@
     <div class="stat"><span>cache hit</span><b id="s-cache">-</b></div>
   </div>
   <div id="feed"></div>
-  <div id="help">drag to pan &middot; wheel zoom &middot; <kbd>O</kbd> orbit, then drag rotates</div>
+  <div id="compose">
+    <div class="row">
+      <select id="who"></select>
+      <button id="mode-btn" title="switch between task and meeting">task</button>
+    </div>
+    <textarea id="brief" placeholder="what should they do?"></textarea>
+    <button id="send">send to the floor</button>
+    <div id="sent"></div>
+  </div>
+  <div id="help">drag pan &middot; wheel zoom &middot; click an agent to follow &middot; <kbd>O</kbd> orbit &middot; <kbd>Esc</kbd> release</div>
 </div>
 
 <script type="module">
 import * as THREE from "/vendor/three.module.js";
-import { buildOffice, wanderStep, refreshScreens } from "/scene.js";
+import { buildOffice, wanderStep, refreshScreens, seatAtTable, leaveTable } from "/scene.js";
 
 const RING = { idle: 0x2f3644, running: 0x4ad991, blocked: 0xd9c24a, meeting: 0x6fa8d1, error: 0xd95555 };
 const TERMINAL = new Set(["run_ended","meeting_ended","workflow_ended","decision_recorded","escalated","verify_result","budget_exhausted"]);
@@ -104,6 +132,10 @@ scene.add(fill);
 
 let avatars = new Map();
 let ambient = [];
+let meetingTable = null;
+let following = null;
+let selected = null;
+const meetings = new Map();
 const state = new Map();
 let stats = { events: 0, tokens: 0, spend: 0, cacheRead: 0, cacheWrite: 0, run: "-", history: [], feed: [] };
 let screensDirty = true;
@@ -157,11 +189,11 @@ function groundAt(e) {
   return panRay.ray.intersectPlane(GROUND, hit) ? hit : null;
 }
 const el = renderer.domElement;
-let dragging = false, lastX = 0, lastY = 0;
+let dragging = false, dragged = false, lastX = 0, lastY = 0;
 
 el.addEventListener("contextmenu", (e) => e.preventDefault());
 el.addEventListener("pointerdown", (e) => {
-  dragging = true; lastX = e.clientX; lastY = e.clientY;
+  dragging = true; dragged = false; lastX = e.clientX; lastY = e.clientY;
   anchor = groundAt(e);
   el.classList.add("grabbing");
   el.setPointerCapture(e.pointerId);
@@ -173,6 +205,7 @@ el.addEventListener("pointerup", (e) => {
 el.addEventListener("pointermove", (e) => {
   if (!dragging) { hoverTest(e); return; }
   const dx = e.clientX - lastX, dy = e.clientY - lastY;
+  if (Math.abs(dx) + Math.abs(dy) > 2) dragged = true;
   lastX = e.clientX; lastY = e.clientY;
 
   const rotating = freeCam && !e.shiftKey;
@@ -205,6 +238,52 @@ addEventListener("keydown", (e) => {
 
 const ray = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
+function pickAgent(e) {
+  const r = el.getBoundingClientRect();
+  ndc.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+  ndc.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+  ray.setFromCamera(ndc, camera);
+  let best = null, bestDist = Infinity;
+  for (const [role, a] of avatars) {
+    const hits = ray.intersectObject(a.hit, true);
+    if (hits.length && hits[0].distance < bestDist) { bestDist = hits[0].distance; best = role; }
+  }
+  return best;
+}
+
+const detail = document.getElementById("detail");
+function showDetail(role) {
+  selected = role;
+  if (!role) { detail.style.display = "none"; return; }
+  const a = avatars.get(role), st = deskState(role);
+  detail.innerHTML =
+    `<h2>${a.title}</h2>` +
+    `<div class="row"><span class="k">role</span><span>${role}</span></div>` +
+    `<div class="row"><span class="k">tier</span><span>${a.tier}</span></div>` +
+    `<div class="row"><span class="k">dept</span><span>${a.dept}</span></div>` +
+    `<div class="row"><span class="k">state</span><span>${st.ring}</span></div>` +
+    `<div class="row"><span class="k">tokens</span><span>${st.tokens.toLocaleString()}</span></div>` +
+    (st.tool ? `<div class="row"><span class="k">tool</span><span>${st.tool}</span></div>` : "") +
+    (st.summary ? `<div class="sum">${st.summary}</div>` : `<div class="sum k">no capsule yet</div>`) +
+    `<button id="unfollow">${following === role ? "stop following" : "follow"}</button>`;
+  detail.style.display = "block";
+  document.getElementById("unfollow").onclick = () => {
+    following = following === role ? null : role;
+    showDetail(role);
+  };
+}
+
+el.addEventListener("click", (e) => {
+  if (dragged) return;
+  const role = pickAgent(e);
+  following = role;
+  showDetail(role);
+});
+
+addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { following = null; showDetail(null); }
+});
+
 function hoverTest(e) {
   const r = el.getBoundingClientRect();
   ndc.x = ((e.clientX - r.left) / r.width) * 2 - 1;
@@ -286,6 +365,13 @@ function animate() {
     lastScreenPaint = t;
   }
 
+  if (following && avatars.has(following)) {
+    const p = avatars.get(following).person.position;
+    orbit.target.x += (p.x - orbit.target.x) * 0.08;
+    orbit.target.z += (p.z - orbit.target.z) * 0.08;
+    updateCamera();
+  }
+
   renderer.render(scene, camera);
 }
 
@@ -317,8 +403,24 @@ function apply(ev) {
       break;
     case "worker_exited": if (known) setRing(role, ev.data.outcome === "completed" ? "idle" : "error"); break;
     case "tool_call": if (st) st.tool = ev.data.tool || ""; break;
-    case "meeting_started": if (known) setRing(role, "meeting"); break;
-    case "meeting_ended": if (known) setRing(role, "running"); break;
+    case "meeting_started": {
+      const ids = (ev.data.participants || []).filter((r) => avatars.has(r));
+      meetings.set(ev.data.meeting_id, ids);
+      ids.forEach((r, i) => {
+        setRing(r, "meeting");
+        if (meetingTable) seatAtTable(avatars.get(r), meetingTable, i, ids.length);
+      });
+      break;
+    }
+    case "meeting_ended": {
+      const ids = meetings.get(ev.data.meeting_id) || [];
+      ids.forEach((r) => {
+        setRing(r, "idle");
+        leaveTable(avatars.get(r));
+      });
+      meetings.delete(ev.data.meeting_id);
+      break;
+    }
     case "escalated": if (known) setRing(role, "blocked"); break;
     case "capsule_submitted": if (st) st.summary = ev.data.summary || st.summary; break;
     case "verify_result": if (known) setRing(role, ev.data.verdict === "pass" ? "running" : "error"); break;
@@ -379,10 +481,63 @@ function connect() {
   };
 }
 
+const who = document.getElementById("who");
+const briefBox = document.getElementById("brief");
+const sent = document.getElementById("sent");
+const modeBtn = document.getElementById("mode-btn");
+let composeMode = "task";
+
+modeBtn.onclick = () => {
+  composeMode = composeMode === "task" ? "meeting" : "task";
+  modeBtn.textContent = composeMode;
+  who.multiple = composeMode === "meeting";
+  who.size = composeMode === "meeting" ? 5 : 1;
+  briefBox.placeholder = composeMode === "task"
+    ? "what should they do?"
+    : "what is the meeting about?";
+};
+
+fetch("/roles").then((r) => r.json()).then((rows) => {
+  who.innerHTML = rows
+    .map((r) => `<option value="${r.id}">${r.title}</option>`)
+    .join("");
+});
+
+document.getElementById("send").onclick = async () => {
+  const brief = briefBox.value.trim();
+  if (!brief) { sent.textContent = "write a brief first"; return; }
+  const picked = [...who.selectedOptions].map((o) => o.value);
+  if (!picked.length) { sent.textContent = "pick someone"; return; }
+
+  const url = composeMode === "task" ? "/task" : "/meeting";
+  const body = composeMode === "task"
+    ? { role: picked[0], brief }
+    : { kind: "arbitration", participants: picked, topic: brief };
+
+  if (composeMode === "meeting" && picked.length < 2) {
+    sent.textContent = "a meeting needs at least two";
+    return;
+  }
+
+  sent.textContent = "sending";
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    sent.textContent = res.ok ? "queued on the floor" : await res.text();
+    if (res.ok) briefBox.value = "";
+  } catch (err) {
+    sent.textContent = "the daemon is not accepting work";
+  }
+};
+
 fetch("/floor").then((r) => r.json()).then((f) => {
   const built = buildOffice(f, scene);
   avatars = built.avatars;
   ambient = built.ambient || [];
+  meetingTable = built.meetingTable;
   resize();
   refreshScreens(screenData());
   animate();

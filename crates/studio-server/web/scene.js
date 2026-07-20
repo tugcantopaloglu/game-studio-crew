@@ -560,6 +560,9 @@ export function buildOffice(floor, scene) {
       route: floor.lobby ? routeToLobby(room, floor, cx, cz, doorsByDept) : [],
       path: [],
       inLobby: false,
+      mode: "idle",
+      meetingSeat: null,
+      meetingFace: null,
       wait: rand() * 4,
       facing: 0,
       seed: rand() * 10,
@@ -567,9 +570,16 @@ export function buildOffice(floor, scene) {
   }
 
   buildShell(world, floor, cx, cz);
+  const table = floor.lobby
+    ? new THREE.Vector3(
+        floor.lobby.x - cx + floor.lobby.w / 2 - 2.2,
+        0.22,
+        floor.lobby.y - cz + floor.lobby.h / 2 + 0.4
+      )
+    : new THREE.Vector3(0, 0.22, 0);
   const ambient = buildAmbient(world, floor, cx, cz, 5);
 
-  return { world, avatars, ambient };
+  return { world, avatars, ambient, meetingTable: table };
 }
 
 function pointIn(rect, y) {
@@ -580,49 +590,99 @@ function pointIn(rect, y) {
   );
 }
 
+export function seatAtTable(a, table, index, total) {
+  const angle = (index / Math.max(1, total)) * Math.PI * 2;
+  a.meetingSeat = new THREE.Vector3(
+    table.x + Math.cos(angle) * 1.15,
+    a.person.position.y,
+    table.z + Math.sin(angle) * 0.95
+  );
+  a.meetingFace = Math.atan2(table.x - a.meetingSeat.x, table.z - a.meetingSeat.z);
+  a.path = [...a.route.map((v) => v.clone()), a.meetingSeat.clone()];
+  a.target.copy(a.path[0]);
+  a.inLobby = true;
+}
+
+export function leaveTable(a) {
+  a.meetingSeat = null;
+  a.meetingFace = null;
+  a.inLobby = false;
+  a.path = [...a.route.map((v) => v.clone()).reverse(), a.home.clone()];
+  a.target.copy(a.path[0]);
+}
+
 export function wanderStep(a, busy, dt, now) {
   const p = a.person.position;
+  const arrived = p.distanceTo(a.target) < 0.14;
 
-  if (busy) {
-    if (a.inLobby || a.path.length) {
-      a.path = a.route.length ? a.route.map((v) => v.clone()).reverse() : [];
-      a.inLobby = false;
+  if (a.meetingSeat) {
+    if (a.mode !== "meeting") {
+      a.mode = "meeting";
     }
-    a.target.copy(a.path.length ? a.path[0] : a.home);
-  } else if (p.distanceTo(a.target) < 0.14) {
-    if (a.path.length) {
+    if (arrived && a.path.length) {
       a.path.shift();
-      if (a.path.length) a.target.copy(a.path[0]);
-      else if (a.inLobby) a.target.copy(pointIn(a.lobby, p.y));
-      else a.target.copy(a.home);
-    } else if (now > a.wait) {
-      const goLobby = a.lobby && !a.inLobby && rand() < 0.35;
-      const comeBack = a.inLobby && rand() < 0.45;
-
-      if (goLobby) {
-        a.inLobby = true;
-        a.path = [...a.route.map((v) => v.clone()), pointIn(a.lobby, p.y)];
-        a.target.copy(a.path[0]);
-      } else if (comeBack) {
-        a.inLobby = false;
-        a.path = [...a.route.map((v) => v.clone()).reverse(), a.home.clone()];
+      a.target.copy(a.path.length ? a.path[0] : a.meetingSeat);
+    } else if (arrived && !a.path.length) {
+      a.target.copy(a.meetingSeat);
+    }
+  } else if (busy) {
+    if (a.mode !== "returning" && a.mode !== "desk") {
+      a.mode = "returning";
+      a.path = a.inLobby
+        ? [...a.route.map((v) => v.clone()).reverse(), a.home.clone()]
+        : [a.home.clone()];
+      a.inLobby = false;
+      a.target.copy(a.path[0]);
+    } else if (arrived) {
+      if (a.path.length) a.path.shift();
+      if (a.path.length) {
         a.target.copy(a.path[0]);
       } else {
-        a.target.copy(pointIn(a.inLobby ? a.lobby : a.bounds, p.y));
+        a.mode = "desk";
+        a.target.copy(a.home);
       }
-      a.wait = now + 2 + rand() * 7;
+    }
+  } else {
+    if (a.mode === "meeting" || a.mode === "returning") a.mode = "idle";
+    if (arrived) {
+      if (a.path.length) {
+        a.path.shift();
+        if (a.path.length) a.target.copy(a.path[0]);
+        else a.target.copy(pointIn(a.inLobby ? a.lobby : a.bounds, p.y));
+      } else if (now > a.wait) {
+        const goLobby = a.lobby && !a.inLobby && rand() < 0.35;
+        const comeBack = a.inLobby && rand() < 0.45;
+
+        if (goLobby) {
+          a.inLobby = true;
+          a.path = [...a.route.map((v) => v.clone()), pointIn(a.lobby, p.y)];
+          a.target.copy(a.path[0]);
+        } else if (comeBack) {
+          a.inLobby = false;
+          a.path = [...a.route.map((v) => v.clone()).reverse(), a.home.clone()];
+          a.target.copy(a.path[0]);
+        } else {
+          a.target.copy(pointIn(a.inLobby ? a.lobby : a.bounds, p.y));
+        }
+        a.wait = now + 2 + rand() * 7;
+      }
     }
   }
 
-  const dx = a.target.x - p.x, dz = a.target.z - p.z;
+  const dx = a.target.x - p.x;
+  const dz = a.target.z - p.z;
   const dist = Math.hypot(dx, dz);
   if (dist > 0.06) {
-    const speed = busy ? 2.2 : 0.85;
+    const speed = a.mode === "returning" ? 2.2 : a.mode === "meeting" ? 1.5 : 0.85;
     const step = Math.min(dist, speed * dt);
     p.x += (dx / dist) * step;
     p.z += (dz / dist) * step;
     a.facing = Math.atan2(dx, dz);
     return true;
+  }
+
+  if (a.meetingSeat && a.meetingFace !== null && a.meetingFace !== undefined) {
+    a.facing = a.meetingFace;
   }
   return false;
 }
@@ -725,6 +785,7 @@ export function buildAmbient(parent, floor, cx, cz, count = 5) {
       person, body: body.group,
       home: start.clone(), bounds: rect, lobby: rect,
       target: start.clone(), route: [], path: [], inLobby: true,
+      mode: "idle", meetingSeat: null, meetingFace: null,
       door: start.clone(),
       wait: rand() * 6, facing: 0, seed: rand() * 10,
     });

@@ -2,7 +2,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -15,16 +15,48 @@ pub const VOXEL_JS: &str = include_str!("../web/voxel.js");
 pub const SCENE_JS: &str = include_str!("../web/scene.js");
 pub const THREE_JS: &str = include_str!("../web/vendor/three.module.js");
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskRequest {
+    pub role: String,
+    pub brief: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MeetingRequest {
+    pub kind: String,
+    pub participants: Vec<String>,
+    pub topic: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum StudioCommand {
+    Task(TaskRequest),
+    Meeting(MeetingRequest),
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<Store>,
     pub live: broadcast::Sender<Envelope>,
+    pub commands: Option<std::sync::mpsc::Sender<StudioCommand>>,
 }
 
 impl AppState {
     pub fn new(store: Arc<Store>) -> Self {
         let (live, _) = broadcast::channel(1024);
-        Self { store, live }
+        Self { store, live, commands: None }
+    }
+
+    pub fn with_commands(mut self, tx: std::sync::mpsc::Sender<StudioCommand>) -> Self {
+        self.commands = Some(tx);
+        self
+    }
+
+    pub fn dispatch(&self, cmd: StudioCommand) -> Result<(), String> {
+        match &self.commands {
+            None => Err("this server is read only; start it with studiod studio".to_string()),
+            Some(tx) => tx.send(cmd).map_err(|_| "the studio runner is gone".to_string()),
+        }
     }
 
     pub fn publish(&self, event: Envelope) {
@@ -50,6 +82,9 @@ pub fn router(state: AppState) -> Router {
         .route("/runs/:run/snapshot", get(snapshot))
         .route("/runs/:run/events", get(events))
         .route("/ws", get(ws_upgrade))
+        .route("/task", post(submit_task))
+        .route("/meeting", post(convene_meeting))
+        .route("/roles", get(roles))
         .with_state(state)
 }
 
@@ -73,6 +108,60 @@ async fn three_js() -> impl IntoResponse {
         ],
         THREE_JS,
     )
+}
+
+async fn roles() -> impl IntoResponse {
+    let rows: Vec<serde_json::Value> = studio_agents::REGISTRY
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "title": r.title,
+                "tier": r.tier,
+                "department": r.department.id(),
+                "escalates_to": r.escalates_to,
+            })
+        })
+        .collect();
+    axum::Json(rows)
+}
+
+async fn submit_task(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<TaskRequest>,
+) -> Response {
+    if studio_agents::role(&req.role).is_none() {
+        return (StatusCode::BAD_REQUEST, format!("unknown role {}", req.role)).into_response();
+    }
+    if req.brief.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "a task needs a brief".to_string()).into_response();
+    }
+    match state.dispatch(StudioCommand::Task(req)) {
+        Ok(()) => (StatusCode::ACCEPTED, "queued".to_string()).into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
+    }
+}
+
+async fn convene_meeting(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<MeetingRequest>,
+) -> Response {
+    if req.participants.len() < 2 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "a meeting needs at least two participants".to_string(),
+        )
+            .into_response();
+    }
+    for p in &req.participants {
+        if studio_agents::role(p).is_none() {
+            return (StatusCode::BAD_REQUEST, format!("unknown role {p}")).into_response();
+        }
+    }
+    match state.dispatch(StudioCommand::Meeting(req)) {
+        Ok(()) => (StatusCode::ACCEPTED, "queued".to_string()).into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
+    }
 }
 
 async fn floor() -> impl IntoResponse {
