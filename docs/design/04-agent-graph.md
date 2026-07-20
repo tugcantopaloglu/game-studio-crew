@@ -10,7 +10,7 @@ The original crew had **49** agents. The dominant cause was **triplication**: a 
 Two forces set the number:
 
 1. **Distinctness.** A role earns its place only if its charter, tool allowlist, or escalation position differs materially from every other role. Roles that differed only by engine were merged.
-2. **Cache economics.** Each role is a distinct frozen system-prompt prefix. Prompt caching is keyed on exact prefix bytes with a 5-minute TTL. Every extra role fragments the cache window, more distinct prefixes, fewer same-prefix spawns inside any 5-minute span, colder caches, more `cache_creation` billing. Fewer roles means hotter caches. This is quantified in [ADR 0002](adr/0002-thirteen-roles.md).
+2. **Cache economics.** Each role is a distinct frozen system-prompt prefix, keyed on exact prefix bytes **plus its `--tools` allowlist**. Every extra role mints another prefix, and every prefix pays a **2.0× write premium** the first time it is spawned cold. Fewer roles means fewer cold starts. The measured 1-hour TTL means warmth is rarely the binding constraint; the cost of cold starts is. Quantified in [ADR 0002](adr/0002-thirteen-roles.md).
 
 Rare specialisms (e.g. shader optimization, netcode, localization) are **not** standing roles. They are **overlay fragments** appended to a base role's volatile suffix when a task needs them. See [02 §append overlays](02-context-engine.md). An overlay never changes the frozen prefix, so it never fragments the cache.
 
@@ -63,7 +63,12 @@ graph TD
 
 ## Tool allowlists
 
-Workers run `--bare --permission-mode dontAsk --allowedTools <list>`. Under `--bare` there is no ambient MCP; the orchestrator's stdio MCP tools (prefixed `mcp__studio__`) are attached explicitly (or delivered via the outbox fallback, [00 §unverified](00-overview.md#two-unverified-behaviors-m1-settles-these-first)). Every role gets the **orchestrator tools**; filesystem and shell access is scoped by tier and department.
+Workers run `--setting-sources "" --tools <list> --permission-mode dontAsk --allowedTools <list>` ([ADR 0004](adr/0004-explicit-context-control-not-bare.md)). The orchestrator's stdio MCP tools (prefixed `mcp__studio__`) are attached explicitly via `--mcp-config --strict-mcp-config`, which M1 confirmed works. Every role gets the **orchestrator tools**; filesystem and shell access is scoped by tier and department.
+
+**The allowlist is a cost surface, not only a permissions surface.** `--tools` schemas are the dominant term in a worker's cached prefix ([02](02-context-engine.md)): the same call costs 22572 tokens with the default tool set and 184 with an empty one. Two consequences bind this table:
+
+1. **A role's allowlist sets its per-spawn token floor**, before any charter byte counts. The coordination-only roles below (`producer`, `studio_director`) are consequently the cheapest seats in the studio to spawn, which is a useful counterweight to Tier-1 sitting on the expensive model.
+2. **Allowlists fragment the cache exactly as charters do**, because the tool set is part of the cache key. Two roles that share a charter but differ by one tool are two prefixes. Allowlists are therefore **shared across roles wherever the permission story allows it**, and the role-class rows below are deliberately coarse for that reason rather than tuned per role.
 
 Orchestrator MCP tools (all roles): `mcp__studio__capsule_submit`, `mcp__studio__decision_search`, `mcp__studio__symbol_lookup`, `mcp__studio__escalate`, `mcp__studio__request_meeting`.
 

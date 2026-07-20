@@ -13,16 +13,19 @@ One task → one `claude` invocation, assembled from the layered prompt ([02](02
 
 ```
 claude -p
-  --bare
-  --system-prompt-file <frozen L0..L2 charter>   # 02; prefix_hash recorded in sessions (03)
+  --setting-sources ""                            # no settings, no CLAUDE.md discovery (ADR 0004)
+  --system-prompt-file <frozen L0..L2 charter>    # 02; prefix_hash recorded in sessions (03)
+  --tools <role allowlist>                        # the primary token lever; part of prefix identity (02, 04)
   --model <fable|opus|haiku>                      # from role tier (04); haiku for the summarizer only
   --effort <low|medium|high|xhigh|max>            # role floor, possibly degraded (06)
   --session-id <new uuid>                         # or --resume for repair/recovery
-  --permission-mode dontAsk --allowedTools <role allowlist>  # 04
-  --output-format stream-json --include-partial-messages
-  --mcp-config <orchestrator stdio MCP>           # if it attaches under --bare (unverified, 00)
+  --permission-mode dontAsk --allowedTools <role allowlist + mcp__studio__*>  # 04
+  --output-format stream-json --include-partial-messages --verbose
+  --mcp-config <orchestrator stdio MCP> --strict-mcp-config   # attaches; confirmed M1 (00)
   < <L3 task brief on stdin>
 ```
+
+`--bare` is **not** used: it reads auth strictly from an API key and fails `Not logged in` against a subscription ([ADR 0004](adr/0004-explicit-context-control-not-bare.md)). `--safe-mode` is not used either: it preserves auth but unconditionally disables MCP. `--verbose` is mandatory with `stream-json`, and stdin must be redirected explicitly.
 
 Pre-spawn, the supervisor consults the **budget gate** ([06](06-budget-governance.md)): projected input (known prefix size + L3 size) plus an output reserve must fit under the task and sprint budgets, or the spawn is degraded/refused before any tokens are paid. On spawn it writes the `sessions` row ([03](03-state-store.md)) and emits `worker_spawned` ([05](05-event-protocol.md)).
 

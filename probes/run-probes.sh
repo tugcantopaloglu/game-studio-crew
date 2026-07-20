@@ -6,7 +6,7 @@ OUT="$HERE/out"
 mkdir -p "$OUT"
 
 MODEL="${PROBE_MODEL:-opus}"
-COMMON=(--bare --output-format stream-json --include-partial-messages --verbose --permission-mode dontAsk)
+COMMON=(--setting-sources "" --output-format stream-json --include-partial-messages --verbose --permission-mode dontAsk)
 
 if [ -n "${CLAUDECODE:-}${CLAUDE_CODE_CHILD_SESSION:-}" ] && [ -z "${PROBE_FORCE:-}" ]; then
   echo "REFUSING TO RUN: this shell is inside a Claude Code session."
@@ -29,29 +29,40 @@ echo
 node "$HERE/gen-prefix.js" || exit 1
 echo
 
+if command -v cygpath >/dev/null 2>&1; then
+  SERVER_JS="$(cygpath -m "$HERE/mcp-probe-server.js")"
+else
+  SERVER_JS="$HERE/mcp-probe-server.js"
+fi
+
 cat > "$OUT/mcp.json" <<JSON
 {
   "mcpServers": {
     "probe": {
       "command": "node",
-      "args": ["$HERE/mcp-probe-server.js"]
+      "args": ["$SERVER_JS"]
     }
   }
 }
 JSON
 
+echo "mcp server path: $SERVER_JS"
+echo
+
 echo "=== PROBE A: stream shape and interim usage ==="
 claude "${COMMON[@]}" --model "$MODEL" \
-  -p "Reply with exactly the word: pong" \
+  --system-prompt-file "$HERE/prefix.txt" --tools "" \
+  -p "Count from 1 to 20, one number per line." \
   < /dev/null > "$OUT/a.ndjson" 2>&1
 echo "exit=$?"
 node "$HERE/analyze.js" shape "$OUT/a.ndjson"
 echo
 
-echo "=== PROBE B: --mcp-config under --bare ==="
+echo "=== PROBE B: MCP attachment ==="
 claude "${COMMON[@]}" --model "$MODEL" \
-  --mcp-config "$OUT/mcp.json" \
-  --allowedTools "mcp__probe__ping" \
+  --system-prompt-file "$HERE/prefix.txt" \
+  --mcp-config "$OUT/mcp.json" --strict-mcp-config \
+  --tools "Read" --allowedTools "mcp__probe__ping,Read" \
   -p "Call the ping tool exactly once, then reply with whatever text it returned." \
   < /dev/null > "$OUT/b.ndjson" 2>&1
 echo "exit=$?"
@@ -62,6 +73,7 @@ echo "=== PROBE C: prompt cache across separate subprocesses ==="
 for n in 1 2; do
   claude "${COMMON[@]}" --model "$MODEL" \
     --system-prompt-file "$HERE/prefix.txt" \
+    --tools "Read,Grep,Glob" \
     -p "Reply with exactly the word: pong" \
     < /dev/null > "$OUT/c$n.ndjson" 2>&1
   echo "run $n exit=$?"

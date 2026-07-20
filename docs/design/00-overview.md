@@ -42,8 +42,8 @@ graph LR
     MCP[MCP server<br/>stdio]
   end
   subgraph Workers["claude CLI workers (stateless)"]
-    W1["claude -p --bare<br/>--system-prompt-file"]
-    W2["claude -p --bare<br/>..."]
+    W1["claude -p --system-prompt-file<br/>--tools --setting-sources ''"]
+    W2["claude -p ..."]
   end
   ENG[engine drivers<br/>Unity / UE5 / Godot]
   UI[browser studio floor]
@@ -87,28 +87,30 @@ Two **separate** SQLite databases: the **state store** ([03](03-state-store.md))
 
 ## Verified CLI facts the design rests on
 
-Confirmed against `code.claude.com` docs this session. Every doc that leans on the CLI cites this list rather than re-deriving it.
+**Measured by the M1 probes ([`probes/`](../../probes/README.md)), not read from documentation.** Every doc that leans on the CLI cites this list rather than re-deriving it. A fact here is not "verified" until a probe has executed it and its exit code has been read; the `--bare` reversal below is what that rule was written from.
 
-- `claude -p --output-format stream-json --include-partial-messages` streams NDJSON: `system`/`init`, `stream_event` with `content_block_delta`, tool use, tool result, and a terminal `result`.
-- **`--bare`** skips auto-loading of `CLAUDE.md`, hooks, skills, plugins and MCP. This is the **primary token lever**.
+- `claude -p --output-format stream-json --include-partial-messages --verbose` streams NDJSON: `system`/`init`, `stream_event` (`message_start`, `content_block_start`/`_delta`/`_stop`, `message_delta`/`_stop`), `assistant`, `rate_limit_event`, and a terminal `result`. `stream-json` **requires `--verbose`** or the CLI errors out.
+- **`--bare` is unusable here.** It reads auth *strictly* from `ANTHROPIC_API_KEY` or `apiKeyHelper`; OAuth and keychain are never read, so it fails `Not logged in` against a subscription. Context is stripped explicitly instead. See [ADR 0004](adr/0004-explicit-context-control-not-bare.md).
+- **The primary token lever is `--tools`.** Built-in tool schemas dominate a default invocation: replacing the system prompt alone leaves ~19.5k input tokens; emptying the tool list drops the same call to **184**. `--setting-sources ""` suppresses settings and `CLAUDE.md` discovery.
 - `--system-prompt-file` replaces the system prompt entirely. `--model` accepts `fable`, `opus` and `haiku`. `--effort low|medium|high|xhigh|max`.
 - `--session-id`, `--resume`, `--fork-session`. Sessions persist as JSONL under `~/.claude/projects/<slug>/`; lookup is scoped to the working directory.
-- The terminal `result` carries `usage` (`input`, `output`, `cache_read`, `cache_creation`) plus `cost_usd` and `modelUsage`.
-- Prompt caching is automatic, keyed on **exact system-prompt bytes + model**, TTL **5 minutes**. Identical prefixes across separate subprocesses **do** hit cache.
-- `--permission-mode dontAsk` with `--allowedTools` runs fully non-interactive.
-- A Rust process can serve **MCP over stdio**, so workers can call back into the orchestrator.
+- The terminal `result` carries `usage` (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`) plus `total_cost_usd`, `modelUsage`, `session_id` and `terminal_reason`.
+- Prompt caching is automatic, keyed on **exact system-prompt bytes + tool set + model**. Identical prefixes across separate subprocesses **do** hit cache: measured **8867 tokens written cold, 8867 read warm, a 17.4× cost reduction**. The tool allowlist is part of the cached identity, not just the charter.
+- Cache TTL is **1 hour** (`cache_creation.ephemeral_1h`), not 5 minutes. The write premium is **2.0× base**, measured exactly ($0.0888 against a $0.0443 uncached baseline), not the 1.25× that a 5-minute TTL would cost.
+- `--permission-mode dontAsk` with `--allowedTools` runs fully non-interactive. Stdin must be redirected explicitly or the CLI waits on it.
+- A Rust process can serve **MCP over stdio**, and `--mcp-config --strict-mcp-config` attaches it under the configuration above (`status: "connected"`, tool invoked, value returned). `--safe-mode` does **not** attach MCP under any variant probed.
 
-### Two unverified behaviors (M1 settles these first)
+### The two formerly-unverified behaviors (settled in M1)
 
-Both have designed fallbacks so the architecture does not depend on the answer:
+Both resolved in the favorable direction. Their fallbacks remain documented in [13](13-risks.md) as contingencies but are **not on the build path**:
 
-1. **Does `--mcp-config` still attach under `--bare`?** If not, the fallback is a **watched outbox directory**: workers write capsules to a file the daemon watches via `notify`. See [02](02-context-engine.md) and [13](13-risks.md).
-2. **Do streamed events carry usable interim `usage` deltas?** If not, the fallback is **EMA-based estimation** for in-flight budgeting that **settles to exact numbers at the `result` event**. See [06](06-budget-governance.md) and [13](13-risks.md).
+1. **Does `--mcp-config` attach?** **Yes**, given [ADR 0004](adr/0004-explicit-context-control-not-bare.md)'s flag set. The watched-outbox fallback is not needed. (It does *not* attach under `--safe-mode`, which is why `--safe-mode` was rejected.)
+2. **Do streamed events carry usable interim `usage` deltas?** **Yes.** `stream_event`/`message_start` carries a full `usage` block, and four pre-`result` events carry usage in a short turn. In-flight budgeting reads real numbers; the EMA fallback is not needed. See [06](06-budget-governance.md).
 
 ## Milestone order
 
-- **M0 (this phase):** design documents only. Reviewed and iterated before any code.
-- **M1:** supervisor + state store + ledger. Spawn one `--bare` worker; prove (a) usage capture from `result`, (b) cache hit on a second same-role spawn within the TTL, (c) clean process reaping on Windows. **M1 exists specifically to settle the two unverified CLI behaviors** before anything else is built on them.
+- **M0 (complete):** design documents only. Reviewed and iterated before any code.
+- **M1 (in progress):** CLI probes **done**, all three verdicts settled ([`probes/`](../../probes/README.md), [ADR 0004](adr/0004-explicit-context-control-not-bare.md)). Remaining: supervisor + state store + ledger. Spawn one worker; prove (a) usage capture from `result`, (b) cache hit on a second same-role spawn within the TTL, (c) clean process reaping on Windows. **The probes existed specifically to settle the unverified CLI behaviors** before anything else was built on them, and they overturned one.
 - **M2:** context engine: frozen charters, capsules, summarization ladder.
 - **M3:** one engine end-to-end (Godot first: fully headless, no editor lock) through verify + repair loop.
 - **M4:** event protocol + minimal studio floor (avatars, status rings, event feed).
@@ -136,4 +138,4 @@ Start here, then [02 context-engine](02-context-engine.md) for the token story, 
 | 11 | [index-and-bootstrap](11-index-and-bootstrap.md) | **index** SQLite schema, detection |
 | 12 | [visual-workspace](12-visual-workspace.md) | studio floor, event→visual mapping |
 | 13 | [risks](13-risks.md) | consolidated risk register |
-| ADR | [0001](adr/0001-claude-cli-as-worker.md) · [0002](adr/0002-thirteen-roles.md) · [0003](adr/0003-top-down-not-isometric.md) | decision records |
+| ADR | [0001](adr/0001-claude-cli-as-worker.md) · [0002](adr/0002-thirteen-roles.md) · [0003](adr/0003-top-down-not-isometric.md) · [0004](adr/0004-explicit-context-control-not-bare.md) | decision records |

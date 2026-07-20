@@ -19,9 +19,16 @@ A role earns its place only if its **charter, tool allowlist, or escalation posi
 
 ## The cache-fragmentation economics
 
-This is the decisive argument beyond mere tidiness. Each role is a **distinct frozen system-prompt prefix** ([02](../02-context-engine.md)), and prompt caching is keyed on exact prefix bytes with a **5-minute TTL** ([02](../02-context-engine.md)). Within any 5-minute window, spawns that share a prefix hit cache; spawns of a *different* prefix pay the ~1.25× cache-write premium.
+This is the decisive argument beyond mere tidiness, though **M1 measurements reweighted it**. Each role is a **distinct frozen system-prompt prefix** ([02](../02-context-engine.md)), and prompt caching is keyed on exact prefix bytes plus the tool set. Spawns that share a prefix hit cache; spawns of a *different* prefix pay the cache-write premium.
 
-More roles → more distinct prefixes → fewer same-prefix spawns inside any 5-minute window → **colder caches and more `cache_creation` billing.** Concretely: with 13 roles the studio churns through 13 possible prefixes, so a busy sprint keeps most of them warm; with 49 (and per-engine triplication) the same workload is spread across 3× as many prefixes, so far fewer land inside a live window. Fewer roles is not just cleaner. It is *cheaper per token*, directly, via cache warmth. This economic pressure is why overlays (which never touch the frozen prefix) are the right home for specialisms: an overlay adds capability without minting a new prefix.
+Two measured corrections pull in opposite directions and leave the conclusion standing:
+
+- **The TTL is 1 hour, not 5 minutes.** This *weakens* the window argument considerably. With an hour of warmth, even 49 prefixes would keep many of them live across a busy sprint, so "fewer roles fit the window" is a much smaller effect than this ADR originally claimed.
+- **The write premium is 2.0×, not 1.25×**, and the tool allowlist is part of the cache key. This *strengthens* the argument: every cold prefix now costs double what was assumed, and roles fragment the cache along two axes (charter *and* allowlist), not one.
+
+Net: the economics still favor fewer roles, but the honest reason is now **the cost of each cold start** rather than **the scarcity of the window**. More roles → more distinct prefixes → more cold starts at 2.0× → more `cache_creation` billing. This is why overlays (which never touch the frozen prefix) remain the right home for specialisms: an overlay adds capability without minting a new prefix, and therefore without ever paying a 2.0× write.
+
+Had the TTL correction arrived alone, 13 would be a weaker conclusion than this ADR asserted. It did not arrive alone.
 
 ## What we give up
 

@@ -3,23 +3,27 @@
 > **Status:** v0.1, 2026-07-20, design phase, no runtime code.
 > Consolidated risk register. Each risk names where it's addressed and its mitigation or fallback. This is the honest list of what could break.
 
-## The two unverified CLI behaviors (settled first in M1)
+## The two unverified CLI behaviors: both settled in M1, both closed
 
-These are the only risks the whole architecture is *structurally* exposed to, which is why M1 exists to settle them before anything is built on them ([00](00-overview.md)).
-
-| # | Risk | Impact | Fallback (already designed) |
+| # | Risk | Verdict | Status |
 |---|---|---|---|
-| R1 | **`--mcp-config` may not attach under `--bare`.** Capsules and orchestrator callbacks depend on the worker reaching the daemon's stdio MCP. | Workers can't submit capsules the primary way. | **Watched outbox directory** ([00](00-overview.md), [02](02-context-engine.md)): workers write capsules to a file the daemon watches via `notify`. Schema validation and truncation are unchanged; only the transport differs. |
-| R2 | **Streamed events may not carry usable interim `usage` deltas.** In-flight budget enforcement wants live token counts. | In-flight enforcement is blind mid-worker. | **EMA-based estimation that settles to exact at the terminal `result`** ([06](06-budget-governance.md)): worst case is a slightly stale in-flight number, never a wrong charge. |
+| R1 | **`--mcp-config` may not attach.** Capsules and orchestrator callbacks depend on the worker reaching the daemon's stdio MCP. | **Attaches.** `init.mcp_servers: [{"name":"probe","status":"connected"}]`; the tool was advertised, invoked, and returned its value. | **Closed.** The watched-outbox fallback is specified but **not built**. It returns to the table only if MCP attachment regresses. |
+| R2 | **Streamed events may not carry usable interim `usage` deltas.** In-flight budget enforcement wants live token counts. | **They carry them.** `stream_event`/`message_start` has a full `usage` block; four pre-`result` events carried usage in a short turn. | **Closed.** The EMA fallback is specified but **not built** ([06](06-budget-governance.md)). |
 
-Both fallbacks are fully specified, so a "no" on either is a known, bounded degradation. Not a redesign.
+## R0: the risk that materialized
+
+| # | Risk | Where | Outcome |
+|---|---|---|---|
+| R0 | **`--bare` is incompatible with subscription auth.** It reads auth strictly from `ANTHROPIC_API_KEY`/`apiKeyHelper`; OAuth and keychain are never read. The design named it "the primary token lever" across four documents and an ADR. | [00](00-overview.md), [01](01-orchestrator-core.md), [02](02-context-engine.md), [04](04-agent-graph.md), [ADR 0001](adr/0001-claude-cli-as-worker.md) | **Materialized, and was not on any risk list.** Resolved by [ADR 0004](adr/0004-explicit-context-control-not-bare.md): explicit context control (`--setting-sources ""`, `--system-prompt-file`, `--tools`) reaches a lower token floor than `--bare` promised, with OAuth intact. |
+
+R0 is listed after the fact because the lesson is the register's most valuable entry: **the risk that hurt was the one recorded as a verified fact.** `--bare` was verified as *documented* behavior and never executed. Every CLI fact in [00](00-overview.md) is now probe-measured, and the standing rule is that a fact the architecture rests on is unverified until a probe has run it and the exit code has been read.
 
 ## Upstream / opaque risks (we don't control these)
 
 | # | Risk | Where | Mitigation |
 |---|---|---|---|
 | R3 | **Opaque subscription rate limits.** The TPM/RPM ceiling is not published and can change. | [01](01-orchestrator-core.md) | **AIMD token bucket** probes for headroom (additive increase) and backs off on 429 (multiplicative decrease); self-heals when the limit shifts. No hard-coded limit to be wrong about. |
-| R4 | **Cache opacity upstream of our prefix.** We control our prefix bytes, but caching behavior (eviction, exact minimums, cross-process warmth) is the provider's. | [02](02-context-engine.md) | Byte-stability rules + padding past the confirmed minimums (Opus 4.8 4096, Fable 5 2048); the **per-role `cache_hit_ratio`** ([03](03-state-store.md)) turns a caching regression into a visible, alarmed metric rather than a silent cost leak. We measure, we don't assume. |
+| R4 | **Cache opacity upstream of our prefix.** We control our prefix bytes, but caching behavior (eviction, exact minimums, TTL, write premium) is the provider's and can move without notice. | [02](02-context-engine.md) | Partly retired by measurement: cross-process warmth is **confirmed** (17.4× warm), TTL is **1 hour**, the write premium is **2.0×**. The minimums (Opus 4096, Fable 2048) remain **documented but unprobed**, so padding stays in. The **per-role `cache_hit_ratio`** ([03](03-state-store.md)) turns any regression in the provider's behavior into a visible, alarmed metric rather than a silent cost leak. A TTL or premium change would show up there first. |
 
 ## Engine-specific risks
 

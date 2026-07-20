@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/studio-events",
+    "crates/studio-store",
+    "crates/studio-context",
+    "crates/studio-core",
+    "crates/studiod",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+
+[workspace.dependencies]
+studio-events = { path = "crates/studio-events" }
+studio-store = { path = "crates/studio-store" }
+studio-context = { path = "crates/studio-context" }
+studio-core = { path = "crates/studio-core" }
+
+anyhow = "1"
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ulid = "1"
+
+rusqlite = { version = "0.32", features = ["bundled"] }
