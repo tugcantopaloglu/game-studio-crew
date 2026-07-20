@@ -624,6 +624,7 @@ export function buildOffice(floor, scene) {
       )
     : new THREE.Vector3(0, 0.22, 0);
   const ambient = buildAmbient(world, floor, cx, cz, 5);
+  buildBoard(world, table);
 
   return { world, avatars, ambient, meetingTable: table };
 }
@@ -634,6 +635,86 @@ function pointIn(rect, y) {
     y,
     rect.z0 + rand() * Math.max(0.1, rect.z1 - rect.z0)
   );
+}
+
+let boardMesh = null;
+let boardCtx = null;
+let boardTex = null;
+
+export function buildBoard(parent, table) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 340; canvas.height = 190;
+  boardCtx = canvas.getContext("2d");
+  boardTex = new THREE.CanvasTexture(canvas);
+  boardTex.magFilter = THREE.NearestFilter;
+  boardTex.colorSpace = THREE.SRGBColorSpace;
+
+  const g = new THREE.Group();
+  g.position.set(table.x, 0.2, table.z - 2.1);
+  parent.add(g);
+
+  const frame = new THREE.Mesh(
+    new THREE.BoxGeometry(2.5, 1.5, 0.1),
+    new THREE.MeshLambertMaterial({ color: 0x1a1f29 })
+  );
+  frame.position.y = 1.25;
+  g.add(frame);
+
+  const face = new THREE.Mesh(
+    new THREE.PlaneGeometry(2.32, 1.32),
+    new THREE.MeshBasicMaterial({ map: boardTex, transparent: true })
+  );
+  face.position.set(0, 1.25, 0.06);
+  g.add(face);
+
+  for (const x of [-1.2, 1.2]) {
+    const leg = new THREE.Mesh(
+      new THREE.BoxGeometry(0.09, 1.4, 0.09),
+      new THREE.MeshLambertMaterial({ color: 0x2b3240 })
+    );
+    leg.position.set(x, 0.7, 0);
+    g.add(leg);
+  }
+
+  boardMesh = g;
+  g.visible = false;
+  return g;
+}
+
+export function showBoard(kind, topic, participants, chair) {
+  if (!boardMesh || !boardCtx) return;
+  const x = boardCtx;
+  x.fillStyle = "#e9ecf2";
+  x.fillRect(0, 0, 340, 190);
+  x.fillStyle = "#c9502e";
+  x.fillRect(0, 0, 340, 5);
+
+  x.fillStyle = "#2b3240";
+  x.font = "700 17px ui-monospace, monospace";
+  x.fillText((kind || "meeting").toUpperCase(), 14, 32);
+
+  x.font = "600 14px ui-monospace, monospace";
+  x.fillStyle = "#3d4657";
+  const words = String(topic || "").split(/s+/);
+  let line = "", y = 60;
+  for (const w of words) {
+    if ((line + " " + w).length > 34) { x.fillText(line, 14, y); y += 20; line = w; }
+    else line = line ? line + " " + w : w;
+    if (y > 132) break;
+  }
+  if (line && y <= 132) x.fillText(line, 14, y);
+
+  x.fillStyle = "#6a7385";
+  x.font = "600 12px ui-monospace, monospace";
+  x.fillText((participants || []).join(", ").slice(0, 44), 14, 162);
+  if (chair) { x.fillStyle = "#c9502e"; x.fillText("chair: " + chair, 14, 180); }
+
+  boardTex.needsUpdate = true;
+  boardMesh.visible = true;
+}
+
+export function hideBoard() {
+  if (boardMesh) boardMesh.visible = false;
 }
 
 export function seatAtTable(a, table, index, total) {

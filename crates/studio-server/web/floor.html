@@ -58,12 +58,38 @@
     padding: 8px 10px; font-size: 12px; z-index: 5; }
   #tip b { display: block; margin-bottom: 3px; }
   #tip .s { color: var(--dim); }
+  #track { position: absolute; left: 12px; bottom: 12px; right: 12px; display: none;
+    background: #0a0d13ee; border: 1px solid var(--line); border-radius: 6px; padding: 9px 12px; z-index: 4; }
+  #track .name { color: var(--dim); font-size: 11px; margin-bottom: 6px; }
+  #track .lane { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .chip { padding: 3px 8px; border-radius: 4px; border: 1px solid var(--line);
+    background: #131822; color: var(--dim); font-size: 11px; }
+  .chip.active { border-color: var(--running); color: var(--text); }
+  .chip.done { color: var(--text); }
+  .chip.skipped { opacity: .45; text-decoration: line-through; }
+  .gate { font-size: 11px; padding: 3px 7px; border-radius: 4px; border: 1px solid var(--line); }
+  .gate.pass { color: var(--running); border-color: #23483a; }
+  .gate.fail { color: var(--error); border-color: #4a2626; }
+  .arrow { color: #39414f; }
+  #minimap { position: absolute; right: 12px; bottom: 12px; z-index: 4;
+    background: #0a0d13cc; border: 1px solid var(--line); border-radius: 6px; padding: 6px; }
+  #scrub { position: absolute; left: 12px; top: 44px; z-index: 4; display: flex; align-items: center;
+    gap: 8px; background: #0a0d13cc; border: 1px solid var(--line); border-radius: 4px; padding: 5px 9px; }
+  #scrub input { width: 190px; }
+  #scrub .lbl { color: var(--dim); font-size: 11px; min-width: 74px; }
+  #scrub button { font: inherit; font-size: 11px; cursor: pointer; background: #1d2431;
+    color: var(--text); border: 1px solid var(--line); border-radius: 3px; padding: 2px 7px; }
   #cam { position: absolute; left: 12px; top: 12px; color: var(--dim); font-size: 11px;
     background: #08090dcc; border: 1px solid var(--line); border-radius: 4px; padding: 4px 8px; }
 </style>
 </head>
 <body>
-<div id="stage"><div id="tip"></div><div id="cam">isometric</div><div id="detail"></div></div>
+<div id="stage">
+  <div id="tip"></div><div id="cam">isometric</div><div id="detail"></div>
+  <div id="scrub"><span class="lbl">live</span><input id="seek" type="range" min="0" max="0" value="0"><button id="tolive">live</button></div>
+  <div id="track"><div class="name"></div><div class="lane"></div></div>
+  <canvas id="minimap" width="150" height="98"></canvas>
+</div>
 <div id="side">
   <header><h1>Studio Floor</h1><div id="conn">connecting</div></header>
   <div id="stats">
@@ -88,7 +114,7 @@
 
 <script type="module">
 import * as THREE from "/vendor/three.module.js";
-import { buildOffice, wanderStep, refreshScreens, seatAtTable, leaveTable } from "/scene.js";
+import { buildOffice, wanderStep, refreshScreens, seatAtTable, leaveTable, showBoard, hideBoard } from "/scene.js";
 
 const RING = { idle: 0x2f3644, running: 0x4ad991, blocked: 0xd9c24a, meeting: 0x6fa8d1, error: 0xd95555 };
 const TERMINAL = new Set(["run_ended","meeting_ended","workflow_ended","decision_recorded","escalated","verify_result","budget_exhausted"]);
@@ -136,10 +162,14 @@ let meetingTable = null;
 let following = null;
 let selected = null;
 const meetings = new Map();
+const allEvents = [];
+let scrubbing = false;
+let workflow = null;
 const state = new Map();
 let stats = { events: 0, tokens: 0, spend: 0, cacheRead: 0, cacheWrite: 0, run: "-", history: [], feed: [] };
 let screensDirty = true;
 let lastScreenPaint = 0;
+let lastMini = 0;
 
 function screenData() {
   const crewByDept = {};
@@ -359,6 +389,8 @@ function animate() {
       a.body.rotation.z = 0;
     }
   }
+  if (t - lastMini > 0.25) { renderMinimap(); lastMini = t; }
+
   if (screensDirty && t - lastScreenPaint > 0.4) {
     refreshScreens(screenData());
     screensDirty = false;
@@ -384,7 +416,30 @@ function setRing(role, name) {
 
 const roleOf = (actor) => (actor || "").split("#")[0];
 
-function apply(ev) {
+function resetState() {
+  for (const [role, a] of avatars) {
+    state.set(role, { ring: "idle", summary: "", tool: "", tokens: 0 });
+    a.ringMat.color.setHex(RING.idle);
+    if (a.meetingSeat) leaveTable(a);
+  }
+  meetings.clear();
+  hideBoard();
+  workflow = null;
+  stats = { events: 0, tokens: 0, spend: 0, cacheRead: 0, cacheWrite: 0, run: stats.run, history: [], feed: [] };
+}
+
+function rebuildTo(seq) {
+  resetState();
+  for (const ev of allEvents) {
+    if (ev.seq > seq) break;
+    apply(ev, true);
+  }
+  renderStats();
+  renderTrack();
+  refreshScreens(screenData());
+}
+
+function apply(ev, replaying) {
   const role = roleOf(ev.actor);
   const known = avatars.has(role);
   const st = known ? deskState(role) : null;
@@ -406,6 +461,7 @@ function apply(ev) {
     case "meeting_started": {
       const ids = (ev.data.participants || []).filter((r) => avatars.has(r));
       meetings.set(ev.data.meeting_id, ids);
+      showBoard(ev.data.kind, ev.data.topic, ev.data.participants, ev.data.chair);
       ids.forEach((r, i) => {
         setRing(r, "meeting");
         if (meetingTable) seatAtTable(avatars.get(r), meetingTable, i, ids.length);
@@ -419,11 +475,28 @@ function apply(ev) {
         leaveTable(avatars.get(r));
       });
       meetings.delete(ev.data.meeting_id);
+      if (!meetings.size) hideBoard();
       break;
     }
     case "escalated": if (known) setRing(role, "blocked"); break;
     case "capsule_submitted": if (st) st.summary = ev.data.summary || st.summary; break;
     case "verify_result": if (known) setRing(role, ev.data.verdict === "pass" ? "running" : "error"); break;
+    case "workflow_started":
+      workflow = { id: ev.data.workflow, title: ev.data.title || ev.data.workflow,
+                   nodes: ev.data.nodes || [], entered: [], skipped: [], gates: {}, done: false };
+      break;
+    case "node_entered":
+      if (workflow) {
+        if (ev.data.skipped) workflow.skipped.push(ev.data.node);
+        else workflow.entered.push(ev.data.node);
+      }
+      break;
+    case "gate_evaluated":
+      if (workflow) workflow.gates[ev.data.gate] = ev.data.passed;
+      break;
+    case "workflow_ended":
+      if (workflow) { workflow.done = true; workflow.outcome = ev.data.outcome; }
+      break;
     case "token_usage": {
       const d = ev.data;
       stats.tokens += (d.input || 0) + (d.output || 0);
@@ -434,13 +507,58 @@ function apply(ev) {
       break;
     }
   }
+  if (!replaying) allEvents.push(ev);
   stats.events++;
   stats.history.push(Math.min(1, ((ev.data && ev.data.output) || 8) / 120));
   if (stats.history.length > 26) stats.history.shift();
   stats.feed.push({ seq: ev.seq, type: ev.type, bad: BAD.has(ev.type) });
   if (stats.feed.length > 12) stats.feed.shift();
   renderStats();
+  renderTrack();
   screensDirty = true;
+}
+
+const trackEl = document.getElementById("track");
+function renderTrack() {
+  if (!workflow) { trackEl.style.display = "none"; return; }
+  trackEl.style.display = "block";
+  trackEl.querySelector(".name").textContent =
+    workflow.title + (workflow.done ? "  \u00b7  " + workflow.outcome : "  \u00b7  running");
+
+  const parts = [];
+  workflow.nodes.forEach((n, i) => {
+    if (i) parts.push('<span class="arrow">&rsaquo;</span>');
+    const cls = workflow.skipped.includes(n) ? "skipped"
+      : workflow.entered.includes(n) ? (workflow.entered[workflow.entered.length - 1] === n && !workflow.done ? "active" : "done")
+      : "";
+    parts.push('<span class="chip ' + cls + '">' + n + "</span>");
+    if (n in workflow.gates) {
+      const ok = workflow.gates[n];
+      parts.push('<span class="gate ' + (ok ? "pass" : "fail") + '">' + (ok ? "gate pass" : "gate fail") + "</span>");
+    }
+  });
+  trackEl.querySelector(".lane").innerHTML = parts.join(" ");
+}
+
+const mini = document.getElementById("minimap");
+const mctx = mini.getContext("2d");
+let miniFloor = null;
+function renderMinimap() {
+  if (!miniFloor) return;
+  const sx = mini.width / miniFloor.width, sy = mini.height / miniFloor.height;
+  mctx.fillStyle = "#10131a";
+  mctx.fillRect(0, 0, mini.width, mini.height);
+  for (const r of miniFloor.rooms.concat([miniFloor.lobby])) {
+    mctx.fillStyle = r.department === "lobby" ? "#232a36" : "#1a2029";
+    mctx.fillRect(r.x * sx, r.y * sy, r.w * sx, r.h * sy);
+    mctx.strokeStyle = "#2b3240";
+    mctx.strokeRect(r.x * sx, r.y * sy, r.w * sx, r.h * sy);
+  }
+  for (const d of miniFloor.desks) {
+    const st = deskState(d.role);
+    mctx.fillStyle = "#" + (RING[st.ring] || RING.idle).toString(16).padStart(6, "0");
+    mctx.fillRect(d.x * sx - 1, d.y * sy - 1, Math.max(3, d.w * sx), Math.max(3, d.h * sy));
+  }
 }
 
 function renderStats() {
@@ -477,7 +595,11 @@ function connect() {
   ws.onmessage = (m) => {
     let ev; try { ev = JSON.parse(m.data); } catch { return; }
     if (typeof ev.seq === "number") lastSeq = Math.max(lastSeq, ev.seq);
+    if (scrubbing) { allEvents.push(ev); seek.max = String(lastSeq); return; }
     apply(ev); logEvent(ev);
+    seek.max = String(lastSeq);
+    seek.value = String(lastSeq);
+    seekLabel.textContent = "live";
   };
 }
 
@@ -533,7 +655,22 @@ document.getElementById("send").onclick = async () => {
   }
 };
 
+const seek = document.getElementById("seek");
+const seekLabel = document.querySelector("#scrub .lbl");
+seek.addEventListener("input", () => {
+  scrubbing = Number(seek.value) < lastSeq;
+  seekLabel.textContent = scrubbing ? "seq " + seek.value : "live";
+  rebuildTo(Number(seek.value));
+});
+document.getElementById("tolive").onclick = () => {
+  scrubbing = false;
+  seek.value = String(lastSeq);
+  seekLabel.textContent = "live";
+  rebuildTo(lastSeq);
+};
+
 fetch("/floor").then((r) => r.json()).then((f) => {
+  miniFloor = f;
   const built = buildOffice(f, scene);
   avatars = built.avatars;
   ambient = built.ambient || [];
