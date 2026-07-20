@@ -28,8 +28,12 @@ fn slots_across(span: u32) -> u32 {
     (span - ROOM_PAD * 2 + DESK_GAP) / (DESK_W + DESK_GAP)
 }
 
+fn desk_rows_in(h: u32) -> u32 {
+    slots_across(h).saturating_sub(1).max(1)
+}
+
 pub fn slots_for(w: u32, h: u32) -> u32 {
-    slots_across(w) * slots_across(h)
+    slots_across(w) * desk_rows_in(h)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -544,5 +548,42 @@ mod size_tests {
         cover += f.lobby.w * f.lobby.h;
         let inner = (f.width - OUTER_MARGIN * 2) * (f.height - OUTER_MARGIN * 2);
         assert_eq!(cover, inner, "mixed sizes must still tile the block exactly");
+    }
+}
+
+#[cfg(test)]
+mod density_tests {
+    use super::*;
+
+    #[test]
+    fn each_room_keeps_a_row_clear_for_furniture() {
+        let f = studio_floor();
+        for r in &f.rooms {
+            let used_rows = desk_rows_in(r.h);
+            let available_rows = slots_across(r.h);
+            assert!(
+                used_rows < available_rows,
+                "{} packs desks wall to wall with no room for anything else",
+                r.department
+            );
+        }
+    }
+
+    #[test]
+    fn the_floor_is_not_a_cubicle_farm() {
+        let f = studio_floor();
+        let desk_tiles: u32 = f
+            .desks
+            .iter()
+            .map(|d| d.w * d.h)
+            .chain(f.spares.iter().map(|s| s.w * s.h))
+            .sum();
+        let room_tiles: u32 = f.rooms.iter().map(|r| r.w * r.h).sum();
+        let density = desk_tiles as f64 / room_tiles as f64;
+        assert!(
+            density < 0.35,
+            "desks cover {:.0}% of the room area; an office is mostly not desks",
+            density * 100.0
+        );
     }
 }

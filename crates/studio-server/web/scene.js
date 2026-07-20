@@ -155,7 +155,7 @@ function neonEdge(parent, room, cx, cz, tint) {
   const mat = new THREE.MeshBasicMaterial({ color: tint });
   const x0 = room.x - cx, z0 = room.y - cz;
   const x1 = x0 + room.w, z1 = z0 + room.h;
-  const t = 0.14, y = 0.06;
+  const t = 0.16, y = 0.23;
   const segs = [
     [(x0 + x1) / 2, z0, room.w, t],
     [(x0 + x1) / 2, z1, room.w, t],
@@ -163,9 +163,15 @@ function neonEdge(parent, room, cx, cz, tint) {
     [x1, (z0 + z1) / 2, t, room.h],
   ];
   for (const [px, pz, w, d] of segs) {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w, 0.09, d), mat);
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, 0.1, d), mat);
     m.position.set(px, y, pz);
     parent.add(m);
+    const halo = new THREE.Mesh(
+      new THREE.BoxGeometry(w + 0.5, 0.02, d + 0.5),
+      new THREE.MeshBasicMaterial({ color: tint, transparent: true, opacity: 0.16 })
+    );
+    halo.position.set(px, 0.215, pz);
+    parent.add(halo);
   }
 }
 
@@ -202,10 +208,10 @@ function buildWalls(parent, room, cx, cz, doorSide, glassSide, tint) {
   const x1 = x0 + room.w, z1 = z0 + room.h;
   const mx = (x0 + x1) / 2, mz = (z0 + z1) / 2;
   const sides = [
-    { key: "-z", x: mx, z: z0, w: room.w, d: WALL_T, axis: "x", shade: 0x323a4c },
-    { key: "+z", x: mx, z: z1, w: room.w, d: WALL_T, axis: "x", shade: 0x232a38 },
-    { key: "-x", x: x0, z: mz, w: WALL_T, d: room.h, axis: "z", shade: 0x2b3242 },
-    { key: "+x", x: x1, z: mz, w: WALL_T, d: room.h, axis: "z", shade: 0x252c3a },
+    { key: "-z", x: mx, z: z0, w: room.w, d: WALL_T, axis: "x", shade: shade(0x39435a, tint, 0.16) },
+    { key: "+z", x: mx, z: z1, w: room.w, d: WALL_T, axis: "x", shade: shade(0x272e3d, tint, 0.10) },
+    { key: "-x", x: x0, z: mz, w: WALL_T, d: room.h, axis: "z", shade: shade(0x313949, tint, 0.13) },
+    { key: "+x", x: x1, z: mz, w: WALL_T, d: room.h, axis: "z", shade: shade(0x2a313f, tint, 0.10) },
   ];
 
   for (const s of sides) {
@@ -264,7 +270,12 @@ function doorSideFor(room, cx, cz) {
   return dz > 0 ? "-z" : "+z";
 }
 
-function checkerFloor(parent, room, cx, cz) {
+function shade(base, tint, amount) {
+  const b = new THREE.Color(base), t = new THREE.Color(tint);
+  return b.lerp(t, amount).getHex();
+}
+
+function checkerFloor(parent, room, cx, cz, tint) {
   const mesh = new THREE.InstancedMesh(
     tileGeo,
     new THREE.MeshLambertMaterial({ vertexColors: true }),
@@ -278,7 +289,9 @@ function checkerFloor(parent, room, cx, cz) {
     for (let iz = 0; iz < room.h; iz++) {
       m.makeTranslation(room.x - cx + ix + 0.5, 0.1, room.y - cz + iz + 0.5);
       mesh.setMatrixAt(i, m);
-      mesh.setColorAt(i, c.setHex((ix + iz) % 2 ? 0x38404f : 0x313846));
+      mesh.setColorAt(i, c.setHex((ix + iz) % 2
+        ? shade(0x39414f, tint, 0.13)
+        : shade(0x323947, tint, 0.09)));
       i++;
     }
   mesh.instanceMatrix.needsUpdate = true;
@@ -432,7 +445,7 @@ export function buildOffice(floor, scene) {
 
     const door = doorSideFor(room, cx, cz);
     const glass = lobbyFacingSide(room, floor, cx, cz);
-    checkerFloor(rg, room, cx, cz);
+    checkerFloor(rg, room, cx, cz, tint);
     buildWalls(rg, room, cx, cz, door, glass === door ? null : glass, tint);
     doorsByDept.set(room.department, doorPoint(room, cx, cz, door));
     neonEdge(rg, room, cx, cz, tint);

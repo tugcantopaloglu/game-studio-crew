@@ -123,17 +123,31 @@ function updateCamera() {
 }
 
 const UP = new THREE.Vector3(0, 1, 0);
+const GROUND = new THREE.Plane(UP, 0);
+const panRay = new THREE.Raycaster();
+const panNdc = new THREE.Vector2();
+let anchor = null;
+
+function groundAt(e) {
+  const r = renderer.domElement.getBoundingClientRect();
+  panNdc.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+  panNdc.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+  panRay.setFromCamera(panNdc, camera);
+  const hit = new THREE.Vector3();
+  return panRay.ray.intersectPlane(GROUND, hit) ? hit : null;
+}
 const el = renderer.domElement;
 let dragging = false, lastX = 0, lastY = 0;
 
 el.addEventListener("contextmenu", (e) => e.preventDefault());
 el.addEventListener("pointerdown", (e) => {
   dragging = true; lastX = e.clientX; lastY = e.clientY;
+  anchor = groundAt(e);
   el.classList.add("grabbing");
   el.setPointerCapture(e.pointerId);
 });
 el.addEventListener("pointerup", (e) => {
-  dragging = false; el.classList.remove("grabbing");
+  dragging = false; anchor = null; el.classList.remove("grabbing");
   el.releasePointerCapture(e.pointerId);
 });
 el.addEventListener("pointermove", (e) => {
@@ -141,20 +155,20 @@ el.addEventListener("pointermove", (e) => {
   const dx = e.clientX - lastX, dy = e.clientY - lastY;
   lastX = e.clientX; lastY = e.clientY;
 
-  const rotating = freeCam && e.button !== 2 && !e.shiftKey;
+  const rotating = freeCam && !e.shiftKey;
   if (rotating) {
-    orbit.theta -= dx * 0.006;
-    orbit.phi = Math.max(0.10, Math.min(Math.PI / 2 - 0.03, orbit.phi - dy * 0.005));
-  } else {
-    const k = orbit.dist * 0.0016;
-    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
-    right.y = 0;
-    right.normalize();
-    const fwd = new THREE.Vector3().crossVectors(UP, right).normalize();
-    orbit.target.addScaledVector(right, -dx * k);
-    orbit.target.addScaledVector(fwd, dy * k);
+    orbit.theta -= dx * 0.005;
+    orbit.phi = Math.max(0.10, Math.min(Math.PI / 2 - 0.03, orbit.phi - dy * 0.004));
+    updateCamera();
+    return;
   }
-  updateCamera();
+
+  const now = groundAt(e);
+  if (anchor && now) {
+    orbit.target.x += anchor.x - now.x;
+    orbit.target.z += anchor.z - now.z;
+    updateCamera();
+  }
 });
 el.addEventListener("wheel", (e) => {
   e.preventDefault();
