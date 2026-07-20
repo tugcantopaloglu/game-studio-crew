@@ -1,4 +1,5 @@
 mod charters;
+mod m3;
 mod tools;
 
 use anyhow::{bail, Context, Result};
@@ -505,6 +506,7 @@ fn main() -> Result<()> {
     match cmd.as_str() {
         "m1" => m1_proof(),
         "m2" => m2_proof(),
+        "m3" => m3_proof(),
         "mcp-server" => mcp_server(),
         _ => {
             println!("usage: studiod <m1|m2|mcp-server>");
@@ -514,4 +516,53 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn m3_proof() -> Result<()> {
+    guard_nested_session()?;
+    fs::create_dir_all(studio_dir())?;
+
+    let project = studio_dir().join("m3-project");
+    let out = studio_dir().join("m3-out");
+
+    let charter = studio_context::CharterSource {
+        studio_conventions: charters::L0_STUDIO_CONVENTIONS.into(),
+        engine_profile: studio_engine::EngineProfile::parse(studio_engine::GODOT_PROFILE)
+            .map_err(|e| anyhow::anyhow!("godot profile failed to parse: {e}"))?
+            .prose
+            .profile,
+        role_charter: charters::L2_REPAIR_ROLE.into(),
+    };
+    let tool_list: Vec<String> = vec!["Read".into(), "Edit".into()];
+    let prefix = freeze(&charter, &tool_list, Model::Opus)
+        .map_err(|e| anyhow::anyhow!("charter freeze failed: {e}"))?;
+    let charter_path = write_charter(&prefix)?;
+
+    m3::run(project, out, |brief, project_root| {
+        let spec = WorkerSpec {
+            system_prompt_file: charter_path.to_string_lossy().into_owned(),
+            tools: tool_list.clone(),
+            allowed_tools: tool_list.clone(),
+            model: Model::Opus,
+            effort: Effort::Low,
+            session: SessionMode::New(uuid_v4()),
+            mcp_config: None,
+        };
+
+        let task = format!(
+            "The Godot project at {} failed verification.\n\n{}\n\
+             Fix the listed failure. Paths beginning res:// map to that project root.",
+            project_root.display(),
+            brief
+        );
+
+        let worker = Worker::spawn("claude", &spec.to_args(), &task)
+            .context("failed to spawn the claude CLI")?;
+        let report = worker.drive(&WorkerLimits::default(), |_| {})?;
+
+        if report.state.is_error {
+            bail!("repair worker failed: {}", report.state.text.lines().next().unwrap_or(""));
+        }
+        Ok(report.state.text)
+    })
 }

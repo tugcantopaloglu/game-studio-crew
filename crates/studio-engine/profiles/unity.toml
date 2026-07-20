@@ -1,0 +1,47 @@
+schema_version = 1
+id = "unity"
+display_name = "Unity"
+min_editor_version = "2022.3"
+
+[detect]
+markers = ["ProjectSettings/ProjectVersion.txt", "Assets", "Packages/manifest.json"]
+precedence = 10
+
+[tooling]
+resolver = "unity_hub"
+binary_env = "UNITY_EDITOR"
+binary_names = ["Unity"]
+
+[commands]
+compile   = "{engine} -batchmode -quit -projectPath {project} -executeMethod Studio.CI.Compile -logFile {out}/compile.log"
+test_fast = "{engine} -batchmode -runTests -projectPath {project} -testPlatform EditMode -testResults {out}/results-editmode.xml -logFile {out}/test-edit.log"
+test_full = "{engine} -batchmode -runTests -projectPath {project} -testPlatform PlayMode -testResults {out}/results-playmode.xml -logFile {out}/test-play.log"
+import    = "{engine} -batchmode -quit -projectPath {project} -executeMethod Studio.CI.Reimport -logFile {out}/import.log"
+export    = "{engine} -batchmode -quit -projectPath {project} -executeMethod Studio.CI.BuildPlayer -buildTarget {platform} -logFile {out}/export.log"
+
+[reports]
+test_fast = { format = "nunit3", path = "{out}/results-editmode.xml" }
+test_full = { format = "nunit3", path = "{out}/results-playmode.xml" }
+export    = { format = "unity_buildreport", path = "{out}/buildreport.json" }
+
+[prose]
+profile = """Unity is the active engine. Scenes are .unity YAML and prefabs are .prefab
+YAML; both are text but are merge-hostile, so touch them narrowly. Every asset
+carries a .meta file holding its GUID, and a lost or regenerated .meta breaks
+every reference to that asset. Never delete or rewrite a .meta by hand.
+
+Code is C# against the Unity API. MonoBehaviour lifecycle order is Awake,
+OnEnable, Start, then Update; do not rely on cross-object ordering without an
+explicit script execution order. Prefer composition on GameObjects over deep
+MonoBehaviour inheritance.
+
+The editor holds an exclusive project lock, so verification is serialized:
+expect one build or test run at a time per project."""
+
+[prose.capabilities]
+netcode = """This task touches networking. Netcode for GameObjects uses NetworkBehaviour
+and NetworkVariable; ownership is explicit and only the server mutates
+server-authoritative state."""
+shaders = """This task touches shaders. Unity shaders are ShaderLab .shader files or Shader
+Graph assets. Under URP or HDRP the render pipeline dictates which passes and
+includes are valid; a Built-in pipeline shader will not work unmodified."""

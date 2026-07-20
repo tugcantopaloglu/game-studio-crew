@@ -98,11 +98,17 @@ UE `.umap`/`.uasset` are binary. The index and trust model treat them specially 
 
 ### Godot 4 (`id = "godot"`)
 
-Fully headless, no editor lock. The cheapest engine to run and the M3 target ([00](00-overview.md)). Script-check for compile, GUT for tests (JUnit XML output).
+Fully headless, no editor lock. The cheapest engine to run and the M3 target ([00](00-overview.md)). GUT for tests (JUnit XML output). Compile goes through a studio helper, for reasons M3 measured on Godot 4.7.1:
+
+- **`--check-only --quit` only checks scripts reachable from the main scene.** A broken script that no scene references yet produced **zero** reported errors. Since a worker's first act is often to add a file before wiring it up, that is precisely the case that must not pass silently.
+- **`--check-only --quit` exits 0 even when it does report a parse error.** The exit code carries no verdict; only the log does.
+- **`--import --quit` segfaulted (exit 139) on a valid project.** The `import` scope is therefore the least trustworthy on this engine.
+
+So compile runs `addons/studio/studio_ci.gd`, a helper installed by bootstrap ([11](11-index-and-bootstrap.md)) that walks all of `res://`, compiles every `.gd` file, prints one `STUDIO_CI_FAIL: <path>: <message>` line per failure and a `STUDIO_CI_DONE checked=N failed=M` summary, then exits non-zero if anything failed. This is the Godot counterpart to Unity's `Studio.CI`, and it gives compile both full coverage and a real exit code.
 
 ```toml
 [commands]
-compile   = "{godot} --headless --path {project} --check-only --quit"
+compile   = "{godot} --headless --path {project} -s addons/studio/studio_ci.gd"
 test_fast = "{godot} --headless --path {project} -s addons/gut/gut_cmdln.gd -gdir=res://test/unit -gexit -gjunit_xml_file={out}/gut-unit.xml"
 test_full = "{godot} --headless --path {project} -s addons/gut/gut_cmdln.gd -gdir=res://test/integration -gexit -gjunit_xml_file={out}/gut-integration.xml"
 import    = "{godot} --headless --path {project} --import --quit"

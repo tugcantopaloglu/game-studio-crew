@@ -1,0 +1,47 @@
+schema_version = 1
+id = "ue5"
+display_name = "Unreal Engine 5"
+min_editor_version = "5.0"
+
+[detect]
+markers = ["*.uproject"]
+precedence = 20
+
+[tooling]
+resolver = "env"
+binary_env = "UE_ROOT"
+binary_names = ["UnrealEditor-Cmd", "UnrealEditor"]
+
+[commands]
+compile   = "{ue_root}/Engine/Build/BatchFiles/Build.bat {target}Editor {platform} Development -project={uproject} -waitmutex"
+test_fast = "{engine} {uproject} -ExecCmds=\"Automation RunTests {suite}.Unit; Quit\" -unattended -nop4 -nosplash -ReportOutputPath={out}/automation"
+test_full = "{engine} {uproject} -ExecCmds=\"Automation RunTests {suite}; Quit\" -unattended -nop4 -nosplash -ReportOutputPath={out}/automation"
+import    = "{engine} {uproject} -run=ImportAssets -source={source} -unattended -nop4 -nosplash"
+export    = "{ue_root}/Engine/Build/BatchFiles/RunUAT.bat BuildCookRun -project={uproject} -platform={platform} -clientconfig=Development -cook -stage -pak -archive -archivedirectory={out}/build"
+
+[reports]
+test_fast = { format = "ue_automation_json", path = "{out}/automation/index.json" }
+test_full = { format = "ue_automation_json", path = "{out}/automation/index.json" }
+
+[prose]
+profile = """Unreal Engine 5 is the active engine. Gameplay code is C++ with the UCLASS,
+UPROPERTY and UFUNCTION macros; anything the engine must see through
+reflection needs its macro, and a missing UPROPERTY means the garbage
+collector will not keep the reference alive.
+
+Maps are .umap and assets are .uasset, both binary. A diff cannot show what
+changed inside them, only that they changed, so describe map and asset edits
+in prose in your capsule rather than assuming a reviewer can read the change.
+
+Prefer Actor composition through UActorComponent over deep Actor hierarchies.
+Blueprints derive from C++ classes; changing a C++ signature that a Blueprint
+depends on breaks the Blueprint silently until it is recompiled."""
+
+[prose.capabilities]
+netcode = """This task touches networking. Unreal replication is property based: mark
+replicated state with UPROPERTY(Replicated) and implement
+GetLifetimeReplicatedProps. Server RPCs are validated; trust nothing sent
+from a client."""
+shaders = """This task touches shaders. Unreal materials are node graphs compiled to HLSL;
+hand-written .usf shaders live under Engine or project Shaders directories and
+require a shader recompile, which is slow."""

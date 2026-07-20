@@ -1,0 +1,44 @@
+schema_version = 1
+id = "godot"
+display_name = "Godot 4"
+min_editor_version = "4.2"
+
+[detect]
+markers = ["project.godot"]
+precedence = 5
+
+[tooling]
+resolver = "path"
+binary_env = "GODOT_BIN"
+binary_names = ["godot", "godot4"]
+
+[commands]
+compile   = "{engine} --headless --path {project} -s addons/studio/studio_ci.gd"
+test_fast = "{engine} --headless --path {project} -s addons/gut/gut_cmdln.gd -gdir=res://test/unit -gexit -gjunit_xml_file={out}/gut-unit.xml"
+test_full = "{engine} --headless --path {project} -s addons/gut/gut_cmdln.gd -gdir=res://test/integration -gexit -gjunit_xml_file={out}/gut-integration.xml"
+import    = "{engine} --headless --path {project} --import --quit"
+export    = "{engine} --headless --path {project} --export-release {preset} {out}/build/game"
+
+[reports]
+test_fast = { format = "junit", path = "{out}/gut-unit.xml" }
+test_full = { format = "junit", path = "{out}/gut-integration.xml" }
+
+[prose]
+profile = """Godot 4 is the active engine. Scenes are .tscn text files and resources are
+.tres; both are human-readable and diffable, so treat them as source. Scripts
+are GDScript unless the task says otherwise.
+
+Nodes are composed, not inherited: prefer adding a child node over deepening a
+class hierarchy. Signals connect behaviour; do not poll where a signal exists.
+Anything reachable by res:// is project content and belongs in the index.
+
+The project runs fully headless, so every verification is reproducible and
+nothing holds an editor lock."""
+
+[prose.capabilities]
+netcode = """This task touches networking. Godot's high-level multiplayer API uses
+MultiplayerAPI and @rpc annotations. State authority is explicit: check
+is_multiplayer_authority() before mutating replicated state."""
+shaders = """This task touches shaders. Godot shaders are .gdshader files in its own
+shading language, not GLSL. Vertex, fragment and light functions are separate;
+uniforms are exposed to the inspector."""

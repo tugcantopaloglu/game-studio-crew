@@ -26,7 +26,7 @@ Per the profile `[tooling]` block ([07](07-engine-layer.md)): resolve the engine
 Some commands need an in-project helper the daemon drives:
 
 - **Unity:** a `Studio.CI` static class ([07](07-engine-layer.md)) copied into an editor-only asmdef, exposing `Compile`/`Reimport`/`BuildPlayer` for `-executeMethod`.
-- **Godot:** the **GUT** addon under `addons/gut/` for `test_fast`/`test_full`.
+- **Godot:** the **GUT** addon under `addons/gut/` for `test_fast`/`test_full`, plus **`addons/studio/studio_ci.gd`** for `compile`. The latter exists because Godot's own `--check-only` only reaches scripts referenced by the main scene and always exits 0 ([07](07-engine-layer.md)); the helper walks all of `res://` and returns a real exit code. It is written on install and rewritten whenever its bytes differ from the daemon's copy, so a tampered helper is restored rather than trusted.
 - **UE5:** no code helper: the automation runner and UAT are built in; bootstrap only verifies they're present.
 
 Helpers are installed idempotently and version-pinned; they live in the project so verification is reproducible.

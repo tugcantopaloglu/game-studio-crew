@@ -1,6 +1,6 @@
 # 00: System Overview
 
-> **Status:** v0.1, 2026-07-20, design phase, no runtime code.
+> **Status:** v0.2, 2026-07-20. M1-M3 built and proven against the real CLI and a real engine; M4-M5 remain.
 > Part of the Game Studio Crew system design set. See [README](../../README.md).
 
 ## Prime directive
@@ -110,9 +110,9 @@ Both resolved in the favorable direction. Their fallbacks remain documented in [
 ## Milestone order
 
 - **M0 (complete):** design documents only. Reviewed and iterated before any code.
-- **M1 (in progress):** CLI probes **done**, all three verdicts settled ([`probes/`](../../probes/README.md), [ADR 0004](adr/0004-explicit-context-control-not-bare.md)). Remaining: supervisor + state store + ledger. Spawn one worker; prove (a) usage capture from `result`, (b) cache hit on a second same-role spawn within the TTL, (c) clean process reaping on Windows. **The probes existed specifically to settle the unverified CLI behaviors** before anything else was built on them, and they overturned one.
-- **M2:** context engine: frozen charters, capsules, summarization ladder.
-- **M3:** one engine end-to-end (Godot first: fully headless, no editor lock) through verify + repair loop.
+- **M1 (complete):** CLI probes settled all three verdicts ([`probes/`](../../probes/README.md), [ADR 0004](adr/0004-explicit-context-control-not-bare.md)), then supervisor + state store + ledger. `studiod m1` proves (a) usage capture from `result`, (b) cache reuse on a second same-prefix spawn, (c) clean reaping on Windows: cold $0.0785 to warm $0.0046, 17.1x.
+- **M2 (complete):** context engine: frozen charters, capsules, summarization ladder, ADR store, MCP server.
+- **M3 (complete):** Godot end-to-end through verify + repair loop, proven against the real engine and a real repair worker. Broken script detected and named, worker fixed it, re-verify green in one round.
 - **M4:** event protocol + minimal studio floor (avatars, status rings, event feed).
 - **M5:** workflows, budget governance, remaining engines, full visual workspace.
 
