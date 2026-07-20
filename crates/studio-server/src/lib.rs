@@ -12,6 +12,7 @@ use tokio::sync::broadcast;
 
 pub const FLOOR_HTML: &str = include_str!("../web/floor.html");
 pub const VOXEL_JS: &str = include_str!("../web/voxel.js");
+pub const SCENE_JS: &str = include_str!("../web/scene.js");
 pub const THREE_JS: &str = include_str!("../web/vendor/three.module.js");
 
 #[derive(Clone)]
@@ -43,6 +44,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/voxel.js", get(voxel_js))
+        .route("/scene.js", get(scene_js))
         .route("/vendor/three.module.js", get(three_js))
         .route("/floor", get(floor))
         .route("/runs/:run/snapshot", get(snapshot))
@@ -57,6 +59,10 @@ async fn index() -> impl IntoResponse {
 
 async fn voxel_js() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], VOXEL_JS)
+}
+
+async fn scene_js() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], SCENE_JS)
 }
 
 async fn three_js() -> impl IntoResponse {

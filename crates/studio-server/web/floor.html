@@ -5,51 +5,42 @@
 <title>Studio Floor</title>
 <style>
   :root {
-    --bg: #0e1016;
-    --panel: #14171f;
-    --line: #232833;
-    --text: #d7dbe4;
-    --dim: #79818f;
-    --running: #4ad991;
-    --blocked: #d9c24a;
-    --meeting: #6fa8d1;
-    --error: #d95555;
+    --bg: #0b0d12; --panel: #13161e; --line: #222732;
+    --text: #d7dbe4; --dim: #79818f;
+    --running: #4ad991; --error: #d95555;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
-  body {
-    margin: 0; background: var(--bg); color: var(--text);
+  body { margin: 0; background: var(--bg); color: var(--text);
     font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    display: grid; grid-template-columns: 1fr 340px; overflow: hidden;
-  }
+    display: grid; grid-template-columns: 1fr 330px; overflow: hidden; }
   #stage { position: relative; }
-  canvas { display: block; }
+  canvas { display: block; cursor: grab; }
+  canvas.grabbing { cursor: grabbing; }
   #side { border-left: 1px solid var(--line); background: var(--panel);
-          display: grid; grid-template-rows: auto auto 1fr auto; min-height: 0; }
+    display: grid; grid-template-rows: auto auto 1fr auto; min-height: 0; }
   header { padding: 11px 13px; border-bottom: 1px solid var(--line); }
   h1 { margin: 0 0 2px; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; }
   #conn { font-size: 11px; color: var(--dim); }
-  #conn.live { color: var(--running); }
-  #conn.down { color: var(--error); }
+  #conn.live { color: var(--running); } #conn.down { color: var(--error); }
   #stats { padding: 9px 13px; border-bottom: 1px solid var(--line); display: grid; gap: 3px; }
   .stat { display: flex; justify-content: space-between; }
-  .stat b { font-weight: 600; }
   #feed { overflow-y: auto; padding: 6px 0; min-height: 0; }
-  .ev { padding: 2px 13px; display: grid; grid-template-columns: 40px 1fr; gap: 7px; }
-  .ev:hover { background: #1c202a; }
+  .ev { padding: 2px 13px; display: grid; grid-template-columns: 38px 1fr; gap: 7px; }
+  .ev:hover { background: #1b1f29; }
   .ev .seq { color: #4d5460; text-align: right; }
   .ev .t { color: var(--dim); }
   .ev.terminal .t { color: var(--text); font-weight: 600; }
   .ev.bad .t { color: var(--error); }
   #help { padding: 8px 13px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11px; }
-  kbd { background: #232833; border-radius: 3px; padding: 0 4px; color: var(--text); }
+  kbd { background: #222732; border-radius: 3px; padding: 0 4px; color: var(--text); }
   #tip { position: absolute; pointer-events: none; max-width: 290px; display: none;
-         background: #0a0c11ee; border: 1px solid var(--line); border-radius: 5px;
-         padding: 8px 10px; font-size: 12px; z-index: 5; backdrop-filter: blur(4px); }
+    background: #08090dee; border: 1px solid var(--line); border-radius: 5px;
+    padding: 8px 10px; font-size: 12px; z-index: 5; }
   #tip b { display: block; margin-bottom: 3px; }
   #tip .s { color: var(--dim); }
   #cam { position: absolute; left: 12px; top: 12px; color: var(--dim); font-size: 11px;
-         background: #0a0c11cc; border: 1px solid var(--line); border-radius: 4px; padding: 4px 8px; }
+    background: #08090dcc; border: 1px solid var(--line); border-radius: 4px; padding: 4px 8px; }
 </style>
 </head>
 <body>
@@ -64,21 +55,14 @@
     <div class="stat"><span>cache hit</span><b id="s-cache">-</b></div>
   </div>
   <div id="feed"></div>
-  <div id="help">
-    <kbd>O</kbd> orbit / isometric &middot; drag rotate &middot; wheel zoom &middot; right-drag pan
-  </div>
+  <div id="help">drag to pan &middot; wheel zoom &middot; <kbd>O</kbd> orbit, then drag rotates</div>
 </div>
 
 <script type="module">
 import * as THREE from "/vendor/three.module.js";
-import { buildCharacter, buildDesk, PALETTES } from "/voxel.js";
+import { buildOffice } from "/scene.js";
 
-const VOX = 0.09;
 const RING = { idle: 0x2f3644, running: 0x4ad991, blocked: 0xd9c24a, meeting: 0x6fa8d1, error: 0xd95555 };
-const FAMILY_TINT = {
-  leadership: 0xc8a24a, design: 0x8a6fd1, engineering: 0x4a90d9,
-  art: 0xd16f9a, audio: 0x4fb3a5, qa: 0xd97a4a,
-};
 const TERMINAL = new Set(["run_ended","meeting_ended","workflow_ended","decision_recorded","escalated","verify_result","budget_exhausted"]);
 const BAD = new Set(["escalated","budget_exhausted","inconclusive_flagged"]);
 
@@ -90,153 +74,38 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
 stage.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0e1016);
-scene.fog = new THREE.Fog(0x0e1016, 30, 90);
+scene.background = new THREE.Color(0x0b0d12);
 
-const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 500);
-let orbit = { theta: Math.PI * 0.25, phi: Math.PI * 0.30, dist: 34, target: new THREE.Vector3() };
+const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 400);
+const orbit = { theta: Math.PI * 0.25, phi: Math.PI * 0.28, dist: 40, target: new THREE.Vector3(0, 1, 0) };
 let freeCam = false;
 
-scene.add(new THREE.AmbientLight(0x8090b0, 1.5));
-const key = new THREE.DirectionalLight(0xfff0dd, 2.2);
-key.position.set(14, 26, 10);
+scene.add(new THREE.AmbientLight(0x9aa8c0, 1.1));
+const key = new THREE.DirectionalLight(0xfff4e2, 1.5);
+key.position.set(18, 30, 14);
 key.castShadow = true;
 key.shadow.mapSize.set(2048, 2048);
-key.shadow.camera.near = 1;
-key.shadow.camera.far = 90;
-const S = 26;
+key.shadow.camera.near = 1; key.shadow.camera.far = 110;
+const S = 30;
 key.shadow.camera.left = -S; key.shadow.camera.right = S;
 key.shadow.camera.top = S; key.shadow.camera.bottom = -S;
-key.shadow.bias = -0.0008;
+key.shadow.bias = -0.0009;
 scene.add(key);
-const rim = new THREE.DirectionalLight(0x4a6a9a, 0.7);
-rim.position.set(-12, 10, -14);
-scene.add(rim);
+const fill = new THREE.DirectionalLight(0x5a76a8, 0.5);
+fill.position.set(-16, 12, -18);
+scene.add(fill);
 
-const cube = new THREE.BoxGeometry(1, 1, 1);
-const world = new THREE.Group();
-scene.add(world);
-
-function voxelMesh(voxels, castShadow = true) {
-  const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
-  const mesh = new THREE.InstancedMesh(cube, mat, voxels.length);
-  mesh.castShadow = castShadow;
-  mesh.receiveShadow = true;
-  const m = new THREE.Matrix4();
-  const c = new THREE.Color();
-  voxels.forEach((v, i) => {
-    m.makeTranslation(v.x + 0.5, v.y + 0.5, v.z + 0.5);
-    mesh.setMatrixAt(i, m);
-    mesh.setColorAt(i, c.setHex(v.c));
-  });
-  mesh.instanceMatrix.needsUpdate = true;
-  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-  return mesh;
-}
-
-let floor = null;
-const avatars = new Map();
-const desks = new Map();
+let avatars = new Map();
 const state = new Map();
 let stats = { events: 0, tokens: 0, spend: 0, cacheRead: 0, cacheWrite: 0, run: "-" };
 
 function deskState(role) {
   if (!state.has(role)) state.set(role, { ring: "idle", summary: "", tool: "", tokens: 0 });
   return state.get(role);
-}
-
-function buildWorld(f) {
-  floor = f;
-  const cx = f.width / 2, cz = f.height / 2;
-  orbit.target.set(0, 1.5, 0);
-
-  const slab = new THREE.Mesh(
-    new THREE.BoxGeometry(f.width + 3, 0.6, f.height + 3),
-    new THREE.MeshLambertMaterial({ color: 0x161a22 })
-  );
-  slab.position.set(0, -0.3, 0);
-  slab.receiveShadow = true;
-  world.add(slab);
-
-  for (const room of f.rooms) {
-    const tint = FAMILY_TINT[room.visual_family] || 0x4a90d9;
-    const pad = new THREE.Mesh(
-      new THREE.BoxGeometry(room.w, 0.25, room.h),
-      new THREE.MeshLambertMaterial({ color: 0x1d222c })
-    );
-    pad.position.set(room.x + room.w / 2 - cx, 0.12, room.y + room.h / 2 - cz);
-    pad.receiveShadow = true;
-    world.add(pad);
-
-    const edge = new THREE.Mesh(
-      new THREE.BoxGeometry(room.w, 0.06, room.h),
-      new THREE.MeshBasicMaterial({ color: tint, transparent: true, opacity: 0.22 })
-    );
-    edge.position.set(pad.position.x, 0.26, pad.position.z);
-    world.add(edge);
-
-    const label = makeLabel(room.department, tint);
-    label.position.set(room.x + 0.9 - cx, 0.3, room.y + 0.7 - cz);
-    label.rotation.x = -Math.PI / 2;
-    world.add(label);
-  }
-
-  for (const d of f.desks) {
-    const tint = FAMILY_TINT[d.visual_family] || 0x4a90d9;
-    const g = new THREE.Group();
-    g.position.set(d.x + d.w / 2 - cx, 0.25, d.y + d.h / 2 - cz);
-    world.add(g);
-    desks.set(d.role, g);
-
-    const desk = voxelMesh(buildDesk(tint));
-    desk.scale.setScalar(VOX);
-    desk.position.set(-10 * VOX / 2, 0, -6 * VOX / 2 + 0.55);
-    g.add(desk);
-
-    const ringGeo = new THREE.RingGeometry(0.42, 0.56, 32);
-    const ringMat = new THREE.MeshBasicMaterial({ color: RING.idle, side: THREE.DoubleSide, transparent: true, opacity: 0.95 });
-    const ring = new THREE.Mesh(ringGeo, ringMat);
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.set(0, 0.02, -0.35);
-    g.add(ring);
-
-    const body = voxelMesh(buildCharacter(d.role));
-    body.scale.setScalar(VOX);
-    body.position.set(-7 * VOX / 2, 0, -5 * VOX / 2 - 0.35);
-    g.add(body);
-
-    const nameplate = makeLabel(d.role.replace(/_/g, " "), 0x9aa4b4, 0.7);
-    nameplate.position.set(0, 0.03, 0.95);
-    nameplate.rotation.x = -Math.PI / 2;
-    g.add(nameplate);
-
-    avatars.set(d.role, { group: g, body, ring, ringMat, desk, tier: d.tier, title: d.title, dept: d.department, seed: Math.random() * 10 });
-  }
-}
-
-function makeLabel(text, color, scale = 1) {
-  const c = document.createElement("canvas");
-  const ctx = c.getContext("2d");
-  const fs = 48;
-  ctx.font = `600 ${fs}px ui-monospace, monospace`;
-  c.width = Math.ceil(ctx.measureText(text).width) + 16;
-  c.height = fs + 16;
-  const ctx2 = c.getContext("2d");
-  ctx2.font = `600 ${fs}px ui-monospace, monospace`;
-  ctx2.fillStyle = "#" + color.toString(16).padStart(6, "0");
-  ctx2.textBaseline = "middle";
-  ctx2.fillText(text, 8, c.height / 2);
-  const tex = new THREE.CanvasTexture(c);
-  tex.magFilter = THREE.NearestFilter;
-  tex.minFilter = THREE.LinearMipmapLinearFilter;
-  const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false });
-  const aspect = c.width / c.height;
-  const h = 0.32 * scale;
-  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(h * aspect, h), mat);
-  return mesh;
 }
 
 function updateCamera() {
@@ -249,68 +118,68 @@ function updateCamera() {
   camera.lookAt(t);
 }
 
-let dragging = null, lastX = 0, lastY = 0;
-renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
-renderer.domElement.addEventListener("pointerdown", (e) => {
-  dragging = e.button === 2 ? "pan" : "rotate";
+const el = renderer.domElement;
+let dragging = false, lastX = 0, lastY = 0;
+
+el.addEventListener("contextmenu", (e) => e.preventDefault());
+el.addEventListener("pointerdown", (e) => {
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+  el.classList.add("grabbing");
+  el.setPointerCapture(e.pointerId);
+});
+el.addEventListener("pointerup", (e) => {
+  dragging = false; el.classList.remove("grabbing");
+  el.releasePointerCapture(e.pointerId);
+});
+el.addEventListener("pointermove", (e) => {
+  if (!dragging) { hoverTest(e); return; }
+  const dx = e.clientX - lastX, dy = e.clientY - lastY;
   lastX = e.clientX; lastY = e.clientY;
-});
-addEventListener("pointerup", () => { dragging = null; });
-addEventListener("pointermove", (e) => {
-  if (dragging) {
-    const dx = e.clientX - lastX, dy = e.clientY - lastY;
-    lastX = e.clientX; lastY = e.clientY;
-    if (dragging === "rotate" && freeCam) {
-      orbit.theta += dx * 0.006;
-      orbit.phi = Math.max(0.12, Math.min(Math.PI / 2 - 0.05, orbit.phi + dy * 0.005));
-    } else if (dragging === "pan") {
-      const right = new THREE.Vector3(-Math.sin(orbit.theta), 0, Math.cos(orbit.theta));
-      const fwd = new THREE.Vector3(Math.cos(orbit.theta), 0, Math.sin(orbit.theta));
-      orbit.target.addScaledVector(right, dx * orbit.dist * 0.0012);
-      orbit.target.addScaledVector(fwd, dy * orbit.dist * 0.0012);
-    }
-    updateCamera();
-    return;
+
+  const rotating = freeCam && e.button !== 2 && !e.shiftKey;
+  if (rotating) {
+    orbit.theta -= dx * 0.006;
+    orbit.phi = Math.max(0.10, Math.min(Math.PI / 2 - 0.03, orbit.phi - dy * 0.005));
+  } else {
+    const k = orbit.dist * 0.0016;
+    const right = new THREE.Vector3(-Math.sin(orbit.theta), 0, Math.cos(orbit.theta));
+    const fwd = new THREE.Vector3(Math.cos(orbit.theta), 0, Math.sin(orbit.theta));
+    orbit.target.addScaledVector(right, -dx * k);
+    orbit.target.addScaledVector(fwd, -dy * k);
   }
-  hoverTest(e);
+  updateCamera();
 });
-renderer.domElement.addEventListener("wheel", (e) => {
+el.addEventListener("wheel", (e) => {
   e.preventDefault();
-  orbit.dist = Math.max(6, Math.min(90, orbit.dist * (1 + Math.sign(e.deltaY) * 0.1)));
+  orbit.dist = Math.max(7, Math.min(110, orbit.dist * (1 + Math.sign(e.deltaY) * 0.12)));
   updateCamera();
 }, { passive: false });
 
 addEventListener("keydown", (e) => {
-  if (e.key === "o" || e.key === "O") {
-    freeCam = !freeCam;
-    camLabel.textContent = freeCam ? "orbit" : "isometric";
-    if (!freeCam) {
-      orbit.theta = Math.PI * 0.25;
-      orbit.phi = Math.PI * 0.30;
-      updateCamera();
-    }
-  }
+  if (e.key !== "o" && e.key !== "O") return;
+  freeCam = !freeCam;
+  camLabel.textContent = freeCam ? "orbit  (drag rotates, shift+drag pans)" : "isometric";
+  if (!freeCam) { orbit.theta = Math.PI * 0.25; orbit.phi = Math.PI * 0.28; updateCamera(); }
 });
 
 const ray = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
 function hoverTest(e) {
-  const r = renderer.domElement.getBoundingClientRect();
+  const r = el.getBoundingClientRect();
   ndc.x = ((e.clientX - r.left) / r.width) * 2 - 1;
   ndc.y = -((e.clientY - r.top) / r.height) * 2 + 1;
   ray.setFromCamera(ndc, camera);
 
   let best = null, bestDist = Infinity;
   for (const [role, a] of avatars) {
-    const hits = ray.intersectObject(a.body, true);
+    const hits = ray.intersectObject(a.hit, true);
     if (hits.length && hits[0].distance < bestDist) { bestDist = hits[0].distance; best = role; }
   }
-
   if (!best) { tip.style.display = "none"; return; }
+
   const a = avatars.get(best), st = deskState(best);
   tip.innerHTML =
-    `<b>${a.title}</b>` +
-    `<div class="s">tier ${a.tier} &middot; ${a.dept} &middot; ${st.ring}</div>` +
+    `<b>${a.title}</b><div class="s">tier ${a.tier} &middot; ${a.dept} &middot; ${st.ring}</div>` +
     (st.tool ? `<div class="s">tool: ${st.tool}</div>` : "") +
     (st.tokens ? `<div class="s">${st.tokens.toLocaleString()} tokens</div>` : "") +
     (st.summary ? `<div>${st.summary}</div>` : "");
@@ -335,11 +204,9 @@ function animate() {
   for (const [role, a] of avatars) {
     const st = deskState(role);
     const busy = st.ring === "running" || st.ring === "meeting";
-    const bob = busy ? Math.sin(t * 6 + a.seed) * 0.018 : Math.sin(t * 1.4 + a.seed) * 0.006;
-    a.body.position.y = bob;
-    a.body.rotation.y = busy ? Math.sin(t * 3 + a.seed) * 0.05 : 0;
-    const pulse = busy ? 0.75 + Math.sin(t * 4 + a.seed) * 0.25 : 1;
-    a.ringMat.opacity = st.ring === "idle" ? 0.35 : pulse;
+    a.body.position.y = 0.02 + (busy ? Math.sin(t * 6 + a.seed) * 0.02 : Math.sin(t * 1.3 + a.seed) * 0.006);
+    a.body.rotation.y = busy ? Math.sin(t * 3 + a.seed) * 0.06 : 0;
+    a.ringMat.opacity = st.ring === "idle" ? 0.32 : 0.7 + Math.sin(t * 4 + a.seed) * 0.3;
   }
   renderer.render(scene, camera);
 }
@@ -351,7 +218,7 @@ function setRing(role, name) {
   a.ringMat.color.setHex(RING[name] || RING.idle);
 }
 
-function roleOf(actor) { return (actor || "").split("#")[0]; }
+const roleOf = (actor) => (actor || "").split("#")[0];
 
 function apply(ev) {
   const role = roleOf(ev.actor);
@@ -370,9 +237,7 @@ function apply(ev) {
           to === "rate_limited" ? "blocked" : "running");
       }
       break;
-    case "worker_exited":
-      if (known) setRing(role, ev.data.outcome === "completed" ? "idle" : "error");
-      break;
+    case "worker_exited": if (known) setRing(role, ev.data.outcome === "completed" ? "idle" : "error"); break;
     case "tool_call": if (st) st.tool = ev.data.tool || ""; break;
     case "meeting_started": if (known) setRing(role, "meeting"); break;
     case "meeting_ended": if (known) setRing(role, "running"); break;
@@ -421,7 +286,6 @@ function connect() {
   url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
   if (run) url.searchParams.set("run", run);
   url.searchParams.set("since_seq", String(lastSeq));
-
   const ws = new WebSocket(url);
   ws.onopen = () => { conn.textContent = "live"; conn.className = "live"; };
   ws.onclose = () => { conn.textContent = "reconnecting"; conn.className = "down"; setTimeout(connect, 1000); };
@@ -433,7 +297,8 @@ function connect() {
 }
 
 fetch("/floor").then((r) => r.json()).then((f) => {
-  buildWorld(f);
+  const built = buildOffice(f, scene);
+  avatars = built.avatars;
   resize();
   animate();
   connect();
