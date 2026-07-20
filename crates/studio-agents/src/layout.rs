@@ -14,9 +14,13 @@ const ROOM_PAD: u32 = 1;
 
 const ROOM_W: u32 = ROOM_PAD * 2 + DESK_COLS * DESK_W + (DESK_COLS - 1) * DESK_GAP;
 const ROOM_H: u32 = ROOM_PAD * 2 + DESK_ROWS * DESK_H + (DESK_ROWS - 1) * DESK_GAP;
-const ROOM_GAP: u32 = 2;
+const OUTER_MARGIN: u32 = 2;
 
-pub const SHELF_ROOMS_PER_ROW: u32 = 3;
+pub const GRID_COLS: u32 = 3;
+pub const GRID_ROWS: u32 = 3;
+pub const LOBBY_CELL: u32 = 4;
+
+const CELLS: [u32; 8] = [0, 1, 2, 3, 5, 6, 7, 8];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Desk {
@@ -59,6 +63,7 @@ pub struct Floor {
     pub rooms: Vec<Room>,
     pub desks: Vec<Desk>,
     pub spares: Vec<Spare>,
+    pub lobby: Room,
 }
 
 impl Floor {
@@ -71,13 +76,14 @@ impl Floor {
     }
 }
 
+fn cell_origin(cell: u32) -> (u32, u32) {
+    let col = cell % GRID_COLS;
+    let row = cell / GRID_COLS;
+    (OUTER_MARGIN + col * ROOM_W, OUTER_MARGIN + row * ROOM_H)
+}
+
 fn room_origin(index: u32) -> (u32, u32) {
-    let col = index % SHELF_ROOMS_PER_ROW;
-    let row = index / SHELF_ROOMS_PER_ROW;
-    (
-        ROOM_GAP + col * (ROOM_W + ROOM_GAP),
-        ROOM_GAP + row * (ROOM_H + ROOM_GAP),
-    )
+    cell_origin(CELLS[index as usize])
 }
 
 fn desk_origin(room_x: u32, room_y: u32, slot: u32) -> (u32, u32) {
@@ -137,10 +143,20 @@ pub fn pack_floor(roles: &[Role]) -> Floor {
         }
     }
 
-    let width = rooms.iter().map(|r| r.x + r.w).max().unwrap_or(0) + ROOM_GAP;
-    let height = rooms.iter().map(|r| r.y + r.h).max().unwrap_or(0) + ROOM_GAP;
+    let (lx, ly) = cell_origin(LOBBY_CELL);
+    let lobby = Room {
+        department: "lobby".to_string(),
+        visual_family: "lobby".to_string(),
+        x: lx,
+        y: ly,
+        w: ROOM_W,
+        h: ROOM_H,
+    };
 
-    Floor { tile: TILE, width, height, rooms, desks, spares }
+    let width = rooms.iter().map(|r| r.x + r.w).max().unwrap_or(0) + OUTER_MARGIN;
+    let height = rooms.iter().map(|r| r.y + r.h).max().unwrap_or(0) + OUTER_MARGIN;
+
+    Floor { tile: TILE, width, height, rooms, desks, spares, lobby }
 }
 
 pub fn studio_floor() -> Floor {
@@ -379,5 +395,76 @@ mod spare_tests {
             before.spares.iter().any(|s| s.x == taken.x && s.y == taken.y),
             "a new role should occupy a slot that was already a spare"
         );
+    }
+}
+
+#[cfg(test)]
+mod lobby_tests {
+    use super::*;
+
+    #[test]
+    fn the_eight_rooms_ring_a_central_lobby() {
+        let f = studio_floor();
+        assert_eq!(f.rooms.len(), 8);
+        assert_eq!(f.lobby.department, "lobby");
+
+        assert_eq!(f.lobby.x * 2 + f.lobby.w, f.width, "lobby is not horizontally centred");
+        assert_eq!(f.lobby.y * 2 + f.lobby.h, f.height, "lobby is not vertically centred");
+        assert!(f.rooms.iter().any(|r| r.y + r.h == f.lobby.y));
+        assert!(f.rooms.iter().any(|r| r.y == f.lobby.y + f.lobby.h));
+        assert!(f.rooms.iter().any(|r| r.x + r.w == f.lobby.x));
+        assert!(f.rooms.iter().any(|r| r.x == f.lobby.x + f.lobby.w));
+    }
+
+    #[test]
+    fn no_room_overlaps_the_lobby() {
+        let f = studio_floor();
+        for r in &f.rooms {
+            let disjoint = r.x + r.w <= f.lobby.x
+                || f.lobby.x + f.lobby.w <= r.x
+                || r.y + r.h <= f.lobby.y
+                || f.lobby.y + f.lobby.h <= r.y;
+            assert!(disjoint, "{} overlaps the lobby", r.department);
+        }
+    }
+
+    #[test]
+    fn rooms_share_walls_rather_than_leaving_gaps() {
+        let f = studio_floor();
+        for r in &f.rooms {
+            let touches = f
+                .rooms
+                .iter()
+                .filter(|o| o.department != r.department)
+                .any(|o| {
+                    (o.x == r.x + r.w || r.x == o.x + o.w) && o.y == r.y
+                        || (o.y == r.y + r.h || r.y == o.y + o.h) && o.x == r.x
+                });
+            let touches_lobby = (f.lobby.x == r.x + r.w || r.x == f.lobby.x + f.lobby.w)
+                || (f.lobby.y == r.y + r.h || r.y == f.lobby.y + f.lobby.h);
+            assert!(
+                touches || touches_lobby,
+                "{} is isolated; the suite should be contiguous",
+                r.department
+            );
+        }
+    }
+
+    #[test]
+    fn the_floor_bounds_contain_the_lobby() {
+        let f = studio_floor();
+        assert!(f.lobby.x + f.lobby.w <= f.width);
+        assert!(f.lobby.y + f.lobby.h <= f.height);
+    }
+
+    #[test]
+    fn every_grid_cell_is_used_exactly_once() {
+        let f = studio_floor();
+        let mut origins: Vec<(u32, u32)> =
+            f.rooms.iter().map(|r| (r.x, r.y)).collect();
+        origins.push((f.lobby.x, f.lobby.y));
+        origins.sort();
+        origins.dedup();
+        assert_eq!(origins.len(), (GRID_COLS * GRID_ROWS) as usize);
     }
 }

@@ -285,6 +285,59 @@ function roomProps(parent, room, cx, cz, tint) {
   }
 }
 
+function buildLobby(parent, lobby, cx, cz) {
+  const rx = lobby.x - cx, rz = lobby.y - cz;
+  const mid = { x: rx + lobby.w / 2, z: rz + lobby.h / 2 };
+
+  const mesh = new THREE.InstancedMesh(
+    tileGeo,
+    new THREE.MeshLambertMaterial({ vertexColors: true }),
+    lobby.w * lobby.h
+  );
+  mesh.receiveShadow = true;
+  const m = new THREE.Matrix4();
+  const c = new THREE.Color();
+  let i = 0;
+  for (let ix = 0; ix < lobby.w; ix++)
+    for (let iz = 0; iz < lobby.h; iz++) {
+      m.makeTranslation(rx + ix + 0.5, 0.1, rz + iz + 0.5);
+      mesh.setMatrixAt(i, m);
+      const ring = Math.min(ix, iz, lobby.w - 1 - ix, lobby.h - 1 - iz);
+      mesh.setColorAt(i, c.setHex(ring === 0 ? 0x3f4757 : (ix + iz) % 2 ? 0x465062 : 0x404859));
+      i++;
+    }
+  mesh.instanceMatrix.needsUpdate = true;
+  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  parent.add(mesh);
+
+  parent.add(place(buildCoffeeBar(), mid.x - 2.4, 0.2, rz + 1.0).group);
+  parent.add(place(buildSofa(0xffc84a), mid.x + 1.2, 0.2, mid.z - 0.9, Math.PI).group);
+  parent.add(place(buildSofa(0x3ce0c8), mid.x + 1.2, 0.2, mid.z + 1.3).group);
+  parent.add(place(buildMeetingTable(0xa678ff), mid.x - 2.2, 0.2, mid.z + 0.4).group);
+
+  for (const [px, pz] of [
+    [rx + 0.9, rz + 0.9], [rx + lobby.w - 0.9, rz + 0.9],
+    [rx + 0.9, rz + lobby.h - 0.9], [rx + lobby.w - 0.9, rz + lobby.h - 0.9],
+    [mid.x + 3.6, mid.z], [mid.x - 4.4, mid.z + 1.9],
+  ]) {
+    parent.add(place(buildPlant(), px, 0.2, pz).group);
+  }
+
+  parent.add(place(buildWaterCooler(), mid.x + 4.6, 0.2, rz + 1.0).group);
+  parent.add(place(buildBoxes(), rx + lobby.w - 1.6, 0.2, rz + lobby.h - 1.9).group);
+
+  const lamp = new THREE.PointLight(0xffe9c8, 46, 24, 1.6);
+  lamp.position.set(mid.x, WALL_H + 0.3, mid.z);
+  parent.add(lamp);
+
+  const sign = makeLabel("LOBBY", 0xe8eef8, 1.5);
+  sign.position.set(mid.x, 0.03, rz + 1.9);
+  sign.rotation.x = -Math.PI / 2;
+  parent.add(sign);
+
+  return mid;
+}
+
 export function buildOffice(floor, scene) {
   rng = 12345;
   const cx = floor.width / 2, cz = floor.height / 2;
@@ -306,15 +359,26 @@ export function buildOffice(floor, scene) {
   skirt.position.y = -0.28;
   world.add(skirt);
 
+  const lobbyMid = floor.lobby ? buildLobby(world, floor.lobby, cx, cz) : null;
+  const lobbyRect = floor.lobby
+    ? {
+        x0: floor.lobby.x - cx + 1.6, x1: floor.lobby.x - cx + floor.lobby.w - 1.6,
+        z0: floor.lobby.y - cz + 1.6, z1: floor.lobby.y - cz + floor.lobby.h - 1.6,
+      }
+    : null;
+
   const roomsByDept = new Map();
+  const doorsByDept = new Map();
   for (const room of floor.rooms) {
     const tint = FAMILY_TINT[room.visual_family] || 0x4aa8ff;
     const rg = new THREE.Group();
     world.add(rg);
     roomsByDept.set(room.department, room);
 
+    const door = doorSideFor(room, cx, cz);
     checkerFloor(rg, room, cx, cz);
-    buildWalls(rg, room, cx, cz, doorSideFor(room, cx, cz));
+    buildWalls(rg, room, cx, cz, door);
+    doorsByDept.set(room.department, doorPoint(room, cx, cz, door));
     neonEdge(rg, room, cx, cz, tint);
     wallScreens(rg, room, cx, cz, tint);
     roomProps(rg, room, cx, cz, tint);
@@ -391,6 +455,11 @@ export function buildOffice(floor, scene) {
         z0: room.y - cz + 1.6, z1: room.y - cz + room.h - 1.1,
       },
       target: home.clone(),
+      lobby: lobbyRect,
+      door: doorsByDept.get(d.department) || home.clone(),
+      route: floor.lobby ? routeToLobby(room, floor, cx, cz, doorsByDept) : [],
+      path: [],
+      inLobby: false,
       wait: rand() * 4,
       facing: 0,
       seed: rand() * 10,
@@ -400,19 +469,44 @@ export function buildOffice(floor, scene) {
   return { world, avatars };
 }
 
+function pointIn(rect, y) {
+  return new THREE.Vector3(
+    rect.x0 + rand() * Math.max(0.1, rect.x1 - rect.x0),
+    y,
+    rect.z0 + rand() * Math.max(0.1, rect.z1 - rect.z0)
+  );
+}
+
 export function wanderStep(a, busy, dt, now) {
   const p = a.person.position;
 
   if (busy) {
-    a.target.copy(a.home);
-  } else if (p.distanceTo(a.target) < 0.12) {
-    if (now > a.wait) {
-      const b = a.bounds;
-      a.target.set(
-        b.x0 + rand() * Math.max(0.1, b.x1 - b.x0),
-        p.y,
-        b.z0 + rand() * Math.max(0.1, b.z1 - b.z0)
-      );
+    if (a.inLobby || a.path.length) {
+      a.path = a.route.length ? a.route.map((v) => v.clone()).reverse() : [];
+      a.inLobby = false;
+    }
+    a.target.copy(a.path.length ? a.path[0] : a.home);
+  } else if (p.distanceTo(a.target) < 0.14) {
+    if (a.path.length) {
+      a.path.shift();
+      if (a.path.length) a.target.copy(a.path[0]);
+      else if (a.inLobby) a.target.copy(pointIn(a.lobby, p.y));
+      else a.target.copy(a.home);
+    } else if (now > a.wait) {
+      const goLobby = a.lobby && !a.inLobby && rand() < 0.35;
+      const comeBack = a.inLobby && rand() < 0.45;
+
+      if (goLobby) {
+        a.inLobby = true;
+        a.path = [...a.route.map((v) => v.clone()), pointIn(a.lobby, p.y)];
+        a.target.copy(a.path[0]);
+      } else if (comeBack) {
+        a.inLobby = false;
+        a.path = [...a.route.map((v) => v.clone()).reverse(), a.home.clone()];
+        a.target.copy(a.path[0]);
+      } else {
+        a.target.copy(pointIn(a.inLobby ? a.lobby : a.bounds, p.y));
+      }
       a.wait = now + 2 + rand() * 7;
     }
   }
@@ -448,4 +542,45 @@ export function makeLabel(text, color, scale = 1) {
   const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false });
   const h = 0.34 * scale;
   return new THREE.Mesh(new THREE.PlaneGeometry(h * (c.width / c.height), h), mat);
+}
+
+function gridCell(room, floor) {
+  const minX = Math.min(floor.lobby.x, ...floor.rooms.map((r) => r.x));
+  const minY = Math.min(floor.lobby.y, ...floor.rooms.map((r) => r.y));
+  return {
+    col: Math.round((room.x - minX) / room.w),
+    row: Math.round((room.y - minY) / room.h),
+  };
+}
+
+export function routeToLobby(room, floor, cx, cz, doorsByDept) {
+  const { col, row } = gridCell(room, floor);
+  const own = doorsByDept.get(room.department);
+  if (col === 1 || row === 1) return [own.clone()];
+
+  const neighbour = floor.rooms.find((r) => {
+    const g = gridCell(r, floor);
+    return g.col === 1 && g.row === row;
+  });
+  if (!neighbour) return [own.clone()];
+
+  const via = new THREE.Vector3(
+    neighbour.x - cx + neighbour.w / 2,
+    own.y,
+    neighbour.y - cz + neighbour.h / 2
+  );
+  const nd = doorsByDept.get(neighbour.department);
+  return nd ? [own.clone(), via, nd.clone()] : [own.clone(), via];
+}
+
+function doorPoint(room, cx, cz, side) {
+  const x0 = room.x - cx, z0 = room.y - cz;
+  const x1 = x0 + room.w, z1 = z0 + room.h;
+  const mx = (x0 + x1) / 2, mz = (z0 + z1) / 2;
+  switch (side) {
+    case "-z": return new THREE.Vector3(mx, 0.22, z0);
+    case "+z": return new THREE.Vector3(mx, 0.22, z1);
+    case "-x": return new THREE.Vector3(x0, 0.22, mz);
+    default: return new THREE.Vector3(x1, 0.22, mz);
+  }
 }
