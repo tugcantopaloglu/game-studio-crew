@@ -2,10 +2,9 @@
 resolver = "2"
 members = [
     "crates/studio-events",
-    "crates/studio-store",
     "crates/studio-context",
+    "crates/studio-store",
     "crates/studio-core",
-    "crates/studiod",
 ]
 
 [workspace.package]
