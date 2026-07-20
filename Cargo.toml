@@ -5,6 +5,7 @@ members = [
     "crates/studio-context",
     "crates/studio-store",
     "crates/studio-core",
+    "crates/studiod",
 ]
 
 [workspace.package]
