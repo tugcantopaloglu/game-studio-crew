@@ -1,6 +1,6 @@
 # ADR 0003: Top-down orthogonal, not isometric
 
-> **Status:** Accepted (design phase), 2026-07-20
+> **Status:** **Superseded by [ADR 0005](0005-voxel-3d-floor.md)**, which moves the floor to a 3D voxel scene. The projection choice below no longer holds. The data-model discipline it argued for does hold, and is precisely what made the reversal a single-file change.
 > Context for [12](../12-visual-workspace.md).
 
 ## Context
