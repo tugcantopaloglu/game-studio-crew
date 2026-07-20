@@ -60,13 +60,25 @@ if (mode === "mcp") {
   const e = load(files[0]);
   const bad = fail(e);
   const init = e.find((o) => o.type === "system" && o.subtype === "init");
-  const tools = (init && (init.tools || init.mcp_servers)) || null;
-  console.log(`  init.mcp_servers: ${JSON.stringify(init?.mcp_servers ?? null)}`);
+  const servers = init?.mcp_servers ?? null;
+  console.log(`  init.mcp_servers: ${JSON.stringify(servers)}`);
+  const registered = Array.isArray(servers) && servers.some((s) => s.name === "probe");
   const sawTool = JSON.stringify(e).includes("mcp__probe__ping");
   const sawResult = JSON.stringify(e).includes("PROBE_MCP_OK");
+  console.log(`  server registered under --bare: ${registered}`);
   console.log(`  tool advertised in session: ${sawTool}`);
   console.log(`  tool actually returned value: ${sawResult}`);
-  if (bad) console.log(`  note: ${bad}`);
+
+  if (bad) {
+    console.log(`  RUN FAILED: ${bad}`);
+    console.log(
+      registered
+        ? "  PARTIAL: --mcp-config survived --bare (server registered) but the run died before connect. Rerun authenticated to confirm."
+        : "  INCONCLUSIVE: run failed before MCP registration could be observed."
+    );
+    return;
+  }
+
   console.log(
     `  VERDICT mcp-under-bare: ${sawResult ? "ATTACHES" : sawTool ? "ADVERTISED BUT NOT CALLED" : "DOES NOT ATTACH (use outbox fallback)"}`
   );

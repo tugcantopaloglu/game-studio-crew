@@ -8,6 +8,20 @@ mkdir -p "$OUT"
 MODEL="${PROBE_MODEL:-opus}"
 COMMON=(--bare --output-format stream-json --include-partial-messages --verbose --permission-mode dontAsk)
 
+if [ -n "${CLAUDECODE:-}${CLAUDE_CODE_CHILD_SESSION:-}" ] && [ -z "${PROBE_FORCE:-}" ]; then
+  echo "REFUSING TO RUN: this shell is inside a Claude Code session."
+  echo
+  echo "A nested 'claude' does not inherit credentials and every probe will"
+  echo "fail with 'Not logged in', producing misleading verdicts."
+  echo
+  echo "Open a separate terminal (PowerShell or Windows Terminal), cd to the"
+  echo "repo, and run this script there. Using the '!' prefix inside Claude"
+  echo "Code is NOT sufficient; it runs in this same session."
+  echo
+  echo "Override with PROBE_FORCE=1 if you know what you are doing."
+  exit 2
+fi
+
 echo "probe model: $MODEL"
 echo "claude: $(command -v claude || echo MISSING)"
 echo
