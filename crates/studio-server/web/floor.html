@@ -60,7 +60,7 @@
 
 <script type="module">
 import * as THREE from "/vendor/three.module.js";
-import { buildOffice, wanderStep } from "/scene.js";
+import { buildOffice, wanderStep, refreshScreens } from "/scene.js";
 
 const RING = { idle: 0x2f3644, running: 0x4ad991, blocked: 0xd9c24a, meeting: 0x6fa8d1, error: 0xd95555 };
 const TERMINAL = new Set(["run_ended","meeting_ended","workflow_ended","decision_recorded","escalated","verify_result","budget_exhausted"]);
@@ -76,7 +76,7 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.15;
+renderer.toneMappingExposure = 1.35;
 stage.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -86,9 +86,9 @@ const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 400);
 const orbit = { theta: Math.PI * 0.25, phi: Math.PI * 0.30, dist: 44, target: new THREE.Vector3(0, 0.5, 0) };
 let freeCam = false;
 
-scene.add(new THREE.AmbientLight(0xb4c2dc, 1.6));
-scene.add(new THREE.HemisphereLight(0xcfe0ff, 0x2a2f3c, 1.2));
-const key = new THREE.DirectionalLight(0xfff4e2, 2.1);
+scene.add(new THREE.AmbientLight(0x8fa0bc, 0.85));
+scene.add(new THREE.HemisphereLight(0xb8ccf0, 0x14181f, 0.7));
+const key = new THREE.DirectionalLight(0xfff2dc, 1.6);
 key.position.set(18, 30, 14);
 key.castShadow = true;
 key.shadow.mapSize.set(2048, 2048);
@@ -98,14 +98,34 @@ key.shadow.camera.left = -S; key.shadow.camera.right = S;
 key.shadow.camera.top = S; key.shadow.camera.bottom = -S;
 key.shadow.bias = -0.0009;
 scene.add(key);
-const fill = new THREE.DirectionalLight(0x6f8fc8, 0.8);
+const fill = new THREE.DirectionalLight(0x4a6494, 0.45);
 fill.position.set(-16, 12, -18);
 scene.add(fill);
 
 let avatars = new Map();
 let ambient = [];
 const state = new Map();
-let stats = { events: 0, tokens: 0, spend: 0, cacheRead: 0, cacheWrite: 0, run: "-" };
+let stats = { events: 0, tokens: 0, spend: 0, cacheRead: 0, cacheWrite: 0, run: "-", history: [], feed: [] };
+let screensDirty = true;
+let lastScreenPaint = 0;
+
+function screenData() {
+  const crewByDept = {};
+  for (const [role, a] of avatars) {
+    (crewByDept[a.dept] ||= []).push({
+      role,
+      tokens: deskState(role).tokens,
+      color: "#" + (RING[deskState(role).ring] || RING.idle).toString(16).padStart(6, "0"),
+    });
+  }
+  const tot = stats.cacheRead + stats.cacheWrite;
+  return {
+    run: stats.run, events: stats.events, tokens: stats.tokens, spend: stats.spend,
+    cacheRead: stats.cacheRead, cacheWrite: stats.cacheWrite,
+    cacheHit: tot ? (stats.cacheRead / tot) * 100 : null,
+    history: stats.history, feed: stats.feed, crewByDept,
+  };
+}
 
 function deskState(role) {
   if (!state.has(role)) state.set(role, { ring: "idle", summary: "", tool: "", tokens: 0 });
@@ -260,6 +280,12 @@ function animate() {
       a.body.rotation.z = 0;
     }
   }
+  if (screensDirty && t - lastScreenPaint > 0.4) {
+    refreshScreens(screenData());
+    screensDirty = false;
+    lastScreenPaint = t;
+  }
+
   renderer.render(scene, camera);
 }
 
@@ -307,7 +333,12 @@ function apply(ev) {
     }
   }
   stats.events++;
+  stats.history.push(Math.min(1, ((ev.data && ev.data.output) || 8) / 120));
+  if (stats.history.length > 26) stats.history.shift();
+  stats.feed.push({ seq: ev.seq, type: ev.type, bad: BAD.has(ev.type) });
+  if (stats.feed.length > 12) stats.feed.shift();
   renderStats();
+  screensDirty = true;
 }
 
 function renderStats() {
@@ -353,6 +384,7 @@ fetch("/floor").then((r) => r.json()).then((f) => {
   avatars = built.avatars;
   ambient = built.ambient || [];
   resize();
+  refreshScreens(screenData());
   animate();
   connect();
 });

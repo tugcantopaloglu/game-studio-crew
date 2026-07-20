@@ -67,88 +67,109 @@ function place(voxels, x, y, z, rotY = 0) {
   return { group: g, mesh };
 }
 
-function screenTexture(style, tint) {
-  const c = document.createElement("canvas");
-  c.width = 256; c.height = 160;
-  const x = c.getContext("2d");
-  x.fillStyle = "#0a0d14";
-  x.fillRect(0, 0, 256, 160);
-  const hex = "#" + tint.toString(16).padStart(6, "0");
+function drawScreen(x, style, tint, data) {
+  const hex = '#' + tint.toString(16).padStart(6, '0');
+  x.fillStyle = '#080b11'; x.fillRect(0, 0, 256, 160);
+  x.fillStyle = hex; x.fillRect(0, 0, 256, 3);
+  x.font = '600 15px ui-monospace, monospace';
+  x.fillStyle = '#8892a4';
+  const money = (n) => String.fromCharCode(36) + n.toFixed(4);
 
-  if (style === "chart") {
-    x.strokeStyle = "#1e2634"; x.lineWidth = 1;
-    for (let i = 1; i < 5; i++) { x.beginPath(); x.moveTo(0, i * 32); x.lineTo(256, i * 32); x.stroke(); }
+  if (style === 'chart') {
+    x.fillText('RUN SPEND', 10, 24);
+    x.font = '700 32px ui-monospace, monospace'; x.fillStyle = hex;
+    x.fillText(money(data.spend || 0), 10, 60);
+    x.font = '600 14px ui-monospace, monospace'; x.fillStyle = '#8892a4';
+    x.fillText((data.tokens || 0).toLocaleString() + ' tokens', 10, 84);
+    x.fillText((data.events || 0) + ' events', 10, 104);
     x.fillStyle = hex;
-    for (let i = 0; i < 14; i++) {
-      const h = 20 + rand() * 110;
-      x.fillRect(10 + i * 17, 150 - h, 11, h);
-    }
-  } else if (style === "code") {
-    const cols = ["#4aa8ff", "#3ce0c8", "#ffc84a", "#8a94a4", "#ff6fae"];
-    for (let i = 0; i < 13; i++) {
-      x.fillStyle = cols[Math.floor(rand() * cols.length)];
-      x.globalAlpha = 0.85;
-      x.fillRect(12 + (i % 3) * 8, 10 + i * 11, 30 + rand() * 170, 5);
-    }
-    x.globalAlpha = 1;
-  } else if (style === "swatch") {
-    const cols = ["#ff6fae", "#a678ff", "#ffc84a", "#3ce0c8", "#4aa8ff", "#ff8a3c"];
-    for (let i = 0; i < 12; i++) {
-      x.fillStyle = cols[i % cols.length];
-      x.fillRect(12 + (i % 4) * 60, 14 + Math.floor(i / 4) * 46, 52, 38);
-    }
-  } else if (style === "wave") {
-    x.strokeStyle = hex; x.lineWidth = 2;
-    x.beginPath();
-    for (let i = 0; i < 256; i++) {
-      const y = 80 + Math.sin(i * 0.12) * 40 * Math.sin(i * 0.021) + (rand() - 0.5) * 8;
-      i ? x.lineTo(i, y) : x.moveTo(i, y);
-    }
+    (data.history || []).forEach((v, i) => {
+      const h = Math.max(2, v * 42);
+      x.fillRect(10 + i * 9, 150 - h, 6, h);
+    });
+  } else if (style === 'code') {
+    x.fillText('EVENT STREAM', 10, 24);
+    x.font = '600 13px ui-monospace, monospace';
+    const feed = (data.feed || []).slice(-8);
+    feed.forEach((e, i) => {
+      x.fillStyle = e.bad ? '#ff6b6b' : i === feed.length - 1 ? hex : '#6d7686';
+      x.fillText(String(e.seq).padStart(3) + '  ' + e.type.slice(0, 22), 10, 46 + i * 14);
+    });
+  } else if (style === 'swatch') {
+    x.fillText('DEPARTMENT', 10, 24);
+    (data.crew || []).slice(0, 5).forEach((c, i) => {
+      const y = 42 + i * 22;
+      x.fillStyle = c.color; x.fillRect(10, y - 10, 12, 12);
+      x.fillStyle = '#aab3c2'; x.font = '600 13px ui-monospace, monospace';
+      x.fillText(c.role.replace(/_/g, ' ').slice(0, 20), 30, y);
+      x.fillStyle = '#5d6675';
+      x.fillText(c.tokens ? String(c.tokens) : '-', 210, y);
+    });
+  } else if (style === 'wave') {
+    x.fillText('ACTIVITY', 10, 24);
+    x.strokeStyle = hex; x.lineWidth = 2; x.beginPath();
+    (data.history || []).forEach((v, i) => {
+      const px = 10 + i * 9, py = 118 - v * 58;
+      i ? x.lineTo(px, py) : x.moveTo(px, py);
+    });
     x.stroke();
-    x.fillStyle = hex; x.globalAlpha = 0.25;
-    for (let i = 0; i < 32; i++) x.fillRect(i * 8, 150 - rand() * 60, 5, rand() * 60);
-    x.globalAlpha = 1;
+    x.font = '700 24px ui-monospace, monospace'; x.fillStyle = hex;
+    x.fillText((data.events || 0) + ' ev', 10, 150);
   } else {
-    x.strokeStyle = hex; x.lineWidth = 2;
-    x.beginPath();
-    for (let i = 0; i < 256; i += 4) {
-      const y = 140 - (i / 256) * 90 - rand() * 25;
-      i ? x.lineTo(i, y) : x.moveTo(i, y);
-    }
-    x.stroke();
+    x.fillText('CACHE HIT', 10, 24);
+    const pct = data.cacheHit;
+    x.font = '700 40px ui-monospace, monospace';
+    x.fillStyle = pct === null || pct === undefined ? '#5d6675' : hex;
+    x.fillText(pct === null || pct === undefined ? '--' : Math.round(pct) + '%', 10, 72);
+    x.fillStyle = '#1a2130'; x.fillRect(10, 90, 236, 14);
+    x.fillStyle = hex; x.fillRect(10, 90, 236 * ((pct || 0) / 100), 14);
+    x.font = '600 13px ui-monospace, monospace'; x.fillStyle = '#8892a4';
+    x.fillText((data.cacheRead || 0).toLocaleString() + ' read', 10, 124);
+    x.fillText((data.cacheWrite || 0).toLocaleString() + ' written', 10, 144);
   }
-
-  const tex = new THREE.CanvasTexture(c);
-  tex.magFilter = THREE.NearestFilter;
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
 }
 
-function wallScreens(parent, room, cx, cz, tint) {
-  const style = SCREEN_STYLE[room.department] || "chart";
-  const rx = room.x - cx, rz = room.y - cz;
-  const n = 3;
-  for (let i = 0; i < n; i++) {
-    const w = 2.0, h = 1.25;
-    const frame = new THREE.Mesh(
-      new THREE.BoxGeometry(w + 0.14, h + 0.14, 0.07),
-      new THREE.MeshLambertMaterial({ color: 0x161a22 })
-    );
-    const px = rx + room.w * (0.22 + i * 0.28);
-    frame.position.set(px, 1.62, rz + WALL_T / 2 + 0.05);
-    parent.add(frame);
+const screens = [];
 
+function wallScreens(parent, room, cx, cz, tint) {
+  const style = SCREEN_STYLE[room.department] || 'chart';
+  const rx = room.x - cx, rz = room.y - cz;
+  for (let i = 0; i < 3; i++) {
+    const w = 2.0, h = 1.25;
+    const px = rx + room.w * (0.2 + i * 0.3);
+    const frame = new THREE.Mesh(
+      new THREE.BoxGeometry(w + 0.16, h + 0.16, 0.08),
+      new THREE.MeshLambertMaterial({ color: 0x11151d })
+    );
+    frame.position.set(px, 1.68, rz + WALL_T / 2 + 0.05);
+    parent.add(frame);
+    const canvas = document.createElement('canvas');
+    canvas.width = 256; canvas.height = 160;
+    const ctx = canvas.getContext('2d');
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.magFilter = THREE.NearestFilter;
+    tex.colorSpace = THREE.SRGBColorSpace;
     const panel = new THREE.Mesh(
       new THREE.PlaneGeometry(w, h),
-      new THREE.MeshBasicMaterial({ map: screenTexture(style, tint) })
+      new THREE.MeshBasicMaterial({ map: tex })
     );
-    panel.position.set(px, 1.62, rz + WALL_T / 2 + 0.10);
+    panel.position.set(px, 1.68, rz + WALL_T / 2 + 0.10);
     parent.add(panel);
+    screens.push({ ctx, tex, style, tint, department: room.department });
   }
-
-  const bounce = new THREE.PointLight(tint, 6, 8, 2);
-  bounce.position.set(rx + room.w * 0.5, 1.5, rz + 1.1);
+  const bounce = new THREE.PointLight(tint, 7, 9, 2);
+  bounce.position.set(rx + room.w * 0.5, 1.6, rz + 1.2);
   parent.add(bounce);
+}
+
+export function refreshScreens(data) {
+  for (const s of screens) {
+    drawScreen(s.ctx, s.style, s.tint, {
+      ...data,
+      crew: (data.crewByDept && data.crewByDept[s.department]) || [],
+    });
+    s.tex.needsUpdate = true;
+  }
 }
 
 function neonEdge(parent, room, cx, cz, tint) {
@@ -261,6 +282,12 @@ function buildShell(parent, floor, cx, cz) {
     strip.position.set(px, -0.12, pz);
     parent.add(strip);
   }
+}
+
+function podFacing(desk, room) {
+  if (!room) return 0;
+  const col = Math.round((desk.x - room.x - 1) / 3);
+  return col % 2 === 0 ? 0 : Math.PI;
 }
 
 function doorSideFor(room, cx, cz) {
@@ -408,6 +435,7 @@ function buildLobby(parent, lobby, cx, cz) {
 
 export function buildOffice(floor, scene) {
   rng = 12345;
+  screens.length = 0;
   const cx = floor.width / 2, cz = floor.height / 2;
   const avatars = new Map();
   const world = new THREE.Group();
@@ -476,16 +504,19 @@ export function buildOffice(floor, scene) {
     const g = new THREE.Group();
     g.position.set(s.x + s.w / 2 - cx, 0.2, s.y + s.h / 2 - cz);
     world.add(g);
+    g.rotation.y = podFacing(s, roomsByDept.get(s.department));
     g.add(place(buildDesk(0x2c3240), 0, 0, 0.28).group);
-    g.add(place(buildChair(tint), 0, 0, -0.42, rand() * 0.8 - 0.4).group);
+    g.add(place(buildChair(tint), 0, 0, -0.42, rand() * 0.7 - 0.35).group);
   }
 
   for (const d of floor.desks) {
     const tint = FAMILY_TINT[d.visual_family] || 0x4aa8ff;
     const room = roomsByDept.get(d.department);
 
+    const facing = podFacing(d, room);
     const fixed = new THREE.Group();
     fixed.position.set(d.x + d.w / 2 - cx, 0.2, d.y + d.h / 2 - cz);
+    fixed.rotation.y = facing;
     world.add(fixed);
     fixed.add(place(buildDesk(tint), 0, 0, 0.28).group);
     fixed.add(place(buildChair(tint), 0, 0, -0.42).group);
@@ -497,9 +528,9 @@ export function buildOffice(floor, scene) {
 
     const person = new THREE.Group();
     const home = new THREE.Vector3(
-      d.x + d.w / 2 - cx,
+      d.x + d.w / 2 - cx + Math.sin(facing) * -0.42,
       0.22,
-      d.y + d.h / 2 - cz - 0.42
+      d.y + d.h / 2 - cz + Math.cos(facing) * -0.42
     );
     person.position.copy(home);
     world.add(person);

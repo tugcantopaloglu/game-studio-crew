@@ -72,32 +72,33 @@ function vox(out, x, y, z, color) {
 function headgear(out, kind, p) {
   switch (kind) {
     case "crown":
-      box(out, 1, 15, 1, 4, 1, 3, p.accent, 3);
-      vox(out, 1, 16, 2, p.accent);
-      vox(out, 2, 17, 2, p.accent);
-      vox(out, 4, 16, 2, p.accent);
+      box(out, 1, 19, 1, 4, 1, 4, p.accent, 3);
+      vox(out, 1, 20, 2, p.accent);
+      vox(out, 3, 21, 2, p.accent);
+      vox(out, 4, 20, 2, p.accent);
       break;
     case "hardhat":
-      box(out, 1, 15, 1, 4, 1, 3, p.accent, 3);
-      box(out, 0, 15, 1, 6, 1, 3, p.accent, 3);
+      box(out, 1, 19, 1, 4, 1, 4, p.accent, 3);
+      box(out, 0, 19, 0, 6, 1, 6, p.accent, 3);
       break;
     case "cap":
-      box(out, 1, 15, 1, 4, 1, 3, p.trim, 3);
-      box(out, 1, 15, 4, 4, 1, 1, p.trim, 3);
+      box(out, 1, 19, 1, 4, 1, 4, p.trim, 3);
+      box(out, 1, 19, 0, 4, 1, 1, p.trim, 3);
       break;
     case "beret":
-      box(out, 1, 15, 1, 4, 1, 3, p.accent, 4);
-      vox(out, 4, 16, 2, p.accent);
+      box(out, 1, 19, 1, 4, 1, 4, p.accent, 4);
+      vox(out, 4, 20, 3, p.accent);
       break;
     case "headset":
-      box(out, 0, 13, 1, 1, 2, 3, p.accent, 2);
-      box(out, 5, 13, 1, 1, 2, 3, p.accent, 2);
-      box(out, 1, 15, 2, 4, 1, 1, p.accent, 2);
+      box(out, 0, 15, 2, 1, 2, 2, p.accent, 2);
+      box(out, 5, 15, 2, 1, 2, 2, p.accent, 2);
+      box(out, 1, 19, 2, 4, 1, 2, p.accent, 2);
+      box(out, 0, 15, 0, 1, 1, 2, p.accent, 2);
       break;
     case "headphones":
-      box(out, 0, 12, 1, 1, 3, 3, p.accent, 2);
-      box(out, 5, 12, 1, 1, 3, 3, p.accent, 2);
-      box(out, 1, 15, 1, 4, 1, 3, p.accent, 2);
+      box(out, 0, 14, 1, 1, 3, 3, p.accent, 2);
+      box(out, 5, 14, 1, 1, 3, 3, p.accent, 2);
+      box(out, 1, 19, 1, 4, 1, 4, p.accent, 2);
       break;
   }
 }
@@ -132,37 +133,74 @@ function prop(out, kind, p) {
   }
 }
 
+const HAIR_STYLE = {
+  studio_director: "short", producer: "short", game_designer: "long",
+  level_designer: "buzz", narrative_designer: "long", ux_designer: "bun",
+  systems_engineer: "buzz", gameplay_engineer: "short", infra_engineer: "buzz",
+  tech_artist: "long", artist: "bun", qa_engineer: "short", audio_designer: "short",
+};
+
+function hair(out, style, p) {
+  box(out, 1, 18, 1, 4, 1, 4, p.hair, 4);
+  box(out, 1, 15, 0, 4, 4, 1, p.hair, 4);
+  switch (style) {
+    case "long":
+      box(out, 0, 13, 0, 6, 5, 2, p.hair, 5);
+      box(out, 0, 14, 1, 1, 4, 3, p.hair, 5);
+      box(out, 5, 14, 1, 1, 4, 3, p.hair, 5);
+      break;
+    case "bun":
+      box(out, 2, 19, 0, 2, 2, 2, p.hair, 5);
+      box(out, 0, 15, 0, 6, 3, 1, p.hair, 5);
+      break;
+    case "buzz":
+      box(out, 0, 17, 0, 6, 1, 5, p.hair, 3);
+      break;
+    default:
+      box(out, 0, 17, 0, 6, 1, 4, p.hair, 4);
+      box(out, 1, 17, 4, 4, 1, 1, p.hair, 4);
+  }
+}
+
 export function buildCharacter(roleId) {
   const p = PALETTES[roleId] || PALETTES.gameplay_engineer;
   const v = [];
 
-  box(v, 1, 0, 1, 2, 4, 3, p.pants);
-  box(v, 3, 0, 1, 2, 4, 3, p.pants);
-  box(v, 1, 0, 1, 2, 1, 3, 0x1a1a20, 3);
-  box(v, 3, 0, 1, 2, 1, 3, 0x1a1a20, 3);
+  box(v, 1, 1, 1, 2, 6, 3, p.pants);
+  box(v, 3, 1, 1, 2, 6, 3, p.pants);
+  box(v, 1, 0, 1, 2, 1, 4, 0x191c22, 3);
+  box(v, 3, 0, 1, 2, 1, 4, 0x191c22, 3);
 
-  box(v, 1, 4, 1, 4, 6, 3, p.shirt);
-  box(v, 1, 9, 1, 4, 1, 3, p.trim, 4);
+  box(v, 1, 7, 1, 4, 6, 3, p.shirt);
+  box(v, 1, 7, 1, 4, 1, 3, p.trim, 4);
+  box(v, 2, 8, 4, 2, 4, 1, p.trim, 5);
 
-  box(v, 0, 4, 1, 1, 5, 3, p.shirt);
-  box(v, 5, 4, 1, 1, 5, 3, p.shirt);
-  box(v, 0, 3, 1, 1, 1, 3, p.skin);
-  box(v, 5, 3, 1, 1, 1, 3, p.skin);
+  box(v, 0, 8, 1, 1, 4, 3, p.shirt);
+  box(v, 5, 8, 1, 1, 4, 3, p.shirt);
+  box(v, 0, 6, 1, 1, 2, 2, p.skin);
+  box(v, 5, 6, 1, 1, 2, 2, p.skin);
 
-  box(v, 2, 10, 2, 2, 1, 2, p.skin);
-  box(v, 1, 11, 1, 4, 4, 3, p.skin);
-  box(v, 1, 14, 1, 4, 1, 3, p.hair, 4);
-  box(v, 1, 13, 0, 4, 2, 1, p.hair, 4);
-  box(v, 0, 12, 1, 1, 3, 3, p.hair, 4);
-  box(v, 5, 12, 1, 1, 3, 3, p.hair, 4);
+  box(v, 2, 13, 2, 2, 1, 2, p.skin, 3);
 
-  vox(v, 2, 12, 4, SKIN_DARK);
-  vox(v, 4, 12, 4, SKIN_DARK);
+  box(v, 1, 14, 1, 4, 4, 4, p.skin);
+  box(v, 1, 14, 0, 4, 3, 1, p.skin, 3);
+  hair(v, HAIR_STYLE[roleId] || "short", p);
+
+  vox(v, 2, 16, 0, SKIN_DARK);
+  vox(v, 4, 16, 0, SKIN_DARK);
+  vox(v, 3, 15, 0, jitterDown(p.skin));
 
   headgear(v, HEADGEAR[roleId] || "none", p);
   prop(v, PROPS[roleId] || "none", p);
 
   return v;
+}
+
+function jitterDown(color) {
+  const r = ((color >> 16) & 255) * 0.82;
+  const g = ((color >> 8) & 255) * 0.82;
+  const b = (color & 255) * 0.82;
+  return (Math.round(r) << 16) | (Math.round(g) << 8) | Math.round(b);
 }
 
 export function buildDesk(tint) {
