@@ -266,3 +266,56 @@ export function buildTestBench(tint) {
   box(v, 6, 7, 2, 1, 1, 1, 0xd95555, 8);
   return v;
 }
+
+export function buildMeetingTable(tint) {
+  const v = [];
+  box(v, 0, 0, 0, 16, 1, 9, 0x3b4250, 4);
+  box(v, 1, 1, 1, 14, 4, 7, 0x2c313c, 3);
+  box(v, 0, 5, 0, 16, 1, 9, 0x4a5262, 5);
+  box(v, 3, 6, 3, 3, 1, 2, tint, 8);
+  box(v, 10, 6, 4, 3, 1, 2, 0xd8d2c0, 6);
+  box(v, 7, 6, 2, 2, 2, 2, 0x8a94a4, 6);
+  return v;
+}
+
+export function buildCoffeeBar() {
+  const v = [];
+  box(v, 0, 0, 0, 14, 6, 5, 0x33394a, 4);
+  box(v, 0, 6, 0, 14, 1, 5, 0x59627a, 5);
+  box(v, 1, 7, 1, 3, 4, 3, 0x22272f, 3);
+  box(v, 2, 8, 4, 1, 2, 1, 0xd97a4a, 8);
+  box(v, 6, 7, 1, 2, 3, 2, 0x8a94a4, 5);
+  box(v, 9, 7, 2, 1, 2, 1, 0xd8d2c0, 6);
+  box(v, 11, 7, 2, 1, 2, 1, 0xd8d2c0, 6);
+  return v;
+}
+
+export function buildWaterCooler() {
+  const v = [];
+  box(v, 0, 0, 0, 4, 8, 4, 0xd4dae4, 4);
+  box(v, 1, 8, 1, 2, 4, 2, 0x5fa8c8, 10);
+  box(v, 1, 3, 4, 2, 2, 1, 0x2b3038, 3);
+  return v;
+}
+
+export function buildShelf() {
+  const v = [];
+  box(v, 0, 0, 0, 12, 16, 4, 0x39404f, 4);
+  for (let s = 0; s < 4; s++) {
+    box(v, 1, 3 + s * 4, 1, 10, 1, 3, 0x2c313c, 3);
+    for (let b = 0; b < 5; b++) {
+      const h = 2 + ((s + b) % 2);
+      box(v, 1 + b * 2, 4 + s * 4, 1, 1, h, 3, [0xc8a24a, 0x8a6fd1, 0x4a90d9, 0xd16f9a, 0x4fb3a5][(s * 5 + b) % 5], 12);
+    }
+  }
+  return v;
+}
+
+export function buildBoxes() {
+  const v = [];
+  box(v, 0, 0, 0, 5, 4, 5, 0x8a7048, 6);
+  box(v, 0, 4, 1, 5, 3, 4, 0x9a7c52, 6);
+  box(v, 5, 0, 1, 4, 3, 4, 0x7d6540, 6);
+  box(v, 1, 7, 2, 3, 1, 2, 0x6a5638, 5);
+  return v;
+}

@@ -60,7 +60,7 @@
 
 <script type="module">
 import * as THREE from "/vendor/three.module.js";
-import { buildOffice } from "/scene.js";
+import { buildOffice, wanderStep } from "/scene.js";
 
 const RING = { idle: 0x2f3644, running: 0x4ad991, blocked: 0xd9c24a, meeting: 0x6fa8d1, error: 0xd95555 };
 const TERMINAL = new Set(["run_ended","meeting_ended","workflow_ended","decision_recorded","escalated","verify_result","budget_exhausted"]);
@@ -75,17 +75,20 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
 stage.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0b0d12);
 
 const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 400);
-const orbit = { theta: Math.PI * 0.25, phi: Math.PI * 0.28, dist: 40, target: new THREE.Vector3(0, 1, 0) };
+const orbit = { theta: Math.PI * 0.25, phi: Math.PI * 0.30, dist: 44, target: new THREE.Vector3(0, 0.5, 0) };
 let freeCam = false;
 
-scene.add(new THREE.AmbientLight(0x9aa8c0, 1.1));
-const key = new THREE.DirectionalLight(0xfff4e2, 1.5);
+scene.add(new THREE.AmbientLight(0xb4c2dc, 1.6));
+scene.add(new THREE.HemisphereLight(0xcfe0ff, 0x2a2f3c, 1.2));
+const key = new THREE.DirectionalLight(0xfff4e2, 2.1);
 key.position.set(18, 30, 14);
 key.castShadow = true;
 key.shadow.mapSize.set(2048, 2048);
@@ -95,7 +98,7 @@ key.shadow.camera.left = -S; key.shadow.camera.right = S;
 key.shadow.camera.top = S; key.shadow.camera.bottom = -S;
 key.shadow.bias = -0.0009;
 scene.add(key);
-const fill = new THREE.DirectionalLight(0x5a76a8, 0.5);
+const fill = new THREE.DirectionalLight(0x6f8fc8, 0.8);
 fill.position.set(-16, 12, -18);
 scene.add(fill);
 
@@ -200,13 +203,29 @@ addEventListener("resize", resize);
 const clock = new THREE.Clock();
 function animate() {
   requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
   const t = clock.getElapsedTime();
   for (const [role, a] of avatars) {
     const st = deskState(role);
     const busy = st.ring === "running" || st.ring === "meeting";
-    a.body.position.y = 0.02 + (busy ? Math.sin(t * 6 + a.seed) * 0.02 : Math.sin(t * 1.3 + a.seed) * 0.006);
-    a.body.rotation.y = busy ? Math.sin(t * 3 + a.seed) * 0.06 : 0;
-    a.ringMat.opacity = st.ring === "idle" ? 0.32 : 0.7 + Math.sin(t * 4 + a.seed) * 0.3;
+    const walking = wanderStep(a, busy, dt, t);
+
+    if (walking) {
+      a.body.position.y = Math.abs(Math.sin(t * 9 + a.seed)) * 0.05;
+      a.body.rotation.z = Math.sin(t * 9 + a.seed) * 0.05;
+      let d = a.facing - a.body.rotation.y;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      a.body.rotation.y += d * 0.16;
+    } else {
+      a.body.position.y = busy
+        ? Math.sin(t * 6 + a.seed) * 0.02
+        : Math.sin(t * 1.3 + a.seed) * 0.007;
+      a.body.rotation.z = 0;
+      const rest = busy ? Math.sin(t * 3 + a.seed) * 0.06 : 0;
+      a.body.rotation.y += (rest - a.body.rotation.y) * 0.08;
+    }
+    a.ringMat.opacity = st.ring === "idle" ? 0.28 : 0.7 + Math.sin(t * 4 + a.seed) * 0.3;
   }
   renderer.render(scene, camera);
 }

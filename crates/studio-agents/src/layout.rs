@@ -32,6 +32,16 @@ pub struct Desk {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Spare {
+    pub department: String,
+    pub visual_family: String,
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Room {
     pub department: String,
     pub visual_family: String,
@@ -48,6 +58,7 @@ pub struct Floor {
     pub height: u32,
     pub rooms: Vec<Room>,
     pub desks: Vec<Desk>,
+    pub spares: Vec<Spare>,
 }
 
 impl Floor {
@@ -81,6 +92,7 @@ fn desk_origin(room_x: u32, room_y: u32, slot: u32) -> (u32, u32) {
 pub fn pack_floor(roles: &[Role]) -> Floor {
     let mut rooms = Vec::new();
     let mut desks = Vec::new();
+    let mut spares = Vec::new();
 
     for (index, department) in Department::ALL.iter().enumerate() {
         let (rx, ry) = room_origin(index as u32);
@@ -111,12 +123,24 @@ pub fn pack_floor(roles: &[Role]) -> Floor {
                 h: DESK_H,
             });
         }
+
+        for slot in members.len() as u32..DESK_SLOTS {
+            let (dx, dy) = desk_origin(rx, ry, slot);
+            spares.push(Spare {
+                department: department.id().to_string(),
+                visual_family: department.visual_family().to_string(),
+                x: dx,
+                y: dy,
+                w: DESK_W,
+                h: DESK_H,
+            });
+        }
     }
 
     let width = rooms.iter().map(|r| r.x + r.w).max().unwrap_or(0) + ROOM_GAP;
     let height = rooms.iter().map(|r| r.y + r.h).max().unwrap_or(0) + ROOM_GAP;
 
-    Floor { tile: TILE, width, height, rooms, desks }
+    Floor { tile: TILE, width, height, rooms, desks, spares }
 }
 
 pub fn studio_floor() -> Floor {
@@ -282,5 +306,78 @@ mod tests {
             let count = floor.desks.iter().filter(|k| k.department == d.id()).count();
             assert_eq!(coords.len(), count, "{} has stacked desks", d.id());
         }
+    }
+}
+
+#[cfg(test)]
+mod spare_tests {
+    use super::*;
+
+    #[test]
+    fn every_room_is_filled_to_capacity_with_desks() {
+        let floor = studio_floor();
+        for d in Department::ALL {
+            let occupied = floor.desks.iter().filter(|k| k.department == d.id()).count();
+            let spare = floor.spares.iter().filter(|k| k.department == d.id()).count();
+            assert_eq!(
+                occupied + spare,
+                DESK_SLOTS as usize,
+                "{} does not fill its slots",
+                d.id()
+            );
+        }
+    }
+
+    #[test]
+    fn a_spare_never_sits_on_an_occupied_desk() {
+        let floor = studio_floor();
+        for s in &floor.spares {
+            for d in &floor.desks {
+                assert!(
+                    !(s.x == d.x && s.y == d.y),
+                    "spare collides with {} at {},{}",
+                    d.role,
+                    s.x,
+                    s.y
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_spare_sits_inside_its_room() {
+        let floor = studio_floor();
+        for s in &floor.spares {
+            let r = floor.room(&s.department).unwrap();
+            assert!(
+                s.x >= r.x && s.y >= r.y && s.x + s.w <= r.x + r.w && s.y + s.h <= r.y + r.h,
+                "a spare escapes the {} room",
+                s.department
+            );
+        }
+    }
+
+    #[test]
+    fn adding_a_role_converts_a_spare_rather_than_moving_anything() {
+        let before = studio_floor();
+        let mut roles: Vec<Role> = REGISTRY.to_vec();
+        roles.push(Role {
+            id: "netcode_engineer",
+            title: "Netcode Engineer",
+            tier: 3,
+            department: Department::Engineering,
+            model: studio_context::Model::Opus,
+            effort: crate::Effort::High,
+            escalates_to: Some("systems_engineer"),
+            tool_class: crate::ToolClass::Engineer,
+        });
+        let after = pack_floor(&roles);
+
+        assert_eq!(after.spares.len(), before.spares.len() - 1);
+        let taken = after.desk("netcode_engineer").unwrap();
+        assert!(
+            before.spares.iter().any(|s| s.x == taken.x && s.y == taken.y),
+            "a new role should occupy a slot that was already a spare"
+        );
     }
 }
