@@ -4,7 +4,7 @@ mod stream;
 
 pub use proc::ProcessGroup;
 pub use spec::{Effort, SessionMode, WorkerSpec};
-pub use stream::{CliEvent, McpServer, StreamState};
+pub use stream::{map_cli_event, CliEvent, McpServer, StreamState};
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};

@@ -413,3 +413,88 @@ mod tests {
         assert_eq!(ev, CliEvent::Other { kind: "some_future_event".into() });
     }
 }
+
+pub fn map_cli_event(ev: &CliEvent) -> Option<(studio_events::EventType, serde_json::Value)> {
+    use studio_events::EventType as E;
+
+    match ev {
+        CliEvent::ToolCall { tool, args_digest } => {
+            let (ty, mut data) = match tool.as_str() {
+                "mcp__studio__capsule_submit" => (E::CapsuleSubmitted, serde_json::json!({})),
+                "mcp__studio__escalate" => (E::Escalated, serde_json::json!({})),
+                "mcp__studio__request_meeting" => (E::MeetingStarted, serde_json::json!({})),
+                _ => (E::ToolCall, serde_json::json!({})),
+            };
+            data["tool"] = serde_json::Value::String(tool.clone());
+            data["args_digest"] = serde_json::Value::String(args_digest.clone());
+            Some((ty, data))
+        }
+
+        CliEvent::ToolResult { tool, ok, bytes } => Some((
+            E::ToolResult,
+            serde_json::json!({"tool": tool, "ok": ok, "bytes": bytes}),
+        )),
+
+        CliEvent::UsageDelta { usage } => Some((
+            E::TokenUsage,
+            serde_json::json!({
+                "estimate": true,
+                "input": usage.input,
+                "output": usage.output,
+                "cache_read": usage.cache_read,
+                "cache_creation": usage.cache_creation,
+            }),
+        )),
+
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+    use studio_events::EventType as E;
+
+    fn tool(name: &str) -> CliEvent {
+        CliEvent::ToolCall { tool: name.into(), args_digest: "d".into() }
+    }
+
+    #[test]
+    fn a_plain_tool_use_maps_to_tool_call() {
+        let (ty, data) = map_cli_event(&tool("Read")).unwrap();
+        assert_eq!(ty, E::ToolCall);
+        assert_eq!(data["tool"], "Read");
+    }
+
+    #[test]
+    fn the_orchestrator_tools_map_to_their_collaboration_events() {
+        assert_eq!(map_cli_event(&tool("mcp__studio__capsule_submit")).unwrap().0, E::CapsuleSubmitted);
+        assert_eq!(map_cli_event(&tool("mcp__studio__escalate")).unwrap().0, E::Escalated);
+        assert_eq!(map_cli_event(&tool("mcp__studio__request_meeting")).unwrap().0, E::MeetingStarted);
+    }
+
+    #[test]
+    fn an_interim_usage_delta_is_marked_as_an_estimate() {
+        let ev = CliEvent::UsageDelta {
+            usage: studio_events::Usage { input: 2, output: 50, cache_read: 8867, cache_creation: 0 },
+        };
+        let (ty, data) = map_cli_event(&ev).unwrap();
+        assert_eq!(ty, E::TokenUsage);
+        assert_eq!(data["estimate"], true);
+        assert_eq!(data["cache_read"], 8867);
+    }
+
+    #[test]
+    fn stream_noise_produces_no_studio_event() {
+        assert!(map_cli_event(&CliEvent::Text { text: "pong".into() }).is_none());
+        assert!(map_cli_event(&CliEvent::Other { kind: "x".into() }).is_none());
+        assert!(map_cli_event(&CliEvent::Unparsed { raw: "junk".into() }).is_none());
+    }
+
+    #[test]
+    fn a_tool_call_digest_reaches_the_wire_without_the_arguments() {
+        let (_, data) = map_cli_event(&tool("Read")).unwrap();
+        assert_eq!(data["args_digest"], "d");
+        assert!(data.get("input").is_none());
+    }
+}

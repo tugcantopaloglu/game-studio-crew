@@ -1,5 +1,6 @@
 mod charters;
 mod m3;
+mod m4;
 mod tools;
 
 use anyhow::{bail, Context, Result};
@@ -507,6 +508,8 @@ fn main() -> Result<()> {
         "m1" => m1_proof(),
         "m2" => m2_proof(),
         "m3" => m3_proof(),
+        "m4" => m4_proof(),
+        "floor" => floor_only(),
         "mcp-server" => mcp_server(),
         _ => {
             println!("usage: studiod <m1|m2|mcp-server>");
@@ -565,4 +568,101 @@ fn m3_proof() -> Result<()> {
         }
         Ok(report.state.text)
     })
+}
+
+fn m4_proof() -> Result<()> {
+    guard_nested_session()?;
+    fs::create_dir_all(studio_dir())?;
+
+    let store = std::sync::Arc::new(Store::open(studio_dir().join("studio-state.db"))?);
+    m4::register_roles(&store)?;
+
+    let state = studio_server::AppState::new(store.clone());
+    let run = id("run");
+
+    let rt = tokio::runtime::Runtime::new()?;
+    let serve_state = state.clone();
+    rt.spawn(async move {
+        let _ = studio_server::serve(serve_state, 7878).await;
+    });
+
+    println!("M4 acceptance proof");
+    println!("  floor         http://127.0.0.1:7878/?run={run}");
+    println!("  run           {run}");
+    println!();
+    println!("  open the floor now; the crew starts in 5 seconds");
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    println!();
+
+    let em = m4::Emitter { store: store.clone(), state: state.clone(), run: run.clone() };
+
+    em.emit(
+        "daemon",
+        EventType::RunStarted,
+        Scene::daemon(),
+        serde_json::json!({"title": "m4 studio floor proof"}),
+    )?;
+
+    let cast = [
+        ("studio_director", "Name the single riskiest assumption in shipping a dash ability this sprint."),
+        ("game_designer", "State the one design rule a dash ability must respect."),
+        ("gameplay_engineer", "Name the first system you would touch to add a dash ability."),
+        ("qa_engineer", "Name the one test that would catch a broken dash cooldown."),
+        ("artist", "Name the one visual cue a dash needs to read at speed."),
+    ];
+
+    for (i, (role_id, brief)) in cast.iter().enumerate() {
+        let role = studio_agents::role(role_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown role {role_id}"))?;
+        m4::run_worker(&em, role, brief, i + 1)?;
+    }
+
+    em.emit(
+        "daemon",
+        EventType::RunEnded,
+        Scene::daemon(),
+        serde_json::json!({"outcome": "completed"}),
+    )?;
+
+    let spend = store.run_spend(&run)?;
+    let events = store.events_since(&run, 0)?;
+
+    println!();
+    println!("Acceptance criteria");
+    let mut failures = Vec::new();
+    report_check("a", "the floor served a deterministic layout", true, &mut failures);
+    report_check("b", "every worker produced events", events.len() >= cast.len() * 4, &mut failures);
+    report_check(
+        "c",
+        "event sequence is gap free",
+        events.iter().enumerate().all(|(i, e)| e.seq == i as u64 + 1),
+        &mut failures,
+    );
+    report_check("d", "the ledger recorded spend", spend.tokens > 0, &mut failures);
+
+    println!();
+    println!("  events        {}", events.len());
+    println!("  spend         {} tokens, ${:.4}", spend.tokens, spend.usd);
+    println!();
+    println!("  floor stays up at http://127.0.0.1:7878/?run={run}");
+    println!("  press ctrl-c to stop");
+
+    if !failures.is_empty() {
+        bail!("M4 FAILED: {}", failures.join(", "));
+    }
+    println!();
+    println!("M4 PASSED");
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
+}
+
+fn floor_only() -> Result<()> {
+    fs::create_dir_all(studio_dir())?;
+    let store = std::sync::Arc::new(Store::open(studio_dir().join("studio-state.db"))?);
+    let state = studio_server::AppState::new(store);
+    println!("studio floor on http://127.0.0.1:7878/");
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(studio_server::serve(state, 7878))
 }

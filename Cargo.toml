@@ -5,8 +5,10 @@ members = [
     "crates/studio-context",
     "crates/studio-store",
     "crates/studio-core",
+    "crates/studio-agents",
     "crates/studio-engine",
     "crates/studio-mcp",
+    "crates/studio-server",
     "crates/studio-verify",
     "crates/studiod",
 ]
@@ -22,8 +24,10 @@ studio-events = { path = "crates/studio-events" }
 studio-store = { path = "crates/studio-store" }
 studio-context = { path = "crates/studio-context" }
 studio-core = { path = "crates/studio-core" }
+studio-agents = { path = "crates/studio-agents" }
 studio-engine = { path = "crates/studio-engine" }
 studio-mcp = { path = "crates/studio-mcp" }
+studio-server = { path = "crates/studio-server" }
 studio-verify = { path = "crates/studio-verify" }
 
 anyhow = "1"

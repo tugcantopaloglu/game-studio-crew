@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Studio Floor</title>
+<style>
+  :root {
+    --bg: #12141a;
+    --panel: #191c24;
+    --line: #262b36;
+    --text: #d7dbe4;
+    --dim: #7d8596;
+    --leadership: #c8a24a;
+    --design: #8a6fd1;
+    --engineering: #4a90d9;
+    --art: #d16f9a;
+    --audio: #4fb3a5;
+    --qa: #d97a4a;
+    --idle: #444b5a;
+    --running: #4ad991;
+    --blocked: #d9c24a;
+    --meeting: #6fa8d1;
+    --error: #d95555;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    display: grid; grid-template-columns: 1fr 380px; height: 100vh;
+  }
+  #stage { position: relative; overflow: hidden; }
+  canvas { display: block; }
+  #side {
+    border-left: 1px solid var(--line); background: var(--panel);
+    display: grid; grid-template-rows: auto auto 1fr; min-height: 0;
+  }
+  header { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  h1 { margin: 0 0 2px; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
+  #conn { color: var(--dim); font-size: 11px; }
+  #conn.live { color: var(--running); }
+  #conn.down { color: var(--error); }
+  #stats { padding: 10px 14px; border-bottom: 1px solid var(--line); display: grid; gap: 4px; }
+  .stat { display: flex; justify-content: space-between; }
+  .stat b { font-weight: 600; }
+  #feed { overflow-y: auto; padding: 8px 0; min-height: 0; }
+  .ev { padding: 3px 14px; display: grid; grid-template-columns: 46px 1fr; gap: 8px; }
+  .ev:hover { background: #1f2330; }
+  .ev .seq { color: var(--dim); text-align: right; }
+  .ev .t { color: var(--dim); }
+  .ev.terminal .t { color: var(--text); font-weight: 600; }
+  .ev.bad .t { color: var(--error); }
+  #tip {
+    position: absolute; pointer-events: none; max-width: 300px;
+    background: #0d0f14; border: 1px solid var(--line); border-radius: 4px;
+    padding: 8px 10px; font-size: 12px; display: none; z-index: 10;
+  }
+  #tip b { display: block; margin-bottom: 4px; }
+  #tip .s { color: var(--dim); }
+  #legend { padding: 8px 14px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="c"></canvas><div id="tip"></div></div>
+<div id="side">
+  <header>
+    <h1>Studio Floor</h1>
+    <div id="conn">connecting</div>
+  </header>
+  <div id="stats">
+    <div class="stat"><span>run</span><b id="s-run">-</b></div>
+    <div class="stat"><span>events</span><b id="s-events">0</b></div>
+    <div class="stat"><span>tokens</span><b id="s-tokens">0</b></div>
+    <div class="stat"><span>spend</span><b id="s-spend">$0.0000</b></div>
+    <div class="stat"><span>cache hit</span><b id="s-cache">-</b></div>
+  </div>
+  <div id="feed"></div>
+  <div id="legend">shape = tier &middot; fill = department &middot; ring = state</div>
+</div>
+<script>
+const FAMILY = {
+  leadership: "--leadership", design: "--design", engineering: "--engineering",
+  art: "--art", audio: "--audio", qa: "--qa",
+};
+const RING = {
+  idle: "--idle", running: "--running", blocked: "--blocked",
+  meeting: "--meeting", error: "--error",
+};
+const TERMINAL = new Set([
+  "run_ended","meeting_ended","workflow_ended","decision_recorded",
+  "escalated","verify_result","budget_exhausted",
+]);
+const BAD = new Set(["escalated","budget_exhausted","inconclusive_flagged"]);
+
+const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+const tip = document.getElementById("tip");
+
+let floor = null;
+let scale = 1, ox = 0, oy = 0;
+const desks = new Map();
+let stats = { events: 0, tokens: 0, spend: 0, cacheRead: 0, cacheWrite: 0, run: "-" };
+let hover = null;
+
+function deskState(role) {
+  if (!desks.has(role)) desks.set(role, { ring: "idle", summary: "", tool: "", tokens: 0 });
+  return desks.get(role);
+}
+
+function resize() {
+  const stage = document.getElementById("stage");
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = stage.clientWidth * dpr;
+  canvas.height = stage.clientHeight * dpr;
+  canvas.style.width = stage.clientWidth + "px";
+  canvas.style.height = stage.clientHeight + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (floor) {
+    const t = floor.tile;
+    scale = Math.min(stage.clientWidth / (floor.width * t), stage.clientHeight / (floor.height * t)) * 0.92;
+    ox = (stage.clientWidth - floor.width * t * scale) / 2;
+    oy = (stage.clientHeight - floor.height * t * scale) / 2;
+  }
+  draw();
+}
+
+function tileRect(x, y, w, h) {
+  const t = floor.tile * scale;
+  return [ox + x * t, oy + y * t, w * t, h * t];
+}
+
+function drawAvatar(cx, cy, r, tier, fill, ring) {
+  ctx.fillStyle = fill;
+  ctx.beginPath();
+  if (tier === 1) {
+    for (let i = 0; i < 3; i++) {
+      const a = -Math.PI / 2 + (i * 2 * Math.PI) / 3;
+      const px = cx + Math.cos(a) * r, py = cy + Math.sin(a) * r;
+      i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    }
+    ctx.closePath();
+  } else if (tier === 2) {
+    ctx.rect(cx - r * 0.8, cy - r * 0.8, r * 1.6, r * 1.6);
+  } else {
+    ctx.arc(cx, cy, r * 0.85, 0, Math.PI * 2);
+  }
+  ctx.fill();
+
+  ctx.strokeStyle = ring;
+  ctx.lineWidth = Math.max(2, r * 0.22);
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 1.25, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+function draw() {
+  ctx.fillStyle = css("--bg");
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (!floor) return;
+
+  for (const room of floor.rooms) {
+    const [x, y, w, h] = tileRect(room.x, room.y, room.w, room.h);
+    ctx.fillStyle = "#171a22";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = css("--line");
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+    ctx.fillStyle = css("--dim");
+    ctx.font = `${Math.max(9, 10 * scale)}px ui-monospace, monospace`;
+    ctx.fillText(room.department, x + 6, y + 14);
+  }
+
+  for (const desk of floor.desks) {
+    const st = deskState(desk.role);
+    const [x, y, w, h] = tileRect(desk.x, desk.y, desk.w, desk.h);
+    ctx.fillStyle = "#1d212b";
+    ctx.fillRect(x, y, w, h);
+
+    const fill = css(FAMILY[desk.visual_family] || "--engineering");
+    const ring = css(RING[st.ring] || "--idle");
+    drawAvatar(x + w / 2, y + h / 2, Math.min(w, h) * 0.28, desk.tier, fill, ring);
+
+    ctx.fillStyle = st.ring === "idle" ? css("--dim") : css("--text");
+    ctx.font = `${Math.max(8, 9 * scale)}px ui-monospace, monospace`;
+    ctx.textAlign = "center";
+    ctx.fillText(desk.role.replace(/_/g, " "), x + w / 2, y + h - 4);
+    ctx.textAlign = "left";
+  }
+}
+
+function deskAt(px, py) {
+  if (!floor) return null;
+  const t = floor.tile * scale;
+  const gx = (px - ox) / t, gy = (py - oy) / t;
+  return floor.desks.find(
+    (d) => gx >= d.x && gx <= d.x + d.w && gy >= d.y && gy <= d.y + d.h
+  ) || null;
+}
+
+canvas.addEventListener("mousemove", (e) => {
+  const r = canvas.getBoundingClientRect();
+  const d = deskAt(e.clientX - r.left, e.clientY - r.top);
+  hover = d;
+  if (!d) { tip.style.display = "none"; return; }
+  const st = deskState(d.role);
+  tip.innerHTML =
+    `<b>${d.title}</b>` +
+    `<div class="s">tier ${d.tier} &middot; ${d.department} &middot; ${st.ring}</div>` +
+    (st.tool ? `<div class="s">tool: ${st.tool}</div>` : "") +
+    (st.tokens ? `<div class="s">${st.tokens.toLocaleString()} tokens</div>` : "") +
+    (st.summary ? `<div>${st.summary}</div>` : "");
+  tip.style.display = "block";
+  tip.style.left = Math.min(e.clientX - r.left + 14, r.width - 310) + "px";
+  tip.style.top = (e.clientY - r.top + 14) + "px";
+});
+canvas.addEventListener("mouseleave", () => { tip.style.display = "none"; hover = null; });
+
+function roleOf(actor) {
+  return (actor || "").split("#")[0];
+}
+
+function apply(ev) {
+  const role = roleOf(ev.actor);
+  const st = role && role !== "daemon" ? deskState(role) : null;
+
+  switch (ev.type) {
+    case "run_started": stats.run = ev.run; break;
+    case "worker_spawned": if (st) { st.ring = "running"; st.summary = ""; } break;
+    case "worker_state_changed":
+      if (st) {
+        const to = ev.data.to;
+        st.ring = to === "reaped" || to === "refused" ? "idle"
+          : to === "stalled" || to === "timed_out" ? "error"
+          : to === "rate_limited" ? "blocked" : "running";
+      }
+      break;
+    case "worker_exited":
+      if (st) st.ring = ev.data.outcome === "completed" ? "idle" : "error";
+      break;
+    case "tool_call": if (st) st.tool = ev.data.tool || ""; break;
+    case "meeting_started": if (st) st.ring = "meeting"; break;
+    case "meeting_ended": if (st) st.ring = "running"; break;
+    case "escalated": if (st) st.ring = "blocked"; break;
+    case "capsule_submitted": if (st) st.summary = ev.data.summary || st.summary; break;
+    case "token_usage": {
+      const d = ev.data;
+      stats.tokens += (d.input || 0) + (d.output || 0);
+      stats.spend += d.cost_usd || 0;
+      stats.cacheRead += d.cache_read || 0;
+      stats.cacheWrite += d.cache_creation || 0;
+      if (st) st.tokens += (d.input || 0) + (d.output || 0);
+      break;
+    }
+    case "verify_result":
+      if (st) st.ring = ev.data.verdict === "pass" ? "running" : "error";
+      break;
+  }
+
+  stats.events++;
+  render();
+}
+
+function render() {
+  document.getElementById("s-run").textContent = stats.run;
+  document.getElementById("s-events").textContent = stats.events.toLocaleString();
+  document.getElementById("s-tokens").textContent = stats.tokens.toLocaleString();
+  document.getElementById("s-spend").textContent = "$" + stats.spend.toFixed(4);
+  const tot = stats.cacheRead + stats.cacheWrite;
+  document.getElementById("s-cache").textContent =
+    tot ? ((stats.cacheRead / tot) * 100).toFixed(0) + "%" : "-";
+  draw();
+}
+
+const feed = document.getElementById("feed");
+function logEvent(ev) {
+  const row = document.createElement("div");
+  row.className = "ev" + (TERMINAL.has(ev.type) ? " terminal" : "") + (BAD.has(ev.type) ? " bad" : "");
+  const who = ev.actor === "daemon" ? "" : " " + roleOf(ev.actor);
+  row.innerHTML = `<span class="seq">${ev.seq}</span><span class="t">${ev.type}${who}</span>`;
+  feed.appendChild(row);
+  while (feed.childElementCount > 400) feed.removeChild(feed.firstChild);
+  feed.scrollTop = feed.scrollHeight;
+}
+
+const conn = document.getElementById("conn");
+let lastSeq = 0;
+
+function connect() {
+  const params = new URLSearchParams(location.search);
+  const run = params.get("run");
+  const url = new URL("/ws", location.href);
+  url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  if (run) url.searchParams.set("run", run);
+  url.searchParams.set("since_seq", String(lastSeq));
+
+  const ws = new WebSocket(url);
+  ws.onopen = () => { conn.textContent = "live"; conn.className = "live"; };
+  ws.onclose = () => {
+    conn.textContent = "reconnecting";
+    conn.className = "down";
+    setTimeout(connect, 1000);
+  };
+  ws.onmessage = (m) => {
+    let ev;
+    try { ev = JSON.parse(m.data); } catch { return; }
+    if (typeof ev.seq === "number") lastSeq = Math.max(lastSeq, ev.seq);
+    apply(ev);
+    logEvent(ev);
+  };
+}
+
+fetch("/floor")
+  .then((r) => r.json())
+  .then((f) => { floor = f; resize(); connect(); });
+
+window.addEventListener("resize", resize);
+</script>
+</body>
+</html>

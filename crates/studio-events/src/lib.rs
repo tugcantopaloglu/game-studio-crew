@@ -1,3 +1,6 @@
+pub mod coalesce;
+pub use coalesce::{plan_resume, Coalescer, ResumePlan, FLUSH_INTERVAL, SNAPSHOT_GAP_THRESHOLD};
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
