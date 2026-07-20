@@ -131,34 +131,76 @@ function drawScreen(x, style, tint, data) {
 
 const screens = [];
 
-function wallScreens(parent, room, cx, cz, tint) {
-  const style = SCREEN_STYLE[room.department] || 'chart';
-  const rx = room.x - cx, rz = room.y - cz;
-  for (let i = 0; i < 3; i++) {
+function mountWall(room, cx, cz, doorSide, glassSide) {
+  const order = ["-z", "+z", "-x", "+x"];
+  const usable = order.filter((k) => k !== doorSide && k !== glassSide);
+  const key = usable[0] || "+z";
+
+  const x0 = room.x - cx, z0 = room.y - cz;
+  const x1 = x0 + room.w, z1 = z0 + room.h;
+  const inset = WALL_T / 2 + 0.1;
+
+  switch (key) {
+    case "-z":
+      return { key, along: "x", a0: x0, a1: x1, fixed: z0 + inset, rot: 0 };
+    case "+z":
+      return { key, along: "x", a0: x0, a1: x1, fixed: z1 - inset, rot: Math.PI };
+    case "-x":
+      return { key, along: "z", a0: z0, a1: z1, fixed: x0 + inset, rot: Math.PI / 2 };
+    default:
+      return { key, along: "z", a0: z0, a1: z1, fixed: x1 - inset, rot: -Math.PI / 2 };
+  }
+}
+
+function wallScreens(parent, room, cx, cz, tint, doorSide, glassSide) {
+  const style = SCREEN_STYLE[room.department] || "chart";
+  const m = mountWall(room, cx, cz, doorSide, glassSide);
+  const span = m.a1 - m.a0;
+  const count = span > 15 ? 3 : 2;
+
+  for (let i = 0; i < count; i++) {
     const w = 2.0, h = 1.25;
-    const px = rx + room.w * (0.2 + i * 0.3);
+    const t = (i + 1) / (count + 1);
+    const along = m.a0 + span * t;
+
+    const px = m.along === "x" ? along : m.fixed;
+    const pz = m.along === "x" ? m.fixed : along;
+
+    const group = new THREE.Group();
+    group.position.set(px, 1.68, pz);
+    group.rotation.y = m.rot;
+    parent.add(group);
+
     const frame = new THREE.Mesh(
       new THREE.BoxGeometry(w + 0.16, h + 0.16, 0.08),
       new THREE.MeshLambertMaterial({ color: 0x11151d })
     );
-    frame.position.set(px, 1.68, rz + WALL_T / 2 + 0.05);
-    parent.add(frame);
-    const canvas = document.createElement('canvas');
+    frame.position.z = -0.03;
+    group.add(frame);
+
+    const canvas = document.createElement("canvas");
     canvas.width = 256; canvas.height = 160;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext("2d");
     const tex = new THREE.CanvasTexture(canvas);
     tex.magFilter = THREE.NearestFilter;
     tex.colorSpace = THREE.SRGBColorSpace;
+
     const panel = new THREE.Mesh(
       new THREE.PlaneGeometry(w, h),
       new THREE.MeshBasicMaterial({ map: tex })
     );
-    panel.position.set(px, 1.68, rz + WALL_T / 2 + 0.10);
-    parent.add(panel);
+    panel.position.z = 0.03;
+    group.add(panel);
+
     screens.push({ ctx, tex, style, tint, department: room.department });
   }
+
   const bounce = new THREE.PointLight(tint, 7, 9, 2);
-  bounce.position.set(rx + room.w * 0.5, 1.6, rz + 1.2);
+  bounce.position.set(
+    m.along === "x" ? (m.a0 + m.a1) / 2 : m.fixed + (m.key === "-x" ? 1 : -1),
+    1.6,
+    m.along === "x" ? m.fixed + (m.key === "-z" ? 1 : -1) : (m.a0 + m.a1) / 2
+  );
   parent.add(bounce);
 }
 
@@ -477,7 +519,7 @@ export function buildOffice(floor, scene) {
     buildWalls(rg, room, cx, cz, door, glass === door ? null : glass, tint);
     doorsByDept.set(room.department, doorPoint(room, cx, cz, door));
     neonEdge(rg, room, cx, cz, tint);
-    wallScreens(rg, room, cx, cz, tint);
+    wallScreens(rg, room, cx, cz, tint, door, glass);
     roomProps(rg, room, cx, cz, tint);
 
     const rx = room.x - cx, rz = room.y - cz;
@@ -495,7 +537,11 @@ export function buildOffice(floor, scene) {
     }
 
     const sign = makeLabel(room.department.toUpperCase(), tint, 1.3);
-    sign.position.set(rx + room.w / 2, WALL_H - 0.42, rz + 0.02);
+    if (door === "-z") {
+      sign.position.set(rx + room.w * 0.22, WALL_H - 0.42, rz + 0.02);
+    } else {
+      sign.position.set(rx + room.w / 2, WALL_H - 0.42, rz + 0.02);
+    }
     rg.add(sign);
   }
 
