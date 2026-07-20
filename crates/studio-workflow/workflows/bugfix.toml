@@ -1,0 +1,32 @@
+schema_version = 1
+id = "bugfix"
+title = "Bug fix"
+
+[[nodes]]
+id = "triage"
+role = "qa_engineer"
+inputs = []
+budget_tokens = 50000
+
+[[nodes]]
+id = "fix"
+role = "gameplay_engineer"
+inputs = ["triage"]
+budget_tokens = 150000
+
+[[edges]]
+from = "triage"
+to = "fix"
+carries = "task_return"
+
+[[gates]]
+after = "triage"
+kind = "verify"
+scope = "test_fast"
+on_fail = "escalate"
+
+[[gates]]
+after = "fix"
+kind = "verify"
+scope = "test_full"
+on_fail = "repair"

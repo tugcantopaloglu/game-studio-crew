@@ -2,7 +2,9 @@
 resolver = "2"
 members = [
     "crates/studio-events",
+    "crates/studio-budget",
     "crates/studio-context",
+    "crates/studio-standards",
     "crates/studio-store",
     "crates/studio-core",
     "crates/studio-agents",
@@ -10,6 +12,7 @@ members = [
     "crates/studio-mcp",
     "crates/studio-server",
     "crates/studio-verify",
+    "crates/studio-workflow",
     "crates/studiod",
 ]
 
@@ -21,7 +24,9 @@ license = "MIT"
 
 [workspace.dependencies]
 studio-events = { path = "crates/studio-events" }
+studio-standards = { path = "crates/studio-standards" }
 studio-store = { path = "crates/studio-store" }
+studio-budget = { path = "crates/studio-budget" }
 studio-context = { path = "crates/studio-context" }
 studio-core = { path = "crates/studio-core" }
 studio-agents = { path = "crates/studio-agents" }
@@ -29,6 +34,7 @@ studio-engine = { path = "crates/studio-engine" }
 studio-mcp = { path = "crates/studio-mcp" }
 studio-server = { path = "crates/studio-server" }
 studio-verify = { path = "crates/studio-verify" }
+studio-workflow = { path = "crates/studio-workflow" }
 
 anyhow = "1"
 blake3 = "1"

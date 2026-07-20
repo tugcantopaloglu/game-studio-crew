@@ -1,0 +1,59 @@
+schema_version = 1
+id = "release"
+title = "Release"
+
+[[nodes]]
+id = "freeze"
+role = "producer"
+inputs = []
+budget_tokens = 40000
+
+[[nodes]]
+id = "build"
+role = "infra_engineer"
+inputs = ["freeze"]
+budget_tokens = 120000
+
+[[nodes]]
+id = "smoke"
+role = "qa_engineer"
+inputs = ["build"]
+budget_tokens = 80000
+
+[[nodes]]
+id = "signoff"
+role = "studio_director"
+inputs = ["smoke"]
+budget_tokens = 50000
+
+[[edges]]
+from = "freeze"
+to = "build"
+carries = "task_return"
+
+[[edges]]
+from = "build"
+to = "smoke"
+carries = "task_return"
+
+[[edges]]
+from = "smoke"
+to = "signoff"
+carries = "task_return"
+
+[[gates]]
+after = "freeze"
+kind = "verify"
+scope = "compile"
+on_fail = "block"
+
+[[gates]]
+after = "build"
+kind = "verify"
+scope = "export"
+on_fail = "escalate"
+
+[[gates]]
+after = "signoff"
+kind = "approval"
+on_fail = "block"

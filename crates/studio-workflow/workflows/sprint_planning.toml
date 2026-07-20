@@ -1,0 +1,36 @@
+schema_version = 1
+id = "sprint_planning"
+title = "Sprint planning"
+
+[[nodes]]
+id = "scope"
+role = "producer"
+inputs = []
+budget_tokens = 70000
+
+[[nodes]]
+id = "decompose"
+role = "producer"
+inputs = ["scope"]
+budget_tokens = 90000
+
+[[nodes]]
+id = "estimate"
+role = "systems_engineer"
+inputs = ["decompose"]
+budget_tokens = 60000
+
+[[edges]]
+from = "scope"
+to = "decompose"
+carries = "task_return"
+
+[[edges]]
+from = "decompose"
+to = "estimate"
+carries = "consult_answer"
+
+[[gates]]
+after = "estimate"
+kind = "approval"
+on_fail = "block"

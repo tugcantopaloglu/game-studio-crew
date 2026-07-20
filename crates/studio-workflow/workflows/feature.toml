@@ -1,0 +1,76 @@
+schema_version = 1
+id = "feature"
+title = "Feature development"
+
+[[nodes]]
+id = "design"
+role = "game_designer"
+inputs = []
+budget_tokens = 60000
+
+[[nodes]]
+id = "implement"
+role = "gameplay_engineer"
+inputs = ["design"]
+budget_tokens = 200000
+
+[[nodes]]
+id = "art_pass"
+role = "artist"
+inputs = ["design"]
+budget_tokens = 80000
+optional = true
+
+[[nodes]]
+id = "integrate"
+role = "gameplay_engineer"
+inputs = ["implement", "art_pass"]
+budget_tokens = 120000
+
+[[nodes]]
+id = "review"
+role = "qa_engineer"
+inputs = ["integrate"]
+budget_tokens = 60000
+
+[[edges]]
+from = "design"
+to = "implement"
+carries = "task_return"
+
+[[edges]]
+from = "design"
+to = "art_pass"
+carries = "task_return"
+
+[[edges]]
+from = "implement"
+to = "integrate"
+carries = "task_return"
+
+[[edges]]
+from = "art_pass"
+to = "integrate"
+carries = "task_return"
+
+[[edges]]
+from = "integrate"
+to = "review"
+carries = "task_return"
+
+[[gates]]
+after = "implement"
+kind = "verify"
+scope = "test_fast"
+on_fail = "repair"
+
+[[gates]]
+after = "integrate"
+kind = "verify"
+scope = "test_full"
+on_fail = "repair"
+
+[[gates]]
+after = "review"
+kind = "approval"
+on_fail = "block"
