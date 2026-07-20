@@ -113,8 +113,8 @@ Both resolved in the favorable direction. Their fallbacks remain documented in [
 - **M1 (complete):** CLI probes settled all three verdicts ([`probes/`](../../probes/README.md), [ADR 0004](adr/0004-explicit-context-control-not-bare.md)), then supervisor + state store + ledger. `studiod m1` proves (a) usage capture from `result`, (b) cache reuse on a second same-prefix spawn, (c) clean reaping on Windows: cold $0.0785 to warm $0.0046, 17.1x.
 - **M2 (complete):** context engine: frozen charters, capsules, summarization ladder, ADR store, MCP server.
 - **M3 (complete):** Godot end-to-end through verify + repair loop, proven against the real engine and a real repair worker. Broken script detected and named, worker fixed it, re-verify green in one round.
-- **M4:** event protocol + minimal studio floor (avatars, status rings, event feed).
-- **M5:** workflows, budget governance, remaining engines, full visual workspace.
+- **M4 (complete):** event protocol, coalescer, WebSocket transport, and the studio floor. Rendered in 3D with voxel characters rather than the 2D grid originally specified ([ADR 0005](adr/0005-voxel-3d-floor.md)), with the office, wandering agents, follow camera and click-to-inspect.
+- **M5 (complete for Godot):** workflow DAGs and their executor, budget governance and the degradation ladder, the R0-R4 trust model, meetings driven by real events, the workflow track, minimap and timeline scrubber. **The Unity and UE5 profiles are written but unprobed** ([07](07-engine-layer.md), [13](13-risks.md) R11); only Godot has been run end to end.
 
 ## Reading order
 

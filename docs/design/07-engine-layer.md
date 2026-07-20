@@ -1,6 +1,6 @@
 # 07: Engine Layer
 
-> **Status:** v0.1, 2026-07-20, design phase, no runtime code.
+> **Status:** v0.2. Godot is probed and corrected by probing; Unity and UE5 are written but unprobed. See the probe-status table below.
 > **This document is the single source of truth for the engine profile TOML schema and the three filled profiles.** [08](08-verification.md) names a parser for each report format these commands emit; [09](09-workflows.md) and [11](11-index-and-bootstrap.md) reference profiles by id. This is why there are **13 roles, not 49** ([04](04-agent-graph.md)): an engine is this layer, not a role axis.
 
 ## What an engine profile is
@@ -55,11 +55,35 @@ Charter composition and hashing follow [02](02-context-engine.md) exactly: `[pro
 
 Rare specialisms are overlays, not roles ([04](04-agent-graph.md)) and not prefix content. A capability fragment lands in L3 **only when the task brief text matches its trigger** (substring match on the task title/description). It is in the volatile suffix precisely so that adding netcode guidance to one task does not fragment the frozen prefix cache for every other worker of that role. Triggering is deterministic and logged.
 
+## Probe status: only Godot has been run
+
+**Godot is measured. Unity and UE5 are not.** The Godot profile below was
+corrected three times by running it, and every correction was a case where the
+documented behaviour and the actual behaviour disagreed. The Unity and UE5
+profiles are derived from documentation and have **never been executed**, because
+neither engine is installed on the machine this was built on.
+
+| Engine | Status | What that means |
+|---|---|---|
+| **godot** | **probed** | Commands run, exit codes read, report parsing exercised against real output. |
+| unity | **unprobed** | Plausible, untested. Treat every command line as a hypothesis. |
+| ue5 | **unprobed** | Plausible, untested. Treat every command line as a hypothesis. |
+
+This distinction is load-bearing because of what probing Godot found: `--check-only`
+only checked scripts reachable from the main scene, it exited 0 even when it did
+report a parse error, and `--import` segfaulted on a valid project. None of that
+is discoverable by reading documentation. There is no reason to expect Unity and
+UE5 to be kinder, and [ADR 0004](adr/0004-explicit-context-control-not-bare.md)
+is the standing reminder of what an unexecuted assumption costs.
+
+Before either is used in anger, run its commands, read the exit codes, and expect
+to rewrite this file.
+
 ## The three profiles (filled, real command lines)
 
 Command lines below are the real invocations; `{…}` placeholders are daemon-substituted. Every profile fills all five commands and names the report format for the ones that produce machine-readable output, which is what [08](08-verification.md) parses (verification #4).
 
-### Unity (`id = "unity"`)
+### Unity (`id = "unity"`) — **unprobed**
 
 Unity serializes the editor lock, so `test_full` is effectively one concurrent op per project ([13](13-risks.md)). A `Studio.CI` static-method helper (installed by [11](11-index-and-bootstrap.md)) wraps import/export so the daemon drives them via `-executeMethod`.
 
@@ -77,7 +101,7 @@ test_full = { format = "nunit3", path = "{out}/results-playmode.xml" }
 export    = { format = "unity_buildreport", path = "{out}/buildreport.json" }
 ```
 
-### Unreal Engine 5 (`id = "ue5"`)
+### Unreal Engine 5 (`id = "ue5"`) — **unprobed**
 
 Build via UBT (`Build.bat`), cook/package via `RunUAT.bat BuildCookRun`, tests via the editor automation runner with a JSON report.
 
@@ -96,7 +120,7 @@ test_full = { format = "ue_automation_json", path = "{out}/automation/index.json
 
 UE `.umap`/`.uasset` are binary. The index and trust model treat them specially ([10](10-standards-and-trust.md), [11](11-index-and-bootstrap.md), [13](13-risks.md)). The automation report schema drifts across 5.x, which is why [08](08-verification.md)'s parser is defensive.
 
-### Godot 4 (`id = "godot"`)
+### Godot 4 (`id = "godot"`) — **probed, and corrected by probing**
 
 Fully headless, no editor lock. The cheapest engine to run and the M3 target ([00](00-overview.md)). GUT for tests (JUnit XML output). Compile goes through a studio helper, for reasons M3 measured on Godot 4.7.1:
 

@@ -2,7 +2,7 @@
 
 A ground-up rebuild of `claude-code-game-studios` as a **Rust daemon** that drives `claude` CLI subprocesses as stateless workers, owns all context and budget itself, and streams a realtime event feed to a browser-based visual studio floor.
 
-> **Status:** M1. Design documents plus a CLI probe harness; the daemon itself is not yet written. The probes have run and **overturned a founding assumption** ([ADR 0004](docs/design/adr/0004-explicit-context-control-not-bare.md)). See [`docs/design/`](docs/design/00-overview.md) and [`probes/`](probes/README.md).
+> **Status:** M1 through M5 built and running against the real CLI and a real engine. `studiod studio` serves an interactive 3D studio floor: you assign tasks, convene meetings and start workflows from the browser, and watch real `claude` workers do them. **Godot is the only probed engine**; the Unity and UE5 profiles are written but have never been executed ([07](docs/design/07-engine-layer.md)).
 
 ## The problem
 
