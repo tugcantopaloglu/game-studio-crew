@@ -20,7 +20,7 @@ CREATE TABLE roles (
   id            TEXT PRIMARY KEY,        -- e.g. 'gameplay_engineer' (see 04)
   tier          INTEGER NOT NULL,        -- 1|2|3
   department    TEXT NOT NULL,
-  model         TEXT NOT NULL,           -- 'fable' | 'opus'
+  model         TEXT NOT NULL,           -- 'fable' | 'opus' | 'haiku' (summarizer only)
   effort        TEXT NOT NULL,
   escalates_to  TEXT REFERENCES roles(id)
 );

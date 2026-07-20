@@ -20,8 +20,10 @@ Game Studio Crew is a re-architecture of `claude-code-game-studios`. The origina
 
 The rebuild is a **Rust daemon** that treats `claude` CLI subprocesses as **stateless workers**. The daemon owns all context, all budget, all state, and streams a realtime event feed to a browser-based visual studio floor. Workers are cheap, disposable, and told only what they need for one task.
 
-- **Tier 1** roles run on **Fable 5** (fast, cheap).
-- **Tier 2 and Tier 3** roles run on **Opus 4.8**.
+- **Tier 1** is the top of the tree: a single `studio_director` seat on **Fable 5**.
+- **Tier 2 and Tier 3** (department leads and specialists) run on **Opus 4.8**.
+
+Fable is the more expensive model, not the cheaper one ($10/$50 per MTok against Opus at $5/$25), which is exactly why it sits on the one lowest-volume seat. See [04](04-agent-graph.md).
 - **Unity, Unreal Engine 5 and Godot 4** are all first-class.
 
 **Hard constraint: no API keys.** Everything runs through the user's Claude Code **subscription** via the CLI. This is the founding decision. See [ADR 0001](adr/0001-claude-cli-as-worker.md).
@@ -89,7 +91,7 @@ Confirmed against `code.claude.com` docs this session. Every doc that leans on t
 
 - `claude -p --output-format stream-json --include-partial-messages` streams NDJSON: `system`/`init`, `stream_event` with `content_block_delta`, tool use, tool result, and a terminal `result`.
 - **`--bare`** skips auto-loading of `CLAUDE.md`, hooks, skills, plugins and MCP. This is the **primary token lever**.
-- `--system-prompt-file` replaces the system prompt entirely. `--model` accepts `fable` and `opus`. `--effort low|medium|high|xhigh|max`.
+- `--system-prompt-file` replaces the system prompt entirely. `--model` accepts `fable`, `opus` and `haiku`. `--effort low|medium|high|xhigh|max`.
 - `--session-id`, `--resume`, `--fork-session`. Sessions persist as JSONL under `~/.claude/projects/<slug>/`; lookup is scoped to the working directory.
 - The terminal `result` carries `usage` (`input`, `output`, `cache_read`, `cache_creation`) plus `cost_usd` and `modelUsage`.
 - Prompt caching is automatic, keyed on **exact system-prompt bytes + model**, TTL **5 minutes**. Identical prefixes across separate subprocesses **do** hit cache.

@@ -15,7 +15,7 @@ One task → one `claude` invocation, assembled from the layered prompt ([02](02
 claude -p
   --bare
   --system-prompt-file <frozen L0..L2 charter>   # 02; prefix_hash recorded in sessions (03)
-  --model <fable|opus>                            # from role tier (04)
+  --model <fable|opus|haiku>                      # from role tier (04); haiku for the summarizer only
   --effort <low|medium|high|xhigh|max>            # role floor, possibly degraded (06)
   --session-id <new uuid>                         # or --resume for repair/recovery
   --permission-mode dontAsk --allowedTools <role allowlist>  # 04
@@ -81,7 +81,7 @@ This converges on the true (hidden) TPM without ever being told it, and self-hea
 
 ## Stall watchdog
 
-Every worker has a watchdog timer reset on each NDJSON line. No output for longer than the stall threshold (role-dependent; higher for Tier-3 `max`-effort work that thinks a long time before emitting) transitions to `Stalled` and kills the process. The threshold is deliberately generous. A long silent think is normal on hard tasks ([02](02-context-engine.md) pricing note: output dominates on generation-heavy roles), but bounded, so a wedged subprocess can't hold a slot forever.
+Every worker has a watchdog timer reset on each NDJSON line. No output for longer than the stall threshold (role-dependent; highest for the Tier-1 and Tier-2 `xhigh`-effort roles that think a long time before emitting) transitions to `Stalled` and kills the process. The threshold is deliberately generous. A long silent think is normal on hard tasks ([02](02-context-engine.md) pricing note: output dominates on generation-heavy roles), but bounded, so a wedged subprocess can't hold a slot forever.
 
 ## 429 and 600s handling
 

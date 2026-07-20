@@ -37,14 +37,14 @@ Applied in order as a scope approaches its limit. Each step is cheaper than the 
 graph TD
   S0[under budget: run normally] --> S1
   S1["1. Effort downshift<br/>drop role effort one band (never below floor, 04)"] --> S2
-  S2["2. Model downshift<br/>route eligible Tier-2 work to fable where the role permits"] --> S3
+  S2["2. Summarizer downshift<br/>route distillation work to haiku"] --> S3
   S3["3. Trim L3<br/>fewer pushed ADRs, tighter symbol slice, shorter capsule caps"] --> S4
   S4["4. Force-summarize<br/>reset a bloated session into a fresh one (see below)"] --> S5
   S5["5. Hard stop<br/>no new spawns in scope; finish in-flight; escalate to studio_director"]
 ```
 
 1. **Effort downshift**: lower `--effort` one band, respecting the role floor ([04](04-agent-graph.md)). Cheapest lever, smallest quality cost.
-2. **Model downshift**: where a role and task permit, route to `--model fable`. Not all roles are eligible (Tier-3 systems work isn't); the registry marks eligibility.
+2. **Summarizer downshift**: route the summarization ladder's distillation work to `--model haiku` ($1/$5 per MTok). Note the direction: **there is no step that routes work to Fable.** Fable is 2x Opus ($10/$50 against $5/$25), so moving work onto it raises spend. The only model move that saves money is downward to haiku, and only the summarizer is eligible, because it does bounded extraction rather than judgment. Tier 1 stays on Fable regardless of budget state; if the director's spend is the problem, the answer is fewer director invocations, not a cheaper director.
 3. **Trim L3**: the context engine tightens the volatile layer: fewer pushed ADRs (top-3 not top-5), a narrower symbol slice, lower capsule render caps. The frozen prefix is untouched, so cache warmth is preserved even while degrading.
 4. **Force-summarize**: **the emphasized lever.** A long-lived session accumulates a bloated JSONL history; every `--resume` re-processes it. Force-summarize distills the session's state into a single task capsule ([02](02-context-engine.md)) and **starts a fresh session** seeded with that capsule as L3, discarding the heavy history. This collapses a session whose per-turn input has crept up back down to a clean frozen-prefix-plus-small-L3 shape, often reclaiming more budget than steps 1-3 combined, because it attacks input-token bloat at its root.
 5. **Hard stop**: no new workers spawn in the scope; in-flight workers finish; the daemon escalates to `studio_director` ([04](04-agent-graph.md)) with a spend report. `budget_exhausted` fires. Nothing is silently dropped. The human sees the stop.

@@ -37,7 +37,7 @@ Prompt caching is a prefix match: a single byte difference anywhere in the prefi
 2. **No timestamps, no interpolation, no per-run identifiers** anywhere in L0-L2. The date, run id, session id, and role instance all belong in L3.
 3. **Reject `{{` markers** in any prefix source file. A template marker that survives into a frozen charter means an un-substituted variable, fail the build loudly rather than ship a poisoned prefix.
 4. **Deterministic ordering.** Fragment concatenation order, list order, and any serialized structure sort by a stable key. No set iteration, no map ordering.
-5. **Pad past the model's minimum cacheable prefix or it silently never caches.** Minimums (confirmed this session): **Opus 4.8 = 4096 tokens, Fable 5 = 2048 tokens**. A 3k-token charter caches on a Tier-1 (Fable) role but **silently won't** on a Tier-2/3 (Opus) role, `cache_creation` stays 0 with no error. The builder pads short Opus charters up to 4096 tokens with a stable, meaningful convention block (never whitespace filler, which invites accidental edits).
+5. **Pad past the model's minimum cacheable prefix or it silently never caches.** Minimums (confirmed this session): **Opus 4.8 = 4096 tokens, Fable 5 = 2048 tokens**. A 3k-token charter caches on the Tier-1 (Fable) seat but **silently won't** on a Tier-2/3 (Opus) role, `cache_creation` stays 0 with no error. The builder pads short Opus charters up to 4096 tokens with a stable, meaningful convention block (never whitespace filler, which invites accidental edits).
 
 The builder emits a `prompt_frozen` event ([05](05-event-protocol.md)) with the hash, layers, and byte count every time it composes a prefix. A changed hash for an unchanged role is a bug the ledger will surface as a cratered `cache_hit_ratio`.
 
@@ -91,7 +91,7 @@ Context is distilled upward, cheaply, at phase boundaries. **Supersession rule: 
 |---|---|---|---|
 | **Turn digest** | one-line "what this worker turn did" | **extracted by the daemon** from the capsule's `summary` + `outcome`: pure reduction over data the worker already produced | **zero model tokens** |
 | **Task capsule** | the capsule above, stored | the worker's own output | (already paid) |
-| **Sprint rollup** | a paragraph across a sprint's task capsules | distilled by a **cheap model** (`--model fable --effort low`) at the phase boundary, **20s per agent spacing** to stay under rate limits | small, Tier-1 priced |
+| **Sprint rollup** | a paragraph across a sprint's task capsules | distilled by a **cheap model** (`--model haiku`) at the phase boundary, **20s per agent spacing** to stay under rate limits | small; haiku is $1/$5 per MTok, the cheapest tier available |
 
 The sprint-rollup distillation has a **zero-cost template fallback that always works**: if the cheap-model call is rate-limited, fails, or is over budget, the daemon emits a deterministic template rollup (counts, outcomes, decision list, open questions concatenated) with no model call. The system never blocks on summarization.
 

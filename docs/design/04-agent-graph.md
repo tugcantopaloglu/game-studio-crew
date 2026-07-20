@@ -18,11 +18,13 @@ Rare specialisms (e.g. shader optimization, netcode, localization) are **not** s
 
 | Tier | Model | Effort band | Used for |
 |---|---|---|---|
-| 1 | **Fable 5** | `low`-`medium` | high-volume content and mechanical production work |
-| 2 | **Opus 4.8** | `medium`-`high` | most engineering and design judgment |
-| 3 | **Opus 4.8** | `high`-`xhigh` | hardest systems work and studio-level arbitration |
+| 1 | **Fable 5** | `xhigh` | studio-level vision, cross-department arbitration, sprint framing. One seat. |
+| 2 | **Opus 4.8** | `high`-`xhigh` | department leadership and the hardest systems work |
+| 3 | **Opus 4.8** | `low`-`high` | hands-on implementation across every department |
 
-Model per invocation is derived from the role's tier; it is not stored per-task. The daemon passes `--model` and `--effort` from the row below (effort may be raised one band by a workflow node, never lowered below the role floor).
+Tier 1 is the top of the escalation tree, matching the convention of the project this replaces. Model per invocation is derived from the role's tier; it is not stored per-task. The daemon passes `--model` and `--effort` from the row below (effort may be raised one band by a workflow node, never lowered below the role floor).
+
+**Fable costs 2x Opus** ($10/$50 per MTok against $5/$25), so it is deliberately confined to the single lowest-volume seat, where judgment quality compounds across everything downstream and the invocation count is smallest. Putting Fable on high-volume production roles would be the most expensive possible arrangement of the same 13 roles. This is also why the degradation ladder ([06](06-budget-governance.md)) has no "downshift to Fable" step: routing work to Fable raises spend, it does not lower it.
 
 ## The registry
 
@@ -30,33 +32,33 @@ Model per invocation is derived from the role's tier; it is not stored per-task.
 
 | id | Title | Tier | Dept | Model | Effort | escalates_to |
 |---|---|---|---|---|---|---|
-| `studio_director` | Studio Director | 3 | leadership | opus | xhigh | *(human)* |
+| `studio_director` | Studio Director | 1 | leadership | fable | xhigh | *(human)* |
 | `producer` | Producer | 2 | production | opus | high | `studio_director` |
 | `game_designer` | Game Designer | 2 | design | opus | high | `producer` |
-| `level_designer` | Level Designer | 1 | design | fable | medium | `game_designer` |
-| `narrative_designer` | Narrative Designer | 1 | design | fable | medium | `game_designer` |
-| `ux_designer` | UX/UI Designer | 1 | design | fable | medium | `game_designer` |
-| `systems_engineer` | Systems & Tools Engineer | 3 | engineering | opus | xhigh | `studio_director` |
-| `gameplay_engineer` | Gameplay Engineer | 2 | engineering | opus | high | `systems_engineer` |
-| `tech_artist` | Technical Artist | 2 | art | opus | medium | `systems_engineer` |
-| `artist` | Artist | 1 | art | fable | low | `tech_artist` |
-| `audio_designer` | Audio Designer | 1 | audio | fable | low | `game_designer` |
-| `qa_engineer` | QA Engineer | 2 | qa | opus | medium | `producer` |
-| `infra_engineer` | Build & Infra Engineer | 2 | infra | opus | high | `systems_engineer` |
+| `systems_engineer` | Systems & Tools Engineer | 2 | engineering | opus | xhigh | `studio_director` |
+| `gameplay_engineer` | Gameplay Engineer | 3 | engineering | opus | high | `systems_engineer` |
+| `infra_engineer` | Build & Infra Engineer | 3 | infra | opus | high | `systems_engineer` |
+| `tech_artist` | Technical Artist | 3 | art | opus | medium | `systems_engineer` |
+| `qa_engineer` | QA Engineer | 3 | qa | opus | medium | `producer` |
+| `level_designer` | Level Designer | 3 | design | opus | medium | `game_designer` |
+| `narrative_designer` | Narrative Designer | 3 | design | opus | medium | `game_designer` |
+| `ux_designer` | UX/UI Designer | 3 | design | opus | medium | `game_designer` |
+| `artist` | Artist | 3 | art | opus | low | `tech_artist` |
+| `audio_designer` | Audio Designer | 3 | audio | opus | low | `game_designer` |
 
 Six departments, `leadership`, `production`, `design`, `engineering`, `art`, `audio`, `qa`, `infra`, drive avatar fill color in [12](12-visual-workspace.md). (Eight labels; `leadership` and `production` share a visual family, as do `qa` and `infra`, so the floor renders six fills. The registry keeps them distinct because escalation differs.)
 
 ```mermaid
 graph TD
-  SD[studio_director T3]
+  SD["studio_director T1 (fable)"]
   PR[producer T2]
   GD[game_designer T2]
-  SE[systems_engineer T3]
+  SE[systems_engineer T2]
   SD --> PR & SE
-  PR --> GD & QA[qa_engineer T2]
-  GD --> LD[level_designer T1] & ND[narrative_designer T1] & UX[ux_designer T1] & AU[audio_designer T1]
-  SE --> GE[gameplay_engineer T2] & TA[tech_artist T2] & IN[infra_engineer T2]
-  TA --> AR[artist T1]
+  PR --> GD & QA[qa_engineer T3]
+  GD --> LD[level_designer T3] & ND[narrative_designer T3] & UX[ux_designer T3] & AU[audio_designer T3]
+  SE --> GE[gameplay_engineer T3] & TA[tech_artist T3] & IN[infra_engineer T3]
+  TA --> AR[artist T3]
 ```
 
 ## Tool allowlists
