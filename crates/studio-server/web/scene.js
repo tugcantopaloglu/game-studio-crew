@@ -177,7 +177,27 @@ function wallSegment(parent, x, z, w, d, color) {
   parent.add(m);
 }
 
-function buildWalls(parent, room, cx, cz, doorSide) {
+const glassMat = new THREE.MeshLambertMaterial({
+  color: 0x7fb4d8, transparent: true, opacity: 0.16, depthWrite: false,
+});
+
+function glassSegment(parent, x, z, w, d, tint) {
+  const pane = new THREE.Mesh(new THREE.BoxGeometry(w, WALL_H - 0.5, d), glassMat);
+  pane.position.set(x, (WALL_H - 0.5) / 2 + 0.25, z);
+  parent.add(pane);
+
+  for (const y of [0.12, WALL_H - 0.12]) {
+    const rail = new THREE.Mesh(
+      new THREE.BoxGeometry(w, 0.24, d),
+      new THREE.MeshLambertMaterial({ color: y > 1 ? 0x2b3242 : tint })
+    );
+    rail.position.set(x, y, z);
+    rail.castShadow = y > 1;
+    parent.add(rail);
+  }
+}
+
+function buildWalls(parent, room, cx, cz, doorSide, glassSide, tint) {
   const x0 = room.x - cx, z0 = room.y - cz;
   const x1 = x0 + room.w, z1 = z0 + room.h;
   const mx = (x0 + x1) / 2, mz = (z0 + z1) / 2;
@@ -189,16 +209,51 @@ function buildWalls(parent, room, cx, cz, doorSide) {
   ];
 
   for (const s of sides) {
-    if (s.key !== doorSide) { wallSegment(parent, s.x, s.z, s.w, s.d, s.shade); continue; }
+    const draw = (px, pz, pw, pd) =>
+      s.key === glassSide
+        ? glassSegment(parent, px, pz, pw, pd, tint)
+        : wallSegment(parent, px, pz, pw, pd, s.shade);
+
+    if (s.key !== doorSide) { draw(s.x, s.z, s.w, s.d); continue; }
+
     const span = s.axis === "x" ? room.w : room.h;
     const side = (span - DOOR_W) / 2;
     if (s.axis === "x") {
-      wallSegment(parent, s.x - (DOOR_W / 2 + side / 2), s.z, side, s.d, s.shade);
-      wallSegment(parent, s.x + (DOOR_W / 2 + side / 2), s.z, side, s.d, s.shade);
+      draw(s.x - (DOOR_W / 2 + side / 2), s.z, side, s.d);
+      draw(s.x + (DOOR_W / 2 + side / 2), s.z, side, s.d);
     } else {
-      wallSegment(parent, s.x, s.z - (DOOR_W / 2 + side / 2), s.w, side, s.shade);
-      wallSegment(parent, s.x, s.z + (DOOR_W / 2 + side / 2), s.w, side, s.shade);
+      draw(s.x, s.z - (DOOR_W / 2 + side / 2), s.w, side);
+      draw(s.x, s.z + (DOOR_W / 2 + side / 2), s.w, side);
     }
+  }
+}
+
+function buildShell(parent, floor, cx, cz) {
+  const w = floor.width, h = floor.height;
+  const t = 0.5, y = WALL_H + 0.5;
+  const shade = 0x171b24;
+  const segs = [
+    [0, -h / 2 - t / 2, w + t * 2, t],
+    [0, h / 2 + t / 2, w + t * 2, t],
+    [-w / 2 - t / 2, 0, t, h + t * 2],
+    [w / 2 + t / 2, 0, t, h + t * 2],
+  ];
+  for (const [px, pz, sw, sd] of segs) {
+    const m = new THREE.Mesh(
+      new THREE.BoxGeometry(sw, y, sd),
+      new THREE.MeshLambertMaterial({ color: shade })
+    );
+    m.position.set(px, y / 2 - 0.4, pz);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    parent.add(m);
+
+    const strip = new THREE.Mesh(
+      new THREE.BoxGeometry(sw + 0.1, 0.16, sd + 0.1),
+      new THREE.MeshBasicMaterial({ color: 0x5fd8ff })
+    );
+    strip.position.set(px, -0.12, pz);
+    parent.add(strip);
   }
 }
 
@@ -376,8 +431,9 @@ export function buildOffice(floor, scene) {
     roomsByDept.set(room.department, room);
 
     const door = doorSideFor(room, cx, cz);
+    const glass = lobbyFacingSide(room, floor, cx, cz);
     checkerFloor(rg, room, cx, cz);
-    buildWalls(rg, room, cx, cz, door);
+    buildWalls(rg, room, cx, cz, door, glass === door ? null : glass, tint);
     doorsByDept.set(room.department, doorPoint(room, cx, cz, door));
     neonEdge(rg, room, cx, cz, tint);
     wallScreens(rg, room, cx, cz, tint);
@@ -466,7 +522,10 @@ export function buildOffice(floor, scene) {
     });
   }
 
-  return { world, avatars };
+  buildShell(world, floor, cx, cz);
+  const ambient = buildAmbient(world, floor, cx, cz, 5);
+
+  return { world, avatars, ambient };
 }
 
 function pointIn(rect, y) {
@@ -583,4 +642,48 @@ function doorPoint(room, cx, cz, side) {
     case "-x": return new THREE.Vector3(x0, 0.22, mz);
     default: return new THREE.Vector3(x1, 0.22, mz);
   }
+}
+
+function lobbyFacingSide(room, floor, cx, cz) {
+  const L = floor.lobby;
+  if (!L) return null;
+  if (room.y + room.h === L.y) return "+z";
+  if (room.y === L.y + L.h) return "-z";
+  if (room.x + room.w === L.x) return "+x";
+  if (room.x === L.x + L.w) return "-x";
+  return null;
+}
+
+const AMBIENT_PALETTES = [
+  "producer", "ux_designer", "qa_engineer", "audio_designer",
+  "tech_artist", "gameplay_engineer",
+];
+
+export function buildAmbient(parent, floor, cx, cz, count = 5) {
+  if (!floor.lobby) return [];
+  const L = floor.lobby;
+  const rect = {
+    x0: L.x - cx + 1.8, x1: L.x - cx + L.w - 1.8,
+    z0: L.y - cz + 1.8, z1: L.y - cz + L.h - 1.8,
+  };
+
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const person = new THREE.Group();
+    const start = pointIn(rect, 0.22);
+    person.position.copy(start);
+    parent.add(person);
+
+    const body = place(buildCharacter(AMBIENT_PALETTES[i % AMBIENT_PALETTES.length]), 0, 0, 0);
+    person.add(body.group);
+
+    out.push({
+      person, body: body.group,
+      home: start.clone(), bounds: rect, lobby: rect,
+      target: start.clone(), route: [], path: [], inLobby: true,
+      door: start.clone(),
+      wait: rand() * 6, facing: 0, seed: rand() * 10,
+    });
+  }
+  return out;
 }

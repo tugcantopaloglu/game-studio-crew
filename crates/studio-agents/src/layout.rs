@@ -7,20 +7,30 @@ pub const DESK_COLS: u32 = 4;
 pub const DESK_ROWS: u32 = 2;
 pub const DESK_SLOTS: u32 = DESK_COLS * DESK_ROWS;
 
+
 const DESK_W: u32 = 2;
 const DESK_H: u32 = 2;
 const DESK_GAP: u32 = 1;
 const ROOM_PAD: u32 = 1;
 
-const ROOM_W: u32 = ROOM_PAD * 2 + DESK_COLS * DESK_W + (DESK_COLS - 1) * DESK_GAP;
-const ROOM_H: u32 = ROOM_PAD * 2 + DESK_ROWS * DESK_H + (DESK_ROWS - 1) * DESK_GAP;
 const OUTER_MARGIN: u32 = 2;
 
 pub const GRID_COLS: u32 = 3;
 pub const GRID_ROWS: u32 = 3;
 pub const LOBBY_CELL: u32 = 4;
 
+const COL_W: [u32; 3] = [13, 19, 13];
+const ROW_H: [u32; 3] = [9, 11, 9];
+
 const CELLS: [u32; 8] = [0, 1, 2, 3, 5, 6, 7, 8];
+
+fn slots_across(span: u32) -> u32 {
+    (span - ROOM_PAD * 2 + DESK_GAP) / (DESK_W + DESK_GAP)
+}
+
+pub fn slots_for(w: u32, h: u32) -> u32 {
+    slots_across(w) * slots_across(h)
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Desk {
@@ -76,19 +86,22 @@ impl Floor {
     }
 }
 
-fn cell_origin(cell: u32) -> (u32, u32) {
-    let col = cell % GRID_COLS;
-    let row = cell / GRID_COLS;
-    (OUTER_MARGIN + col * ROOM_W, OUTER_MARGIN + row * ROOM_H)
+fn cell_rect(cell: u32) -> (u32, u32, u32, u32) {
+    let col = (cell % GRID_COLS) as usize;
+    let row = (cell / GRID_COLS) as usize;
+    let x = OUTER_MARGIN + COL_W[..col].iter().sum::<u32>();
+    let y = OUTER_MARGIN + ROW_H[..row].iter().sum::<u32>();
+    (x, y, COL_W[col], ROW_H[row])
 }
 
-fn room_origin(index: u32) -> (u32, u32) {
-    cell_origin(CELLS[index as usize])
+fn room_rect(index: u32) -> (u32, u32, u32, u32) {
+    cell_rect(CELLS[index as usize])
 }
 
-fn desk_origin(room_x: u32, room_y: u32, slot: u32) -> (u32, u32) {
-    let col = slot % DESK_COLS;
-    let row = slot / DESK_COLS;
+fn desk_origin(room_x: u32, room_y: u32, room_w: u32, slot: u32) -> (u32, u32) {
+    let across = slots_across(room_w);
+    let col = slot % across;
+    let row = slot / across;
     (
         room_x + ROOM_PAD + col * (DESK_W + DESK_GAP),
         room_y + ROOM_PAD + row * (DESK_H + DESK_GAP),
@@ -101,22 +114,23 @@ pub fn pack_floor(roles: &[Role]) -> Floor {
     let mut spares = Vec::new();
 
     for (index, department) in Department::ALL.iter().enumerate() {
-        let (rx, ry) = room_origin(index as u32);
+        let (rx, ry, rw, rh) = room_rect(index as u32);
         rooms.push(Room {
             department: department.id().to_string(),
             visual_family: department.visual_family().to_string(),
             x: rx,
             y: ry,
-            w: ROOM_W,
-            h: ROOM_H,
+            w: rw,
+            h: rh,
         });
 
+        let capacity = slots_for(rw, rh);
         let members: Vec<&Role> = roles.iter().filter(|r| r.department == *department).collect();
         for (slot, role) in members.iter().enumerate() {
-            if slot as u32 >= DESK_SLOTS {
+            if slot as u32 >= capacity {
                 break;
             }
-            let (dx, dy) = desk_origin(rx, ry, slot as u32);
+            let (dx, dy) = desk_origin(rx, ry, rw, slot as u32);
             desks.push(Desk {
                 role: role.id.to_string(),
                 title: role.title.to_string(),
@@ -130,8 +144,8 @@ pub fn pack_floor(roles: &[Role]) -> Floor {
             });
         }
 
-        for slot in members.len() as u32..DESK_SLOTS {
-            let (dx, dy) = desk_origin(rx, ry, slot);
+        for slot in members.len() as u32..capacity {
+            let (dx, dy) = desk_origin(rx, ry, rw, slot);
             spares.push(Spare {
                 department: department.id().to_string(),
                 visual_family: department.visual_family().to_string(),
@@ -143,14 +157,14 @@ pub fn pack_floor(roles: &[Role]) -> Floor {
         }
     }
 
-    let (lx, ly) = cell_origin(LOBBY_CELL);
+    let (lx, ly, lw, lh) = cell_rect(LOBBY_CELL);
     let lobby = Room {
         department: "lobby".to_string(),
         visual_family: "lobby".to_string(),
         x: lx,
         y: ly,
-        w: ROOM_W,
-        h: ROOM_H,
+        w: lw,
+        h: lh,
     };
 
     let width = rooms.iter().map(|r| r.x + r.w).max().unwrap_or(0) + OUTER_MARGIN;
@@ -335,9 +349,10 @@ mod spare_tests {
         for d in Department::ALL {
             let occupied = floor.desks.iter().filter(|k| k.department == d.id()).count();
             let spare = floor.spares.iter().filter(|k| k.department == d.id()).count();
+            let room = floor.room(d.id()).unwrap();
             assert_eq!(
                 occupied + spare,
-                DESK_SLOTS as usize,
+                slots_for(room.w, room.h) as usize,
                 "{} does not fill its slots",
                 d.id()
             );
@@ -466,5 +481,68 @@ mod lobby_tests {
         origins.sort();
         origins.dedup();
         assert_eq!(origins.len(), (GRID_COLS * GRID_ROWS) as usize);
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn rooms_are_not_all_the_same_size() {
+        let f = studio_floor();
+        let sizes: HashSet<(u32, u32)> = f.rooms.iter().map(|r| (r.w, r.h)).collect();
+        assert!(sizes.len() >= 3, "a uniform grid reads as a spreadsheet, not an office");
+    }
+
+    #[test]
+    fn the_lobby_is_the_largest_space_on_the_floor() {
+        let f = studio_floor();
+        let lobby_area = f.lobby.w * f.lobby.h;
+        for r in &f.rooms {
+            assert!(r.w * r.h <= lobby_area, "{} is bigger than the lobby", r.department);
+        }
+    }
+
+    #[test]
+    fn a_wider_room_holds_more_desks() {
+        let f = studio_floor();
+        let widest = f.rooms.iter().max_by_key(|r| r.w).unwrap();
+        let narrowest = f.rooms.iter().min_by_key(|r| r.w).unwrap();
+        assert!(
+            slots_for(widest.w, widest.h) > slots_for(narrowest.w, narrowest.h),
+            "room capacity should follow room size"
+        );
+    }
+
+    #[test]
+    fn every_desk_still_fits_inside_its_room_at_every_size() {
+        let f = studio_floor();
+        for d in &f.desks {
+            let r = f.room(&d.department).unwrap();
+            assert!(
+                d.x + d.w <= r.x + r.w && d.y + d.h <= r.y + r.h,
+                "{} overflows the {} room",
+                d.role,
+                d.department
+            );
+        }
+        for s in &f.spares {
+            let r = f.room(&s.department).unwrap();
+            assert!(s.x + s.w <= r.x + r.w && s.y + s.h <= r.y + r.h);
+        }
+    }
+
+    #[test]
+    fn the_grid_still_tiles_without_gaps_at_mixed_sizes() {
+        let f = studio_floor();
+        let mut cover = 0;
+        for r in &f.rooms {
+            cover += r.w * r.h;
+        }
+        cover += f.lobby.w * f.lobby.h;
+        let inner = (f.width - OUTER_MARGIN * 2) * (f.height - OUTER_MARGIN * 2);
+        assert_eq!(cover, inner, "mixed sizes must still tile the block exactly");
     }
 }

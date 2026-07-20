@@ -103,6 +103,7 @@ fill.position.set(-16, 12, -18);
 scene.add(fill);
 
 let avatars = new Map();
+let ambient = [];
 const state = new Map();
 let stats = { events: 0, tokens: 0, spend: 0, cacheRead: 0, cacheWrite: 0, run: "-" };
 
@@ -121,6 +122,7 @@ function updateCamera() {
   camera.lookAt(t);
 }
 
+const UP = new THREE.Vector3(0, 1, 0);
 const el = renderer.domElement;
 let dragging = false, lastX = 0, lastY = 0;
 
@@ -145,10 +147,12 @@ el.addEventListener("pointermove", (e) => {
     orbit.phi = Math.max(0.10, Math.min(Math.PI / 2 - 0.03, orbit.phi - dy * 0.005));
   } else {
     const k = orbit.dist * 0.0016;
-    const right = new THREE.Vector3(-Math.sin(orbit.theta), 0, Math.cos(orbit.theta));
-    const fwd = new THREE.Vector3(Math.cos(orbit.theta), 0, Math.sin(orbit.theta));
+    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+    right.y = 0;
+    right.normalize();
+    const fwd = new THREE.Vector3().crossVectors(UP, right).normalize();
     orbit.target.addScaledVector(right, -dx * k);
-    orbit.target.addScaledVector(fwd, -dy * k);
+    orbit.target.addScaledVector(fwd, dy * k);
   }
   updateCamera();
 });
@@ -226,6 +230,21 @@ function animate() {
       a.body.rotation.y += (rest - a.body.rotation.y) * 0.08;
     }
     a.ringMat.opacity = st.ring === "idle" ? 0.28 : 0.7 + Math.sin(t * 4 + a.seed) * 0.3;
+  }
+
+  for (const a of ambient) {
+    const walking = wanderStep(a, false, dt, t);
+    if (walking) {
+      a.body.position.y = Math.abs(Math.sin(t * 9 + a.seed)) * 0.05;
+      a.body.rotation.z = Math.sin(t * 9 + a.seed) * 0.05;
+      let d = a.facing - a.body.rotation.y;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      a.body.rotation.y += d * 0.16;
+    } else {
+      a.body.position.y = Math.sin(t * 1.3 + a.seed) * 0.007;
+      a.body.rotation.z = 0;
+    }
   }
   renderer.render(scene, camera);
 }
@@ -318,6 +337,7 @@ function connect() {
 fetch("/floor").then((r) => r.json()).then((f) => {
   const built = buildOffice(f, scene);
   avatars = built.avatars;
+  ambient = built.ambient || [];
   resize();
   animate();
   connect();
