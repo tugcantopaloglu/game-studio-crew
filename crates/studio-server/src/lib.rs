@@ -28,10 +28,17 @@ pub struct MeetingRequest {
     pub topic: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkflowRequest {
+    pub workflow: String,
+    pub brief: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum StudioCommand {
     Task(TaskRequest),
     Meeting(MeetingRequest),
+    Workflow(WorkflowRequest),
 }
 
 #[derive(Clone)]
@@ -85,6 +92,8 @@ pub fn router(state: AppState) -> Router {
         .route("/task", post(submit_task))
         .route("/meeting", post(convene_meeting))
         .route("/roles", get(roles))
+        .route("/workflows", get(workflows))
+        .route("/workflow", post(start_workflow))
         .with_state(state)
 }
 
@@ -159,6 +168,45 @@ async fn convene_meeting(
         }
     }
     match state.dispatch(StudioCommand::Meeting(req)) {
+        Ok(()) => (StatusCode::ACCEPTED, "queued".to_string()).into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
+    }
+}
+
+async fn workflows() -> impl IntoResponse {
+    let rows: Vec<serde_json::Value> = studio_workflow::Workflow::builtin()
+        .iter()
+        .map(|w| {
+            serde_json::json!({
+                "id": w.id,
+                "title": w.title,
+                "nodes": w.nodes.iter().map(|n| &n.id).collect::<Vec<_>>(),
+                "gates": w.gates.len(),
+                "budget_tokens": w.total_budget(),
+            })
+        })
+        .collect();
+    axum::Json(rows)
+}
+
+async fn start_workflow(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<WorkflowRequest>,
+) -> Response {
+    let known = studio_workflow::Workflow::builtin()
+        .iter()
+        .any(|w| w.id == req.workflow);
+    if !known {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("unknown workflow {}", req.workflow),
+        )
+            .into_response();
+    }
+    if req.brief.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "a workflow needs a brief".to_string()).into_response();
+    }
+    match state.dispatch(StudioCommand::Workflow(req)) {
         Ok(()) => (StatusCode::ACCEPTED, "queued".to_string()).into_response(),
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
     }

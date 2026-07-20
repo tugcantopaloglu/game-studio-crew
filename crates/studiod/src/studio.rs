@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 use studio_agents::{nearest_common_ancestor, role, Role};
 use studio_events::{EventType, Scene};
-use studio_server::{AppState, MeetingRequest, StudioCommand, TaskRequest};
+use studio_server::{AppState, MeetingRequest, StudioCommand, TaskRequest, WorkflowRequest};
 use studio_store::Store;
 
 use crate::m4::{run_worker, Emitter};
@@ -11,7 +11,21 @@ pub fn run_command(em: &Emitter, cmd: StudioCommand, seq: &mut usize) -> Result<
     match cmd {
         StudioCommand::Task(t) => run_task(em, t, seq),
         StudioCommand::Meeting(m) => run_meeting(em, m, seq),
+        StudioCommand::Workflow(w) => run_flow(em, w, seq),
     }
+}
+
+fn run_flow(em: &Emitter, req: WorkflowRequest, seq: &mut usize) -> Result<()> {
+    let wf = studio_workflow::Workflow::builtin()
+        .into_iter()
+        .find(|w| w.id == req.workflow)
+        .with_context(|| format!("unknown workflow {}", req.workflow))?;
+
+    println!("  workflow {} : {}", wf.id, first_line(&req.brief));
+    let project = crate::studio_dir().join("m3-project");
+    let project = if project.join("project.godot").exists() { Some(project) } else { None };
+    crate::wf::run_workflow(em, &wf, &req.brief, project, seq)?;
+    Ok(())
 }
 
 fn run_task(em: &Emitter, req: TaskRequest, seq: &mut usize) -> Result<()> {

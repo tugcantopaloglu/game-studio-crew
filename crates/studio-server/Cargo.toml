@@ -9,6 +9,7 @@ license.workspace = true
 studio-agents.workspace = true
 studio-events.workspace = true
 studio-store.workspace = true
+studio-workflow.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

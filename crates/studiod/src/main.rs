@@ -2,6 +2,7 @@ mod charters;
 mod m3;
 mod m4;
 mod studio;
+mod wf;
 mod tools;
 
 use anyhow::{bail, Context, Result};
@@ -16,17 +17,17 @@ const ROLE: &str = "m1_probe";
 const M2_ROLE: &str = "gameplay_engineer";
 const TOOLS: [&str; 3] = ["Read", "Grep", "Glob"];
 
-fn now() -> String {
+pub fn now() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
 }
 
-fn id(prefix: &str) -> String {
+pub fn id(prefix: &str) -> String {
     format!("{prefix}_{}", ulid::Ulid::new())
 }
 
-fn studio_dir() -> PathBuf {
+pub fn studio_dir() -> PathBuf {
     PathBuf::from(".studio")
 }
 

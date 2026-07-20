@@ -1,3 +1,6 @@
+pub mod exec;
+pub use exec::{execute, Admission, GateOutcome, NodeOutcome, RunOutcome, RunReport, WorkflowHost, MAX_REPAIR_ROUNDS};
+
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
