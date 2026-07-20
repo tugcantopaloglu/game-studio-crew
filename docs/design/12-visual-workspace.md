@@ -5,7 +5,11 @@
 
 The studio floor is the answer to "the studio is invisible while it works" ([00](00-overview.md)). It is a browser view that renders the daemon's event stream as a top-down office where you can watch the crew.
 
-## Projection: top-down orthogonal grid, 32px tiles, deliberately not isometric
+## Projection: a 3D voxel scene
+
+> **Superseded section.** The floor is now rendered in 3D with voxel characters ([ADR 0005](adr/0005-voxel-3d-floor.md)): Three.js, isometric-style camera by default, free orbit on a keypress, one `InstancedMesh` of ~290 unit cubes per character. The spatial model below is unchanged and still drives it; only the renderer differs. The original 2D reasoning is kept for the record.
+
+### Original decision: top-down orthogonal grid, 32px tiles, deliberately not isometric
 
 The floor is a **top-down orthogonal grid at 32px tiles**, not isometric. The reasoning ([ADR 0003](adr/0003-top-down-not-isometric.md)):
 
@@ -23,7 +27,7 @@ The floor is **generated from the role registry ([04](04-agent-graph.md)), not h
 
 An avatar encodes three orthogonal facts with three orthogonal visual channels, so nothing is ambiguous:
 
-- **Shape encodes tier** (1/2/3): a stable silhouette; you can read seniority at a glance.
+- **Shape encodes tier** (1/2/3): headgear and silhouette in the voxel model; you can read seniority at a glance.
 - **Fill encodes department**: the six department colors ([04](04-agent-graph.md)).
 - **Only the status ring encodes runtime state**: idle / running / blocked / meeting / error. Runtime churn touches *only* the ring, so a worker starting and finishing never changes its shape or color, only the ring animates. This separation is what keeps the floor readable under load and is the last thing to degrade ([§performance](#performance-budget-and-degradation)).
 

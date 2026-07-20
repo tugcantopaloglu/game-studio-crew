@@ -11,6 +11,8 @@ use studio_store::Store;
 use tokio::sync::broadcast;
 
 pub const FLOOR_HTML: &str = include_str!("../web/floor.html");
+pub const VOXEL_JS: &str = include_str!("../web/voxel.js");
+pub const THREE_JS: &str = include_str!("../web/vendor/three.module.js");
 
 #[derive(Clone)]
 pub struct AppState {
@@ -40,6 +42,8 @@ pub fn compact_for_snapshot(events: Vec<Envelope>) -> Vec<Envelope> {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/voxel.js", get(voxel_js))
+        .route("/vendor/three.module.js", get(three_js))
         .route("/floor", get(floor))
         .route("/runs/:run/snapshot", get(snapshot))
         .route("/runs/:run/events", get(events))
@@ -49,6 +53,20 @@ pub fn router(state: AppState) -> Router {
 
 async fn index() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], FLOOR_HTML)
+}
+
+async fn voxel_js() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], VOXEL_JS)
+}
+
+async fn three_js() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        THREE_JS,
+    )
 }
 
 async fn floor() -> impl IntoResponse {

@@ -1,4 +1,4 @@
-# 00: System Overview
+X# 00: System Overview
 
 > **Status:** v0.2, 2026-07-20. M1-M3 built and proven against the real CLI and a real engine; M4-M5 remain.
 > Part of the Game Studio Crew system design set. See [README](../../README.md).
@@ -138,4 +138,4 @@ Start here, then [02 context-engine](02-context-engine.md) for the token story, 
 | 11 | [index-and-bootstrap](11-index-and-bootstrap.md) | **index** SQLite schema, detection |
 | 12 | [visual-workspace](12-visual-workspace.md) | studio floor, event→visual mapping |
 | 13 | [risks](13-risks.md) | consolidated risk register |
-| ADR | [0001](adr/0001-claude-cli-as-worker.md) · [0002](adr/0002-thirteen-roles.md) · [0003](adr/0003-top-down-not-isometric.md) · [0004](adr/0004-explicit-context-control-not-bare.md) | decision records |
+| ADR | [0001](adr/0001-claude-cli-as-worker.md) · [0002](adr/0002-thirteen-roles.md) · [0003](adr/0003-top-down-not-isometric.md) *(superseded)* · [0004](adr/0004-explicit-context-control-not-bare.md) · [0005](adr/0005-voxel-3d-floor.md) | decision records |
