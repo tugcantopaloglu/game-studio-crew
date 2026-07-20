@@ -52,6 +52,7 @@ pub struct WorkerSpec {
     pub effort: Effort,
     pub session: SessionMode,
     pub mcp_config: Option<String>,
+    pub json_schema: Option<String>,
 }
 
 impl WorkerSpec {
@@ -103,6 +104,11 @@ impl WorkerSpec {
             a.push("--strict-mcp-config".into());
         }
 
+        if let Some(schema) = &self.json_schema {
+            a.push("--json-schema".into());
+            a.push(schema.clone());
+        }
+
         a.push("--output-format".into());
         a.push("stream-json".into());
         a.push("--include-partial-messages".into());
@@ -125,6 +131,7 @@ mod tests {
             effort: Effort::High,
             session: SessionMode::New("11111111-2222-3333-4444-555555555555".into()),
             mcp_config: Some("C:/run/mcp.json".into()),
+            json_schema: None,
         }
     }
 
@@ -190,6 +197,20 @@ mod tests {
         let args = s.to_args();
         assert_eq!(pair(&args, "--resume"), Some("sess-1".into()));
         assert!(args.iter().any(|a| a == "--fork-session"));
+    }
+
+    #[test]
+    fn a_structured_output_schema_is_passed_through_when_set() {
+        let mut s = spec();
+        s.json_schema = Some("{\"type\":\"object\"}".into());
+        let args = s.to_args();
+        assert_eq!(pair(&args, "--json-schema"), Some("{\"type\":\"object\"}".into()));
+    }
+
+    #[test]
+    fn no_schema_flag_appears_when_none_is_wanted() {
+        let args = spec().to_args();
+        assert!(!args.iter().any(|a| a == "--json-schema"));
     }
 
     #[test]

@@ -62,6 +62,7 @@ fn spec_for(charter_path: &PathBuf, session: SessionMode) -> WorkerSpec {
         effort: Effort::Low,
         session,
         mcp_config: None,
+        json_schema: None,
     }
 }
 
@@ -420,6 +421,7 @@ fn m2_proof() -> Result<()> {
         effort: Effort::Low,
         session: SessionMode::New(uuid_v4()),
         mcp_config: Some(mcp_path.to_string_lossy().into_owned()),
+        json_schema: None,
     };
 
     let brief = format!(
@@ -553,6 +555,7 @@ fn m3_proof() -> Result<()> {
             effort: Effort::Low,
             session: SessionMode::New(uuid_v4()),
             mcp_config: None,
+            json_schema: None,
         };
 
         let task = format!(

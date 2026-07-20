@@ -34,11 +34,17 @@ pub struct WorkflowRequest {
     pub brief: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct BuildRequest {
+    pub prompt: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum StudioCommand {
     Task(TaskRequest),
     Meeting(MeetingRequest),
     Workflow(WorkflowRequest),
+    Build(BuildRequest),
 }
 
 #[derive(Clone)]
@@ -94,6 +100,7 @@ pub fn router(state: AppState) -> Router {
         .route("/roles", get(roles))
         .route("/workflows", get(workflows))
         .route("/workflow", post(start_workflow))
+        .route("/build", post(start_build))
         .with_state(state)
 }
 
@@ -208,6 +215,23 @@ async fn start_workflow(
     }
     match state.dispatch(StudioCommand::Workflow(req)) {
         Ok(()) => (StatusCode::ACCEPTED, "queued".to_string()).into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
+    }
+}
+
+async fn start_build(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<BuildRequest>,
+) -> Response {
+    if req.prompt.trim().len() < 8 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "say a bit more about what you want built".to_string(),
+        )
+            .into_response();
+    }
+    match state.dispatch(StudioCommand::Build(req)) {
+        Ok(()) => (StatusCode::ACCEPTED, "planning".to_string()).into_response(),
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
     }
 }

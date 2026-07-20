@@ -1,3 +1,5 @@
+pub mod plan;
+pub use plan::{plan_schema, Plan, PlanError, PlanTask, MAX_TASKS};
 pub mod exec;
 pub use exec::{execute, Admission, GateOutcome, NodeOutcome, RunOutcome, RunReport, WorkflowHost, MAX_REPAIR_ROUNDS};
 

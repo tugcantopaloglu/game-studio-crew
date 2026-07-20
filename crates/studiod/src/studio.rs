@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 use studio_agents::{nearest_common_ancestor, role, Role};
 use studio_events::{EventType, Scene};
-use studio_server::{AppState, MeetingRequest, StudioCommand, TaskRequest, WorkflowRequest};
+use studio_server::{
+    AppState, BuildRequest, MeetingRequest, StudioCommand, TaskRequest, WorkflowRequest,
+};
 use studio_store::Store;
 
 use crate::m4::{run_worker, Emitter};
@@ -12,7 +14,45 @@ pub fn run_command(em: &Emitter, cmd: StudioCommand, seq: &mut usize) -> Result<
         StudioCommand::Task(t) => run_task(em, t, seq),
         StudioCommand::Meeting(m) => run_meeting(em, m, seq),
         StudioCommand::Workflow(w) => run_flow(em, w, seq),
+        StudioCommand::Build(b) => run_build(em, b, seq),
     }
+}
+
+fn run_build(em: &Emitter, req: BuildRequest, seq: &mut usize) -> Result<()> {
+    println!("  build: {}", first_line(&req.prompt));
+
+    let director = role("studio_director").context("the director is missing from the registry")?;
+    let schema = studio_workflow::plan_schema().to_string();
+
+    let brief = format!(
+        "A request has come in: {}\n\n         Decompose it into studio tasks. Give each task the role that should do it, \n         a brief detailed enough that the role needs no further decisions, and the ids \n         of the tasks whose output it needs. Keep the graph as small as the work allows. \n         Do not invent roles.",
+        req.prompt.trim()
+    );
+
+    *seq += 1;
+    let raw = crate::m4::run_worker_capturing(em, director, &brief, *seq, Some(schema))?;
+
+    let cleaned = extract_json(&raw);
+    let plan = studio_workflow::Plan::parse(&cleaned)
+        .map_err(|e| anyhow::anyhow!("the director returned a plan I cannot run: {e}"))?;
+
+    println!("  plan '{}' with {} tasks:", plan.title, plan.tasks.len());
+    for t in &plan.tasks {
+        println!(
+            "    {:<6} {:<20} deps={:?}",
+            t.id, t.role, t.depends_on
+        );
+    }
+
+    let wf = plan
+        .to_workflow()
+        .map_err(|e| anyhow::anyhow!("plan did not convert to a workflow: {e}"))?;
+
+    let project = crate::studio_dir().join("m3-project");
+    let project = if project.join("project.godot").exists() { Some(project) } else { None };
+
+    crate::wf::run_planned(em, &wf, &req.prompt, project, seq, Some(plan))?;
+    Ok(())
 }
 
 fn run_flow(em: &Emitter, req: WorkflowRequest, seq: &mut usize) -> Result<()> {
@@ -140,6 +180,17 @@ fn chair_for(participants: &[String]) -> &'static str {
         }
     }
     chair
+}
+
+fn extract_json(raw: &str) -> String {
+    let t = raw.trim();
+    if t.starts_with('{') {
+        return t.to_string();
+    }
+    match (t.find('{'), t.rfind('}')) {
+        (Some(a), Some(b)) if b > a => t[a..=b].to_string(),
+        _ => t.to_string(),
+    }
 }
 
 fn first_line(s: &str) -> String {

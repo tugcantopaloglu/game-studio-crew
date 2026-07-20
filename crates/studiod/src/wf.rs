@@ -21,6 +21,7 @@ pub struct Host<'a> {
     pub brief: String,
     pub seq: usize,
     pub auto_approve: bool,
+    pub plan: Option<studio_workflow::Plan>,
 }
 
 impl<'a> Host<'a> {
@@ -75,6 +76,21 @@ impl<'a> WorkflowHost for Host<'a> {
         );
 
         self.seq += 1;
+        if let Some(plan) = &self.plan {
+            if let Some(brief) = plan.brief_for(&node.id) {
+                let upstream = if inputs.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n\nUpstream capsules: {}", inputs.join(", "))
+                };
+                let full = format!("{brief}{upstream}");
+                return match run_worker(self.em, r, &full, self.seq) {
+                    Ok(()) => NodeOutcome::Completed { capsule: format!("cap_{}", node.id) },
+                    Err(e) => NodeOutcome::Failed { reason: e.to_string() },
+                };
+            }
+        }
+
         let context = if inputs.is_empty() {
             String::new()
         } else {
@@ -221,6 +237,17 @@ pub fn run_workflow(
     project: Option<PathBuf>,
     seq: &mut usize,
 ) -> Result<RunOutcome> {
+    run_planned(em, workflow, brief, project, seq, None)
+}
+
+pub fn run_planned(
+    em: &Emitter,
+    workflow: &Workflow,
+    brief: &str,
+    project: Option<PathBuf>,
+    seq: &mut usize,
+    plan: Option<studio_workflow::Plan>,
+) -> Result<RunOutcome> {
     em.emit(
         "daemon",
         EventType::WorkflowStarted,
@@ -252,6 +279,7 @@ pub fn run_workflow(
         brief: brief.to_string(),
         seq: *seq,
         auto_approve: true,
+        plan: plan.clone(),
     };
 
     let report = execute(workflow, &mut host, &BTreeSet::new())

@@ -607,17 +607,26 @@ const who = document.getElementById("who");
 const briefBox = document.getElementById("brief");
 const sent = document.getElementById("sent");
 const modeBtn = document.getElementById("mode-btn");
-let composeMode = "task";
+const MODES = ["build", "task", "meeting"];
+let composeMode = "build";
 
-modeBtn.onclick = () => {
-  composeMode = composeMode === "task" ? "meeting" : "task";
+function applyMode() {
   modeBtn.textContent = composeMode;
+  const pickers = composeMode !== "build";
+  who.style.display = pickers ? "" : "none";
   who.multiple = composeMode === "meeting";
   who.size = composeMode === "meeting" ? 5 : 1;
-  briefBox.placeholder = composeMode === "task"
-    ? "what should they do?"
+  briefBox.placeholder =
+    composeMode === "build" ? "describe the game; the studio decides who does what"
+    : composeMode === "task" ? "what should they do?"
     : "what is the meeting about?";
+}
+
+modeBtn.onclick = () => {
+  composeMode = MODES[(MODES.indexOf(composeMode) + 1) % MODES.length];
+  applyMode();
 };
+applyMode();
 
 fetch("/roles").then((r) => r.json()).then((rows) => {
   who.innerHTML = rows
@@ -629,17 +638,17 @@ document.getElementById("send").onclick = async () => {
   const brief = briefBox.value.trim();
   if (!brief) { sent.textContent = "write a brief first"; return; }
   const picked = [...who.selectedOptions].map((o) => o.value);
-  if (!picked.length) { sent.textContent = "pick someone"; return; }
-
-  const url = composeMode === "task" ? "/task" : "/meeting";
-  const body = composeMode === "task"
-    ? { role: picked[0], brief }
-    : { kind: "arbitration", participants: picked, topic: brief };
-
+  if (composeMode !== "build" && !picked.length) { sent.textContent = "pick someone"; return; }
   if (composeMode === "meeting" && picked.length < 2) {
     sent.textContent = "a meeting needs at least two";
     return;
   }
+
+  const url = composeMode === "build" ? "/build"
+    : composeMode === "task" ? "/task" : "/meeting";
+  const body = composeMode === "build" ? { prompt: brief }
+    : composeMode === "task" ? { role: picked[0], brief }
+    : { kind: "arbitration", participants: picked, topic: brief };
 
   sent.textContent = "sending";
   try {
@@ -648,7 +657,9 @@ document.getElementById("send").onclick = async () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    sent.textContent = res.ok ? "queued on the floor" : await res.text();
+    sent.textContent = res.ok
+      ? (composeMode === "build" ? "the director is planning it" : "queued on the floor")
+      : await res.text();
     if (res.ok) briefBox.value = "";
   } catch (err) {
     sent.textContent = "the daemon is not accepting work";

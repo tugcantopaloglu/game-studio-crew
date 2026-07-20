@@ -57,6 +57,16 @@ pub fn register_roles(store: &Store) -> Result<()> {
 }
 
 pub fn run_worker(em: &Emitter, role: &Role, brief: &str, index: usize) -> Result<()> {
+    run_worker_capturing(em, role, brief, index, None).map(|_| ())
+}
+
+pub fn run_worker_capturing(
+    em: &Emitter,
+    role: &Role,
+    brief: &str,
+    index: usize,
+    json_schema: Option<String>,
+) -> Result<String> {
     let actor = format!("{}#{}", role.id, index);
     let task_id = crate::id("task");
 
@@ -132,6 +142,7 @@ pub fn run_worker(em: &Emitter, role: &Role, brief: &str, index: usize) -> Resul
         },
         session: SessionMode::New(crate::uuid_v4()),
         mcp_config: None,
+        json_schema,
     };
 
     let worker = Worker::spawn("claude", &spec.to_args(), brief)
@@ -216,5 +227,16 @@ pub fn run_worker(em: &Emitter, role: &Role, brief: &str, index: usize) -> Resul
         report.state.cost_usd
     );
 
-    Ok(())
+    if report.state.is_error {
+        anyhow::bail!(
+            "{} failed: {}",
+            role.id,
+            report.state.text.lines().next().unwrap_or("unknown error")
+        );
+    }
+
+    Ok(match &report.state.result_message {
+        Some(m) if !m.trim().is_empty() => m.clone(),
+        _ => report.state.text.clone(),
+    })
 }

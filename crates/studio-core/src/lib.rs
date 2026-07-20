@@ -31,6 +31,7 @@ pub struct WorkerReport {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StreamStateSnapshot {
+    pub result_message: Option<String>,
     pub session_id: Option<String>,
     pub usage: Option<studio_events::Usage>,
     pub cost_usd: f64,
@@ -139,6 +140,7 @@ impl Worker {
         let _ = pump.join();
 
         let snapshot = StreamStateSnapshot {
+            result_message: state.result_message.clone(),
             session_id: state.session_id.clone(),
             usage: state.authoritative_usage(),
             cost_usd: state.cost_usd,

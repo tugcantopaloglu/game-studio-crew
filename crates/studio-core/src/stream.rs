@@ -216,6 +216,7 @@ pub fn parse_line(line: &str) -> Option<CliEvent> {
 
 #[derive(Debug, Default)]
 pub struct StreamState {
+    pub result_message: Option<String>,
     pub session_id: Option<String>,
     pub latest_usage: Option<Usage>,
     pub final_usage: Option<Usage>,
@@ -239,7 +240,8 @@ impl StreamState {
                 self.latest_usage = Some(*usage);
             }
             CliEvent::Text { text } => self.text.push_str(text),
-            CliEvent::Result { session_id, is_error, usage, cost_usd, .. } => {
+            CliEvent::Result { session_id, is_error, usage, cost_usd, message } => {
+                self.result_message = message.clone();
                 self.saw_result = true;
                 self.is_error = *is_error;
                 self.final_usage = Some(*usage);
@@ -496,5 +498,44 @@ mod bridge_tests {
         let (_, data) = map_cli_event(&tool("Read")).unwrap();
         assert_eq!(data["args_digest"], "d");
         assert!(data.get("input").is_none());
+    }
+}
+
+#[cfg(test)]
+mod result_tests {
+    use super::*;
+
+    #[test]
+    fn the_terminal_result_message_is_captured_separately_from_streamed_text() {
+        let mut st = StreamState::default();
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Plan: a three node chain"}}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.1,"result":"{\"tasks\":[]}","usage":{}}"#,
+        ] {
+            if let Some(ev) = parse_line(line) {
+                st.apply(&ev);
+            }
+        }
+        assert_eq!(st.text, "Plan: a three node chain");
+        assert_eq!(
+            st.result_message.as_deref(),
+            Some("{\"tasks\":[]}"),
+            "schema constrained output arrives on the result event, not as text deltas"
+        );
+    }
+
+    #[test]
+    fn a_plain_turn_still_leaves_the_streamed_text_intact() {
+        let mut st = StreamState::default();
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"pong"}}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.1,"result":"pong","usage":{}}"#,
+        ] {
+            if let Some(ev) = parse_line(line) {
+                st.apply(&ev);
+            }
+        }
+        assert_eq!(st.text, "pong");
+        assert_eq!(st.result_message.as_deref(), Some("pong"));
     }
 }
