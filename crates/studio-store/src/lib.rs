@@ -54,6 +54,28 @@ pub struct SessionRow {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct CapsuleRow {
+    pub id: String,
+    pub task: String,
+    pub kind: String,
+    pub from_role: String,
+    pub outcome: String,
+    pub rendered_tokens: usize,
+    pub truncated: bool,
+    pub body_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecisionRow {
+    pub id: String,
+    pub title: String,
+    pub claim: String,
+    pub rationale: String,
+    pub origin_capsule: Option<String>,
+    pub supersedes: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct LedgerEntry {
     pub task: String,
     pub role: String,
@@ -91,6 +113,8 @@ impl CacheHealth {
 
 enum Cmd {
     UpsertRole(RoleRow, Reply<()>),
+    InsertCapsule(CapsuleRow, String, Reply<()>),
+    InsertDecision(DecisionRow, String, Reply<()>),
     InsertTask(TaskRow, String, Reply<()>),
     UpdateTaskState(String, WorkerState, Option<Outcome>, String, Reply<()>),
     InsertSession(SessionRow, String, Reply<()>),
@@ -196,6 +220,65 @@ impl Store {
     ) -> Result<Envelope> {
         let (run, ts, actor) = (run.into(), ts.into(), actor.into());
         self.send(|reply| Cmd::AppendEvent { run, ts, actor, event_type, scene, data, reply })
+    }
+
+    pub fn insert_capsule(&self, c: CapsuleRow, ts: impl Into<String>) -> Result<()> {
+        let ts = ts.into();
+        self.send(|r| Cmd::InsertCapsule(c, ts, r))
+    }
+
+    pub fn insert_decision(&self, d: DecisionRow, ts: impl Into<String>) -> Result<()> {
+        let ts = ts.into();
+        self.send(|r| Cmd::InsertDecision(d, ts, r))
+    }
+
+    pub fn search_decisions(&self, query: &str, limit: usize) -> Result<Vec<DecisionRow>> {
+        let cleaned = sanitize_fts(query);
+        if cleaned.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.reader()?;
+        let mut stmt = conn.prepare(
+            "SELECT d.id, d.title, d.claim, d.rationale, d.origin_capsule, d.supersedes
+             FROM decisions_fts f
+             JOIN decisions d ON d.rowid = f.rowid
+             WHERE decisions_fts MATCH ?1
+               AND d.id NOT IN (SELECT supersedes FROM decisions WHERE supersedes IS NOT NULL)
+             ORDER BY bm25(decisions_fts)
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![cleaned, limit as i64], |r| {
+            Ok(DecisionRow {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                claim: r.get(2)?,
+                rationale: r.get(3)?,
+                origin_capsule: r.get(4)?,
+                supersedes: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn capsules_for_task(&self, task: &str) -> Result<Vec<CapsuleRow>> {
+        let conn = self.reader()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, task, kind, from_role, outcome, rendered_tokens, truncated, body_json
+             FROM capsules WHERE task = ?1 ORDER BY created_ts",
+        )?;
+        let rows = stmt.query_map(params![task], |r| {
+            Ok(CapsuleRow {
+                id: r.get(0)?,
+                task: r.get(1)?,
+                kind: r.get(2)?,
+                from_role: r.get(3)?,
+                outcome: r.get(4)?,
+                rendered_tokens: r.get::<_, i64>(5)? as usize,
+                truncated: r.get::<_, i64>(6)? != 0,
+                body_json: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn record_usage(&self, entry: LedgerEntry, ts: impl Into<String>) -> Result<()> {
@@ -352,6 +435,15 @@ impl Drop for Store {
     }
 }
 
+fn sanitize_fts(q: &str) -> String {
+    let terms: Vec<String> = q
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() > 1)
+        .map(|t| format!("\"{}\"", t.to_lowercase()))
+        .collect();
+    terms.join(" OR ")
+}
+
 fn tag(t: EventType) -> String {
     t.wire_name().to_string()
 }
@@ -391,6 +483,35 @@ fn handle_cmd(conn: &Connection, seq_by_run: &mut HashMap<String, u64>, cmd: Cmd
                         role.effort,
                         role.escalates_to
                     ],
+                )
+                .map(|_| ())
+                .map_err(StoreError::from);
+            let _ = reply.send(res);
+        }
+
+        Cmd::InsertCapsule(c, ts, reply) => {
+            let res = conn
+                .execute(
+                    "INSERT INTO capsules
+                       (id, task, kind, from_role, outcome, rendered_tokens, truncated, body_json, created_ts)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        c.id, c.task, c.kind, c.from_role, c.outcome,
+                        c.rendered_tokens as i64, c.truncated as i64, c.body_json, ts
+                    ],
+                )
+                .map(|_| ())
+                .map_err(StoreError::from);
+            let _ = reply.send(res);
+        }
+
+        Cmd::InsertDecision(d, ts, reply) => {
+            let res = conn
+                .execute(
+                    "INSERT INTO decisions
+                       (id, title, claim, rationale, origin_capsule, supersedes, created_ts)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![d.id, d.title, d.claim, d.rationale, d.origin_capsule, d.supersedes, ts],
                 )
                 .map(|_| ())
                 .map_err(StoreError::from);
@@ -766,5 +887,171 @@ mod tests {
             "t",
         );
         assert!(err.is_err());
+    }
+}
+
+#[cfg(test)]
+mod adr_tests {
+    use super::*;
+
+    fn store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path().join("s.db")).unwrap();
+        s.upsert_role(RoleRow {
+            id: "systems_engineer".into(),
+            tier: 2,
+            department: "engineering".into(),
+            model: "opus".into(),
+            effort: "xhigh".into(),
+            escalates_to: None,
+        })
+        .unwrap();
+        s.insert_task(
+            TaskRow {
+                id: "t1".into(),
+                run: "r".into(),
+                role: "systems_engineer".into(),
+                parent_task: None,
+                workflow_node: None,
+                state: WorkerState::Queued,
+                outcome: None,
+            },
+            "ts",
+        )
+        .unwrap();
+        (dir, s)
+    }
+
+    fn decision(id: &str, title: &str, claim: &str, supersedes: Option<&str>) -> DecisionRow {
+        DecisionRow {
+            id: id.into(),
+            title: title.into(),
+            claim: claim.into(),
+            rationale: "because the ledger said so".into(),
+            origin_capsule: None,
+            supersedes: supersedes.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_decision_is_findable_by_full_text_search() {
+        let (_d, s) = store();
+        s.insert_decision(
+            decision("adr_1", "Dash implementation", "Dash is a state machine", None),
+            "ts",
+        )
+        .unwrap();
+        s.insert_decision(
+            decision("adr_2", "Audio bus layout", "Audio routes through a single bus", None),
+            "ts",
+        )
+        .unwrap();
+
+        let hits = s.search_decisions("dash state machine", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "adr_1");
+    }
+
+    #[test]
+    fn the_fts_index_is_kept_in_sync_by_triggers() {
+        let (_d, s) = store();
+        s.insert_decision(decision("adr_1", "Netcode", "Rollback netcode is used", None), "ts")
+            .unwrap();
+        assert_eq!(s.search_decisions("rollback", 5).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_superseded_decision_stops_being_pushed() {
+        let (_d, s) = store();
+        s.insert_decision(decision("adr_1", "Dash", "Dash is a coroutine", None), "ts")
+            .unwrap();
+        s.insert_decision(
+            decision("adr_2", "Dash", "Dash is a state machine", Some("adr_1")),
+            "ts",
+        )
+        .unwrap();
+
+        let hits = s.search_decisions("dash", 5).unwrap();
+        assert_eq!(hits.len(), 1, "the superseded ADR must not resurface");
+        assert_eq!(hits[0].id, "adr_2");
+    }
+
+    #[test]
+    fn the_push_is_capped_at_the_requested_top_n() {
+        let (_d, s) = store();
+        for i in 0..12 {
+            s.insert_decision(
+                decision(&format!("adr_{i}"), "Physics", "Physics runs fixed step", None),
+                "ts",
+            )
+            .unwrap();
+        }
+        assert_eq!(s.search_decisions("physics", 5).unwrap().len(), 5);
+        assert_eq!(s.search_decisions("physics", 3).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_query_with_fts_syntax_does_not_blow_up() {
+        let (_d, s) = store();
+        s.insert_decision(decision("adr_1", "Dash", "Dash is a state machine", None), "ts")
+            .unwrap();
+        for q in ["dash AND (", "\"unterminated", "NEAR/", "*", "  ", "a"] {
+            assert!(s.search_decisions(q, 5).is_ok(), "query {q:?} must not error");
+        }
+    }
+
+    #[test]
+    fn a_capsule_round_trips_with_its_render_metadata() {
+        let (_d, s) = store();
+        s.insert_capsule(
+            CapsuleRow {
+                id: "cap_1".into(),
+                task: "t1".into(),
+                kind: "task_return".into(),
+                from_role: "systems_engineer".into(),
+                outcome: "done".into(),
+                rendered_tokens: 812,
+                truncated: true,
+                body_json: r#"{"v":1}"#.into(),
+            },
+            "ts",
+        )
+        .unwrap();
+
+        let back = s.capsules_for_task("t1").unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].rendered_tokens, 812);
+        assert!(back[0].truncated);
+    }
+
+    #[test]
+    fn migrating_a_v1_database_backfills_the_fts_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+            )
+            .unwrap();
+            conn.execute_batch(crate::schema::v1_for_test()).unwrap();
+            conn.execute(
+                "INSERT INTO decisions (id,title,claim,rationale,created_ts)
+                 VALUES ('old','Legacy','Legacy claim about shaders','r','ts')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO meta (key,value) VALUES ('schema_version','1')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let s = Store::open(&path).unwrap();
+        let hits = s.search_decisions("shaders", 5).unwrap();
+        assert_eq!(hits.len(), 1, "rows written before V2 must be searchable after it");
+        assert_eq!(hits[0].id, "old");
     }
 }

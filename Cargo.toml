@@ -5,6 +5,7 @@ members = [
     "crates/studio-context",
     "crates/studio-store",
     "crates/studio-core",
+    "crates/studio-mcp",
     "crates/studiod",
 ]
 
@@ -19,6 +20,7 @@ studio-events = { path = "crates/studio-events" }
 studio-store = { path = "crates/studio-store" }
 studio-context = { path = "crates/studio-context" }
 studio-core = { path = "crates/studio-core" }
+studio-mcp = { path = "crates/studio-mcp" }
 
 anyhow = "1"
 blake3 = "1"

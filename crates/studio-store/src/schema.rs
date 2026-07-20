@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -28,6 +28,9 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
     if current < 1 {
         conn.execute_batch(V1)?;
+    }
+    if current < 2 {
+        conn.execute_batch(V2)?;
     }
 
     conn.execute(
@@ -156,3 +159,29 @@ CREATE TABLE budgets (
   PRIMARY KEY (scope_kind, scope_id)
 );
 "#;
+
+const V2: &str = r#"
+CREATE TRIGGER decisions_fts_insert AFTER INSERT ON decisions BEGIN
+  INSERT INTO decisions_fts(rowid, title, claim, rationale)
+  VALUES (new.rowid, new.title, new.claim, new.rationale);
+END;
+
+CREATE TRIGGER decisions_fts_delete AFTER DELETE ON decisions BEGIN
+  INSERT INTO decisions_fts(decisions_fts, rowid, title, claim, rationale)
+  VALUES ('delete', old.rowid, old.title, old.claim, old.rationale);
+END;
+
+CREATE TRIGGER decisions_fts_update AFTER UPDATE ON decisions BEGIN
+  INSERT INTO decisions_fts(decisions_fts, rowid, title, claim, rationale)
+  VALUES ('delete', old.rowid, old.title, old.claim, old.rationale);
+  INSERT INTO decisions_fts(rowid, title, claim, rationale)
+  VALUES (new.rowid, new.title, new.claim, new.rationale);
+END;
+
+INSERT INTO decisions_fts(rowid, title, claim, rationale)
+  SELECT rowid, title, claim, rationale FROM decisions;
+"#;
+
+pub(crate) fn v1_for_test() -> &'static str {
+    V1
+}

@@ -1,4 +1,5 @@
 mod charters;
+mod tools;
 
 use anyhow::{bail, Context, Result};
 use std::fs;
@@ -9,6 +10,7 @@ use studio_events::{EventType, Outcome, Scene, WorkerState};
 use studio_store::{LedgerEntry, RoleRow, SessionRow, Store, TaskRow};
 
 const ROLE: &str = "m1_probe";
+const M2_ROLE: &str = "gameplay_engineer";
 const TOOLS: [&str; 3] = ["Read", "Grep", "Glob"];
 
 fn now() -> String {
@@ -265,13 +267,13 @@ fn m1_proof() -> Result<()> {
         && warm.outcome == Outcome::Completed
         && cold.usage.total_input() > 0
         && cold.cost_usd > 0.0;
-    report("a", "usage captured from the terminal result", usage_ok, &mut failures);
+    report_check("a", "usage captured from the terminal result", usage_ok, &mut failures);
 
     let cache_ok = cold.usage.cache_creation > 0 && warm.usage.cache_read > 0;
-    report("b", "second same-prefix spawn read from cache", cache_ok, &mut failures);
+    report_check("b", "second same-prefix spawn read from cache", cache_ok, &mut failures);
 
     let reap_ok = cold.session_id.is_some() && warm.session_id.is_some();
-    report("c", "workers reaped cleanly with session ids recorded", reap_ok, &mut failures);
+    report_check("c", "workers reaped cleanly with session ids recorded", reap_ok, &mut failures);
 
     let spend = store.run_spend(&run)?;
     println!();
@@ -311,7 +313,187 @@ fn m1_proof() -> Result<()> {
     }
 }
 
-fn report(tag: &str, what: &str, ok: bool, failures: &mut Vec<String>) {
+fn mcp_server() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let flag = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1).cloned())
+            .unwrap_or_default()
+    };
+    let store = Store::open(studio_dir().join("studio-state.db"))?;
+    let mut tools = tools::StoreTools::new(
+        store,
+        now,
+        id,
+        flag("--role"),
+        flag("--task"),
+        flag("--escalates-to"),
+    );
+    let stdin = std::io::stdin();
+    studio_mcp::serve(&mut tools, stdin.lock(), std::io::stdout())?;
+    Ok(())
+}
+
+fn m2_proof() -> Result<()> {
+    guard_nested_session()?;
+
+    fs::create_dir_all(studio_dir())?;
+    let store = Store::open(studio_dir().join("studio-state.db"))?;
+
+    store.upsert_role(RoleRow {
+        id: "systems_engineer".into(),
+        tier: 2,
+        department: "engineering".into(),
+        model: "opus".into(),
+        effort: "xhigh".into(),
+        escalates_to: None,
+    })?;
+    store.upsert_role(RoleRow {
+        id: M2_ROLE.into(),
+        tier: 3,
+        department: "engineering".into(),
+        model: "opus".into(),
+        effort: "low".into(),
+        escalates_to: Some("systems_engineer".into()),
+    })?;
+
+    let charter = studio_context::CharterSource {
+        studio_conventions: charters::L0_STUDIO_CONVENTIONS.into(),
+        engine_profile: charters::L1_GENERIC_ENGINE.into(),
+        role_charter: charters::L2_CAPSULE_ROLE.into(),
+    };
+    let capsule_tool = studio_mcp::qualified(studio_mcp::TOOL_CAPSULE_SUBMIT);
+    let tool_list: Vec<String> = vec![capsule_tool.clone()];
+
+    let prefix = freeze(&charter, &tool_list, Model::Opus)
+        .map_err(|e| anyhow::anyhow!("charter freeze failed: {e}"))?;
+    let charter_path = write_charter(&prefix)?;
+
+    let run = id("run");
+    let task_id = id("task");
+
+    let exe = std::env::current_exe()?;
+    let mcp_path = studio_dir().join("mcp.json");
+    fs::write(
+        &mcp_path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "mcpServers": {
+                "studio": {
+                    "command": exe.to_string_lossy(),
+                    "args": ["mcp-server", "--role", M2_ROLE, "--task", &task_id,
+                             "--escalates-to", "systems_engineer"]
+                }
+            }
+        }))?,
+    )?;
+
+    store.insert_task(
+        TaskRow {
+            id: task_id.clone(),
+            run: run.clone(),
+            role: M2_ROLE.into(),
+            parent_task: None,
+            workflow_node: None,
+            state: WorkerState::Running,
+            outcome: None,
+        },
+        now(),
+    )?;
+
+    println!("M2 acceptance proof");
+    println!("  run           {run}");
+    println!("  task          {task_id}");
+    println!("  mcp server    {} mcp-server", exe.display());
+    println!("  prefix_hash   {}", prefix.prefix_hash);
+    println!();
+
+    let spec = WorkerSpec {
+        system_prompt_file: charter_path.to_string_lossy().into_owned(),
+        tools: Vec::new(),
+        allowed_tools: vec![capsule_tool.clone()],
+        model: Model::Opus,
+        effort: Effort::Low,
+        session: SessionMode::New(uuid_v4()),
+        mcp_config: Some(mcp_path.to_string_lossy().into_owned()),
+    };
+
+    let brief = format!(
+        "Task {task_id}. You are gameplay_engineer#1.\n\n\
+         You have finished adding a dash ability to the player controller.\n\
+         Submit your capsule now with the {capsule_tool} tool. Use kind \"task_return\",\n\
+         outcome \"done\", from \"gameplay_engineer#1\", task \"{task_id}\", and a one\n\
+         sentence summary. Record one do_not_revisit entry, exactly:\n\
+         \"the animation-event path drops frames\". Then stop."
+    );
+
+    println!("  spawning worker whose only tool is capsule_submit");
+    let worker = Worker::spawn("claude", &spec.to_args(), &brief)
+        .context("failed to spawn the claude CLI; is it on PATH?")?;
+
+    let mut mcp_connected = false;
+    let mut tool_calls: Vec<String> = Vec::new();
+    let report = worker.drive(&WorkerLimits::default(), |ev| match ev {
+        studio_core::CliEvent::Init { mcp_servers, .. } => {
+            mcp_connected = mcp_servers.iter().any(|s| s.is_connected());
+        }
+        studio_core::CliEvent::ToolCall { tool, .. } => tool_calls.push(tool.clone()),
+        _ => {}
+    })?;
+
+    let usage = report.state.usage.unwrap_or_default();
+    println!(
+        "  outcome={:?} input={} output={} cache_write={} cache_read={} cost=${:.4}",
+        report.outcome,
+        usage.input,
+        usage.output,
+        usage.cache_creation,
+        usage.cache_read,
+        report.state.cost_usd
+    );
+    if report.state.is_error {
+        println!("  cli reported: {}", report.state.text.lines().next().unwrap_or(""));
+    }
+    println!();
+
+    let stored = store.capsules_for_task(&task_id)?;
+
+    println!("Acceptance criteria");
+    let mut failures = Vec::new();
+    report_check("a", "the studio MCP server connected", mcp_connected, &mut failures);
+    report_check(
+        "b",
+        "the worker called capsule_submit",
+        tool_calls.iter().any(|t| t.contains("capsule_submit")),
+        &mut failures,
+    );
+    report_check("c", "a validated capsule landed in the store", !stored.is_empty(), &mut failures);
+    let dnr_kept = stored
+        .first()
+        .map(|c| c.body_json.contains("drops frames"))
+        .unwrap_or(false);
+    report_check("d", "do_not_revisit survived validation and storage", dnr_kept, &mut failures);
+
+    if let Some(c) = stored.first() {
+        println!();
+        println!("Stored capsule");
+        println!("  id            {}", c.id);
+        println!("  kind          {}  outcome {}", c.kind, c.outcome);
+        println!("  rendered      {} tokens, truncated={}", c.rendered_tokens, c.truncated);
+    }
+
+    store.update_task_state(&task_id, WorkerState::Reaped, Some(report.outcome), now())?;
+
+    println!();
+    if failures.is_empty() {
+        println!("M2 PASSED");
+        Ok(())
+    } else {
+        bail!("M2 FAILED: {}", failures.join(", "));
+    }
+}
+
+fn report_check(tag: &str, what: &str, ok: bool, failures: &mut Vec<String>) {
     println!("  ({tag}) {:<48} {}", what, if ok { "PASS" } else { "FAIL" });
     if !ok {
         failures.push(tag.to_string());
@@ -322,8 +504,10 @@ fn main() -> Result<()> {
     let cmd = std::env::args().nth(1).unwrap_or_else(|| "help".into());
     match cmd.as_str() {
         "m1" => m1_proof(),
+        "m2" => m2_proof(),
+        "mcp-server" => mcp_server(),
         _ => {
-            println!("usage: studiod m1");
+            println!("usage: studiod <m1|m2|mcp-server>");
             println!();
             println!("  m1   run the M1 acceptance proof: spawn two same-prefix workers,");
             println!("       record the ledger, and verify usage capture, cache reuse and reaping.");
