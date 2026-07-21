@@ -86,6 +86,14 @@ pub fn usd_mirror(model: Model, u: Usage) -> f64 {
         / 1_000_000.0
 }
 
+pub fn billable_tokens(u: Usage) -> u64 {
+    (u.input as f64
+        + u.output as f64
+        + u.cache_read as f64 * CACHE_READ_MULTIPLIER
+        + u.cache_creation as f64 * CACHE_WRITE_MULTIPLIER)
+        .round() as u64
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Budget {
     pub limit: u64,
@@ -429,5 +437,44 @@ mod tests {
         assert_eq!(warned.state(None), BudgetState::Warned);
         let ok = Budget { limit: 100, spent: 10 };
         assert_eq!(ok.state(None), BudgetState::Ok);
+    }
+}
+
+#[cfg(test)]
+mod billable_tests {
+    use super::*;
+
+    #[test]
+    fn a_cache_read_costs_a_tenth_of_a_fresh_input_token() {
+        let cached = Usage { input: 0, output: 0, cache_read: 1000, cache_creation: 0 };
+        let fresh = Usage { input: 1000, output: 0, cache_read: 0, cache_creation: 0 };
+        assert_eq!(billable_tokens(cached), 100);
+        assert_eq!(billable_tokens(fresh), 1000);
+    }
+
+    #[test]
+    fn a_warm_worker_is_far_cheaper_against_the_budget_than_a_cold_one() {
+        let warm = Usage { input: 500, output: 800, cache_read: 30_000, cache_creation: 0 };
+        let cold = Usage { input: 500, output: 800, cache_read: 0, cache_creation: 30_000 };
+
+        assert!(
+            billable_tokens(warm) * 10 < billable_tokens(cold),
+            "warm {} should be an order of magnitude under cold {}",
+            billable_tokens(warm),
+            billable_tokens(cold)
+        );
+    }
+
+    #[test]
+    fn billing_tracks_the_dollar_mirror_rather_than_raw_token_count() {
+        let u = Usage { input: 1000, output: 0, cache_read: 100_000, cache_creation: 0 };
+        let raw = u.input + u.output + u.cache_read + u.cache_creation;
+
+        assert_eq!(raw, 101_000);
+        assert_eq!(billable_tokens(u), 11_000);
+        assert!(
+            billable_tokens(u) < raw / 5,
+            "charging cache reads at face value is what starved the run"
+        );
     }
 }

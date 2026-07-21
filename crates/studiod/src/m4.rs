@@ -321,5 +321,11 @@ fn run_worker_inner(
         Some(m) if !m.trim().is_empty() => m.clone(),
         _ => report.state.text.clone(),
     };
-    Ok((text, usage.total_input() + usage.output))
+    let billed = studio_budget::billable_tokens(studio_budget::Usage {
+        input: usage.input,
+        output: usage.output,
+        cache_read: usage.cache_read,
+        cache_creation: usage.cache_creation,
+    });
+    Ok((text, billed))
 }

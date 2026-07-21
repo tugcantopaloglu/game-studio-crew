@@ -365,13 +365,24 @@ pub fn run_planned(
     )?;
 
     println!(
-        "  workflow {} -> {} ({} nodes, {} gates passed, {} repair rounds)",
+        "  workflow {} -> {} ({} of {} nodes, {} gates passed, {} repair rounds)",
         workflow.id,
         outcome.tag(),
         report.entered.len(),
+        workflow.nodes.len(),
         report.gates_passed,
         report.repair_rounds
     );
+
+    match &outcome {
+        RunOutcome::Blocked { node, reason }
+        | RunOutcome::Escalated { node, reason }
+        | RunOutcome::RoutedToInfra { node, reason }
+        | RunOutcome::Refused { node, reason } => {
+            println!("    stopped at {node}: {reason}");
+        }
+        RunOutcome::Completed => {}
+    }
 
     Ok(outcome)
 }
