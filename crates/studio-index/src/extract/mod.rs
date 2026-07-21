@@ -36,6 +36,18 @@ pub fn extract(lang: Lang, path: &str, src: &str) -> Extraction {
     }
 }
 
+pub(crate) fn row(node: Node) -> u32 {
+    node.start_position().row as u32
+}
+
+pub(crate) fn first_line(node: Node) -> u32 {
+    row(node) + 1
+}
+
+pub(crate) fn last_line(node: Node) -> u32 {
+    node.end_position().row as u32 + 1
+}
+
 pub(crate) fn text<'a>(node: Node, src: &'a str) -> &'a str {
     node.utf8_text(src.as_bytes()).unwrap_or_default()
 }

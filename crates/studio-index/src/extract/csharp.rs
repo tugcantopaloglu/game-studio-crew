@@ -1,5 +1,6 @@
 use super::{
-    collapse_whitespace, leading_doc, named_child_text, qualify, text, truncate, Extraction, Ref,
+    collapse_whitespace, first_line, last_line, leading_doc, named_child_text, qualify, row, text,
+    truncate, Extraction, Ref,
     Symbol,
 };
 use tree_sitter::{Node, Parser};
@@ -109,14 +110,14 @@ fn push(node: Node, src: &str, scope: &str, kind: &str, out: &mut Extraction) ->
 }
 
 fn emit(node: Node, src: &str, fqname: String, kind: &str, out: &mut Extraction) {
-    let line_start = node.start_position().row as u32;
+    let declaration_row = row(node);
     out.symbols.push(Symbol {
         fqname,
         kind: kind.to_string(),
         signature: Some(signature(node, src)),
-        doc: leading_doc(src, line_start, DOC_MARKERS),
-        line_start,
-        line_end: node.end_position().row as u32,
+        doc: leading_doc(src, declaration_row, DOC_MARKERS),
+        line_start: first_line(node),
+        line_end: last_line(node),
     });
 }
 
@@ -149,7 +150,7 @@ fn collect_refs(node: Node, src: &str, from: &str, out: &mut Extraction) {
                     out.refs.push(Ref {
                         from_symbol: from.to_string(),
                         to_name: name,
-                        line: child.start_position().row as u32,
+                        line: first_line(child),
                     });
                 }
             }
@@ -244,6 +245,13 @@ namespace Game.Player {
             .collect();
         assert!(names.contains(&"Apply"));
         assert!(names.contains(&"Translate"));
+    }
+
+    #[test]
+    fn line_numbers_are_one_based_the_way_an_editor_counts_them() {
+        let e = extraction();
+        let m = e.symbols.iter().find(|s| s.fqname == "Game.Player.Mover.Update").unwrap();
+        assert!(MOVER.lines().nth(m.line_start as usize - 1).unwrap().contains("void Update()"));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use super::{
-    collapse_whitespace, leading_doc, named_child_text, qualify, text, truncate, Extraction, Ref,
+    collapse_whitespace, first_line, last_line, leading_doc, named_child_text, qualify, row, text,
+    truncate, Extraction, Ref,
     Symbol,
 };
 use tree_sitter::{Node, Parser};
@@ -244,14 +245,14 @@ fn split_qualified(node: Node, src: &str) -> (String, String) {
 }
 
 fn emit(node: Node, src: &str, fqname: String, kind: &str, out: &mut Extraction) {
-    let line_start = node.start_position().row as u32;
+    let declaration_row = row(node);
     out.symbols.push(Symbol {
         fqname,
         kind: kind.to_string(),
         signature: Some(signature(node, src)),
-        doc: leading_doc(src, line_start, DOC_MARKERS),
-        line_start,
-        line_end: node.end_position().row as u32,
+        doc: leading_doc(src, declaration_row, DOC_MARKERS),
+        line_start: first_line(node),
+        line_end: last_line(node),
     });
 }
 
@@ -294,7 +295,7 @@ fn collect_refs(node: Node, src: &str, from: &str, out: &mut Extraction) {
                     out.refs.push(Ref {
                         from_symbol: from.to_string(),
                         to_name: name,
-                        line: child.start_position().row as u32,
+                        line: first_line(child),
                     });
                 }
             }
@@ -422,6 +423,17 @@ void APlayerPawn::ApplyDamage(int32 Amount) {
     fn a_member_call_through_this_is_recorded_by_its_field_name() {
         let e = extract("void A::B() {\n  this->Helper();\n}\n");
         assert!(e.refs.iter().any(|r| r.to_name == "Helper"));
+    }
+
+    #[test]
+    fn line_numbers_survive_blanking_and_are_one_based() {
+        let e = extraction();
+        let d = e
+            .symbols
+            .iter()
+            .find(|s| s.fqname == "APlayerPawn.ApplyDamage" && s.line_start < 20)
+            .unwrap();
+        assert!(PAWN.lines().nth(d.line_start as usize - 1).unwrap().contains("ApplyDamage"));
     }
 
     #[test]

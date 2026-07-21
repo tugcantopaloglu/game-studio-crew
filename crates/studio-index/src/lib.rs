@@ -422,6 +422,16 @@ mod tests {
     }
 
     #[test]
+    fn a_reported_line_points_at_the_declaration_in_the_real_file() {
+        let mut index = Index::open_in_memory().unwrap();
+        index.index_file("scripts/player.gd", PLAYER.as_bytes(), "t0").unwrap();
+
+        let hit = &index.lookup("Player.take_damage", 5).unwrap()[0];
+        let line = PLAYER.lines().nth(hit.line_start as usize - 1).unwrap();
+        assert!(line.contains("func take_damage"), "got line {}: {line}", hit.line_start);
+    }
+
+    #[test]
     fn a_bare_leaf_name_finds_the_qualified_symbol() {
         let index = seeded();
         let hits = index.lookup("take_damage", 5).unwrap();

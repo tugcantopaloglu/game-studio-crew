@@ -1,6 +1,6 @@
 # 02: Context Engine
 
-> **Status:** v0.1, 2026-07-20, design phase, no runtime code.
+> **Status:** v0.2, 2026-07-21. Built in M2 and running: frozen charters, capsules, the summarization ladder and the ADR store. The symbol slice this document specifies is served by the index built in M6 ([11](11-index-and-bootstrap.md)), and its saving is now measured rather than asserted.
 > **This document is the single source of truth for:** the layered prompt model (L0-L3), the capsule JSON schema, the three-rung summarization ladder, and the token math. [01](01-orchestrator-core.md), [03](03-state-store.md), [06](06-budget-governance.md), [07](07-engine-layer.md), and [09](09-workflows.md) reference these definitions rather than restating them.
 
 This is the core of the token story. Everything here serves the prime directive: **feed the model minimum viable context, and never pay twice for the same tokens.**
@@ -106,6 +106,18 @@ Turn digests are the reason the ladder is cheap: they are the daemon reading fie
 ## Symbol index instead of inlined file bodies
 
 L3 never inlines whole files. It carries a **symbol slice**: signatures, doc comments, and line ranges pulled from the index ([11](11-index-and-bootstrap.md)) for exactly the symbols the task names, plus a one-hop neighborhood. A worker that needs a full body calls `mcp__studio__symbol_lookup` to pull it on demand (pull, not push). This keeps the common case small and lets the rare deep-read happen without inflating every brief.
+
+**Measured, not assumed** (`probes/index-tokens.sh`). Two workers, same 63-file Godot project, same question requiring three facts that span two scripts and a scene file. One arm gets `symbol_lookup` and no file access; the other gets `Read,Grep,Glob` and no index. Both answered correctly every run.
+
+| run | index route | file route | token ratio | cost ratio |
+|---|---|---|---|---|
+| 1 | 5299 | 12360 | 2.33× | 4.64× |
+| 2 | 3608 | 12360 | 3.43× | 1.58× |
+| 3 | 5299 | 12360 | 2.33× | 2.21× |
+
+Billed input tokens. **The index route costs roughly 2.3–3.4× fewer**, and settles the question in **2 tool calls against 4**. The file route was strikingly reproducible at 12360 every run: `Grep`, `Grep`, `Glob`, then one `Read` whose body dominates the total.
+
+Two honest caveats. **The cost ratio is not the token ratio and is nowhere near as stable** — 4.64×, 1.58×, 2.21× across those same three runs, because it depends entirely on how much of each arm's input arrives as a 0.1× cache read rather than a 2.0× cache write. Quote the token figure; a single dollar figure here says more about cache state than about the index. And this is a *retrieval* task, the index's best case; a task that genuinely needs a whole file body will read one either way.
 
 ## ADR store
 

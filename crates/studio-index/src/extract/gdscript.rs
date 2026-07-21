@@ -1,5 +1,6 @@
 use super::{
-    collapse_whitespace, file_stem, leading_doc, named_child_text, qualify, text, truncate,
+    collapse_whitespace, file_stem, first_line, last_line, leading_doc, named_child_text, qualify,
+    row, text, truncate,
     Extraction, Ref, Symbol,
 };
 use tree_sitter::{Node, Parser};
@@ -83,15 +84,15 @@ fn push(
 ) -> Option<String> {
     let name = named_child_text(node, "name", src)?;
     let fqname = qualify(scope, name);
-    let line_start = node.start_position().row as u32;
+    let declaration_row = row(node);
 
     out.symbols.push(Symbol {
         fqname: fqname.clone(),
         kind: kind.to_string(),
         signature: Some(signature(node, src)),
-        doc: leading_doc(src, line_start, DOC_MARKERS),
-        line_start,
-        line_end: node.end_position().row as u32,
+        doc: leading_doc(src, declaration_row, DOC_MARKERS),
+        line_start: first_line(node),
+        line_end: last_line(node),
     });
 
     Some(fqname)
@@ -122,7 +123,7 @@ fn collect_refs(node: Node, src: &str, from: &str, out: &mut Extraction) {
             out.refs.push(Ref {
                 from_symbol: from.to_string(),
                 to_name: text(name, src).to_string(),
-                line: child.start_position().row as u32,
+                line: first_line(child),
             });
         }
 
@@ -219,6 +220,27 @@ func _physics_process(delta: float) -> void:
             .collect();
         assert!(names.contains(&"move_and_slide"));
         assert!(names.contains(&"_apply"));
+    }
+
+    #[test]
+    fn line_numbers_are_one_based_the_way_an_editor_counts_them() {
+        let e = extraction();
+        let f = e.symbols.iter().find(|s| s.fqname == "Player._physics_process").unwrap();
+
+        let declared_at = PLAYER
+            .lines()
+            .position(|l| l.starts_with("func _physics_process"))
+            .unwrap() as u32;
+
+        assert_eq!(f.line_start, declared_at + 1);
+        assert_eq!(PLAYER.lines().nth(f.line_start as usize - 1).unwrap(), "func _physics_process(delta: float) -> void:");
+    }
+
+    #[test]
+    fn a_ref_line_is_one_based_too() {
+        let e = extraction();
+        let call = e.refs.iter().find(|r| r.to_name == "move_and_slide").unwrap();
+        assert!(PLAYER.lines().nth(call.line as usize - 1).unwrap().contains("move_and_slide"));
     }
 
     #[test]

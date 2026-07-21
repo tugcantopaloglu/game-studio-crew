@@ -117,3 +117,65 @@ mechanism bought with a measured sub-one-percent saving.
 
 The number is what makes this a decision rather than a deferral. Re-run the
 probe if a project ever makes the refresh visible.
+
+### Index vs reading files
+
+Answers whether the symbol index ([02](../docs/design/02-context-engine.md),
+[11](../docs/design/11-index-and-bootstrap.md)) actually spends fewer tokens than
+letting a worker read the project, which the design asserted and had never
+measured.
+
+```bash
+cargo build --release -p studiod
+bash probes/index-tokens.sh              # 63-file Godot fixture
+SCRIPTS=10 bash probes/index-tokens.sh   # quicker, weaker signal
+```
+
+Two workers, same fixture, same question, same charter, same model. The question
+needs three facts spanning two scripts and a scene file: a method signature, the
+file and line defining it, and the scene node mounting that script. One arm is
+given `symbol_lookup` and **no file access**; the other is given `Read,Grep,Glob`
+and **no index**. Both spawn the way the daemon spawns workers, with the brief on
+stdin.
+
+**Verdict: the index route costs roughly 2.3-3.4× fewer input tokens.** Both arms
+answered correctly on every run.
+
+| run | index route | file route | token ratio | cost ratio |
+|---|---|---|---|---|
+| 1 | 5299 | 12360 | 2.33× | 4.64× |
+| 2 | 3608 | 12360 | 3.43× | 1.58× |
+| 3 | 5299 | 12360 | 2.33× | 2.21× |
+
+Billed input tokens. The index arm settles it in 2 `symbol_lookup` calls and 3
+turns; the file arm takes 4 tool calls (`Grep`, `Grep`, `Glob`, `Read`) and 5
+turns, and was reproducible to the token at 12360 every run.
+
+**Do not quote a single cost figure.** Cost moved 4.64×, 1.58× and 2.21× across
+those three runs, because it depends on how much of each arm's input arrives as a
+0.1× cache read rather than a 2.0× cache write. The token ratio is the stable
+measurement; the dollar ratio is mostly a statement about cache state.
+
+Note also that this is a *retrieval* task, the index's best case. A task that
+genuinely needs a whole file body will read one either way.
+
+The script keeps the same nested-session guard as the M1 probes. That guard may
+now be stale: these three runs were taken with `PROBE_FORCE=1` **from inside a
+Claude Code session** on CLI 2.1.216, and both arms authenticated and completed
+normally. The guard stays because the M1 failure was real when it was written and
+a stale refusal costs nothing, while a silently unauthenticated run produces
+confident garbage. Re-test before removing it.
+
+## What running the probes caught
+
+The token probe was written to confirm a savings claim and instead found a
+correctness bug. Both arms were asked for the line number of a definition; the
+index answered 11 and the file-reading arm answered 12. The file arm was right.
+`tree-sitter` reports 0-based rows and the extractors were storing them raw, so
+every line the index had ever reported was one short. Nothing in 419 tests
+caught it, because every test asserted against the same off-by-one convention
+that produced it. The fix is one helper and four tests that resolve a reported
+line back against the real file text.
+
+A probe that only confirms what you believed is a weaker probe than one that
+disagrees with a second source.
