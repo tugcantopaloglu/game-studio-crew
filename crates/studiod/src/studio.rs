@@ -95,10 +95,7 @@ fn run_build(em: &Emitter, req: BuildRequest, seq: &mut usize) -> Result<()> {
         .to_workflow()
         .map_err(|e| anyhow::anyhow!("plan did not convert to a workflow: {e}"))?;
 
-    let project = crate::studio_dir().join("m3-project");
-    let project = if project.join("project.godot").exists() { Some(project) } else { None };
-
-    crate::wf::run_planned(em, &wf, &req.prompt, project, seq, Some(plan))?;
+    crate::wf::run_planned(em, &wf, &req.prompt, em.project.clone(), seq, Some(plan))?;
     Ok(())
 }
 
@@ -109,9 +106,7 @@ fn run_flow(em: &Emitter, req: WorkflowRequest, seq: &mut usize) -> Result<()> {
         .with_context(|| format!("unknown workflow {}", req.workflow))?;
 
     println!("  workflow {} : {}", wf.id, first_line(&req.brief));
-    let project = crate::studio_dir().join("m3-project");
-    let project = if project.join("project.godot").exists() { Some(project) } else { None };
-    crate::wf::run_workflow(em, &wf, &req.brief, project, seq)?;
+    crate::wf::run_workflow(em, &wf, &req.brief, em.project.clone(), seq)?;
     Ok(())
 }
 
@@ -254,33 +249,109 @@ pub fn serve_studio(store: Arc<Store>, run: String, port: u16) -> Result<()> {
         let _ = rt.block_on(studio_server::serve(serve_state, port));
     });
 
-    let em = Emitter { store: store.clone(), state, run: run.clone() };
-    em.emit(
+    let bare = Emitter {
+        store: store.clone(),
+        state: state.clone(),
+        run: run.clone(),
+        project: None,
+    };
+    bare.emit(
         "daemon",
         EventType::RunStarted,
         Scene::daemon(),
         serde_json::json!({"title": "interactive studio"}),
     )?;
 
-    let mut project = ProjectIndex::open(
-        PathBuf::from("."),
-        crate::studio_dir().join("studio-index.db"),
-    )?;
-    project.refresh(&em)?;
-
     println!("studio floor on http://127.0.0.1:{port}/?run={run}");
+    match store.projects() {
+        Ok(p) if p.is_empty() => {
+            println!("no projects yet; create one from the floor before assigning work");
+        }
+        Ok(p) => println!("{} project(s) known", p.len()),
+        Err(e) => println!("could not read projects: {e}"),
+    }
     println!("waiting for tasks and meetings from the floor");
     println!();
 
+    let mut indexes: std::collections::HashMap<String, ProjectIndex> =
+        std::collections::HashMap::new();
     let mut seq = 0usize;
+
     for cmd in rx {
-        project.refresh_quietly(&em);
+        let selected = match resolve_project(&store, project_of(&cmd)) {
+            Ok(p) => p,
+            Err(e) => {
+                println!("  command rejected: {e}");
+                continue;
+            }
+        };
+
+        let em = Emitter {
+            store: store.clone(),
+            state: state.clone(),
+            run: run.clone(),
+            project: selected.as_ref().map(|p| PathBuf::from(&p.root)),
+        };
+
+        if let Some(p) = &selected {
+            let _ = store.touch_project(&p.id, crate::now());
+            let index = match indexes.entry(p.id.clone()) {
+                std::collections::hash_map::Entry::Occupied(e) => Some(e.into_mut()),
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    let db = crate::studio_dir().join(format!("index-{}.db", p.id));
+                    match ProjectIndex::open(PathBuf::from(&p.root), db) {
+                        Ok(idx) => Some(slot.insert(idx)),
+                        Err(e) => {
+                            println!("  index unavailable for {}: {e}", p.name);
+                            None
+                        }
+                    }
+                }
+            };
+            if let Some(idx) = index {
+                idx.refresh_quietly(&em);
+            }
+        }
+
         if let Err(e) = run_command(&em, cmd, &mut seq) {
             println!("  command failed: {e}");
         }
-        project.refresh_quietly(&em);
+
+        if let Some(p) = &selected {
+            if let Some(idx) = indexes.get_mut(&p.id) {
+                idx.refresh_quietly(&em);
+            }
+        }
     }
     Ok(())
+}
+
+fn project_of(cmd: &StudioCommand) -> Option<&str> {
+    match cmd {
+        StudioCommand::Task(t) => t.project.as_deref(),
+        StudioCommand::Workflow(w) => w.project.as_deref(),
+        StudioCommand::Build(b) => b.project.as_deref(),
+        StudioCommand::Meeting(_) => None,
+    }
+}
+
+fn resolve_project(
+    store: &Store,
+    requested: Option<&str>,
+) -> Result<Option<studio_store::ProjectRow>> {
+    let Some(id) = requested else {
+        return Ok(None);
+    };
+    match store.project(id)? {
+        Some(p) => {
+            let root = PathBuf::from(&p.root);
+            if !root.is_dir() {
+                anyhow::bail!("project {} points at {}, which is gone", p.name, p.root);
+            }
+            Ok(Some(p))
+        }
+        None => anyhow::bail!("unknown project {id}"),
+    }
 }
 
 #[cfg(test)]
@@ -309,6 +380,7 @@ mod index_tests {
             store: store.clone(),
             state: AppState::new(store.clone()),
             run: run.clone(),
+            project: Some(project_dir.path().to_path_buf()),
         };
 
         let project = ProjectIndex::open(

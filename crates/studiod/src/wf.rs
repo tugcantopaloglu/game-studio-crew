@@ -301,7 +301,13 @@ pub fn run_planned(
             let d = ProfileDriver::resolve(profile).ok();
             (d, ProjectPaths::new(root, out))
         }
-        _ => (None, ProjectPaths::new(".", ".studio/wf-out")),
+        Some(root) => {
+            let out = root.join(".studio-out");
+            (None, ProjectPaths::new(root, out))
+        }
+        None => anyhow::bail!(
+            "no project selected; create or pick one on the floor before starting work"
+        ),
     };
 
     let mut host = Host {

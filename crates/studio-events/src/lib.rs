@@ -105,10 +105,11 @@ pub enum EventType {
     WorkflowEnded,
 
     IndexUpdated,
+    CommitRecorded,
 }
 
 impl EventType {
-    pub const ALL: [EventType; 32] = [
+    pub const ALL: [EventType; 33] = [
         EventType::RunStarted,
         EventType::RunEnded,
         EventType::WorkerSpawned,
@@ -141,6 +142,7 @@ impl EventType {
         EventType::GateEvaluated,
         EventType::WorkflowEnded,
         EventType::IndexUpdated,
+        EventType::CommitRecorded,
     ];
 
     pub fn wire_name(&self) -> &'static str {
@@ -161,7 +163,7 @@ impl EventType {
     }
 }
 
-const WIRE_NAMES: [&str; 32] = [
+const WIRE_NAMES: [&str; 33] = [
     "run_started",
     "run_ended",
     "worker_spawned",
@@ -194,6 +196,7 @@ const WIRE_NAMES: [&str; 32] = [
     "gate_evaluated",
     "workflow_ended",
     "index_updated",
+    "commit_recorded",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -255,9 +258,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn enum_has_exactly_the_thirty_two_types_in_doc_05() {
-        assert_eq!(EventType::ALL.len(), 32);
-        assert_eq!(WIRE_NAMES.len(), 32);
+    fn enum_has_exactly_the_thirty_three_types_in_doc_05() {
+        assert_eq!(EventType::ALL.len(), 33);
+        assert_eq!(WIRE_NAMES.len(), 33);
     }
 
     #[test]

@@ -19,6 +19,8 @@ pub const THREE_JS: &str = include_str!("../web/vendor/three.module.js");
 pub struct TaskRequest {
     pub role: String,
     pub brief: String,
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -32,11 +34,15 @@ pub struct MeetingRequest {
 pub struct WorkflowRequest {
     pub workflow: String,
     pub brief: String,
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BuildRequest {
     pub prompt: String,
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +130,7 @@ pub fn router(state: AppState) -> Router {
         .route("/task", post(submit_task))
         .route("/meeting", post(convene_meeting))
         .route("/roles", get(roles))
+        .route("/projects", get(projects).post(create_project))
         .route("/workflows", get(workflows))
         .route("/workflow", post(start_workflow))
         .route("/build", post(start_build))
@@ -261,6 +268,151 @@ async fn start_build(
         Ok(()) => (StatusCode::ACCEPTED, "planning".to_string()).into_response(),
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NewProject {
+    pub name: String,
+    pub root: String,
+    #[serde(default)]
+    pub engine: Option<String>,
+    #[serde(default = "yes")]
+    pub git: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[cfg(test)]
+mod project_path_tests {
+    use super::strip_verbatim;
+    use std::path::PathBuf;
+
+    #[test]
+    fn a_verbatim_drive_path_loses_the_prefix() {
+        assert_eq!(
+            strip_verbatim(PathBuf::from(r"\\?\C:\games\neon")),
+            PathBuf::from(r"C:\games\neon")
+        );
+    }
+
+    #[test]
+    fn a_verbatim_unc_share_is_left_alone() {
+        let unc = PathBuf::from(r"\\?\UNC\server\share");
+        assert_eq!(strip_verbatim(unc.clone()), unc);
+    }
+
+    #[test]
+    fn a_plain_path_is_untouched() {
+        let plain = PathBuf::from("/home/topal/games");
+        assert_eq!(strip_verbatim(plain.clone()), plain);
+    }
+}
+
+fn strip_verbatim(p: std::path::PathBuf) -> std::path::PathBuf {
+    let text = p.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.len() > 2 && rest.as_bytes()[1] == b':' => {
+            std::path::PathBuf::from(rest)
+        }
+        _ => p,
+    }
+}
+
+async fn projects(State(state): State<AppState>) -> Result<Response, StatusCode> {
+    let rows = state.store.projects().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let json: Vec<_> = rows
+        .into_iter()
+        .map(|p| {
+            serde_json::json!({
+                "id": p.id, "name": p.name, "root": p.root,
+                "engine": p.engine, "git": p.git,
+            })
+        })
+        .collect();
+    Ok(axum::Json(json).into_response())
+}
+
+async fn create_project(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<NewProject>,
+) -> Response {
+    let name = req.name.trim().to_string();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "a project needs a name".to_string()).into_response();
+    }
+
+    let raw = req.root.trim();
+    if raw.is_empty() {
+        return (StatusCode::BAD_REQUEST, "a project needs a path".to_string()).into_response();
+    }
+    let root = std::path::PathBuf::from(raw);
+    if !root.is_absolute() {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("give an absolute path; {raw} is relative"),
+        )
+            .into_response();
+    }
+
+    if let Err(e) = std::fs::create_dir_all(&root) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("could not create {}: {e}", root.display()),
+        )
+            .into_response();
+    }
+
+    let canonical = root.canonicalize().map(strip_verbatim).unwrap_or(root);
+    let engine = req.engine.unwrap_or_else(|| "godot".into());
+
+    let git_ready = if req.git {
+        if !studio_core::git::available() {
+            return (
+                StatusCode::BAD_REQUEST,
+                "git is not on PATH; install it or create the project without git".to_string(),
+            )
+                .into_response();
+        }
+        if let Err(e) = studio_core::git::init(&canonical) {
+            return (StatusCode::BAD_REQUEST, format!("git init failed: {e}")).into_response();
+        }
+        true
+    } else {
+        false
+    };
+
+    let row = studio_store::ProjectRow {
+        id: format!("proj_{}", name.to_lowercase().replace(|c: char| !c.is_alphanumeric(), "-")),
+        name,
+        root: canonical.to_string_lossy().into_owned(),
+        engine,
+        git: git_ready,
+    };
+
+    let ts = now_rfc3339();
+    match state.store.insert_project(row.clone(), ts) {
+        Ok(()) => (
+            StatusCode::CREATED,
+            axum::Json(serde_json::json!({
+                "id": row.id, "name": row.name, "root": row.root,
+                "engine": row.engine, "git": row.git,
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::CONFLICT,
+            format!("could not record the project (is the name or path already used?): {e}"),
+        )
+            .into_response(),
+    }
+}
+
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
 }
 
 async fn floor() -> impl IntoResponse {

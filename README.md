@@ -2,7 +2,15 @@
 
 A ground-up rebuild of `claude-code-game-studios` as a **Rust daemon** that drives `claude` CLI subprocesses as stateless workers, owns all context and budget itself, and streams a realtime event feed to a browser-based visual studio floor.
 
-> **Status:** M1 through M5 built and running against the real CLI and a real engine; M6, the code index, is under way. `studiod studio` serves an interactive 3D studio floor: you assign tasks, convene meetings and start workflows from the browser, and watch real `claude` workers do them. **Godot is the only probed engine**; the Unity and UE5 profiles are written but have never been executed ([07](docs/design/07-engine-layer.md)).
+> **Status:** M1 through M5 built and running against the real CLI and a real engine; M6, the code index, is under way. `studiod studio` serves an interactive 3D studio floor: you create a project, assign tasks, convene meetings and start workflows from the browser, and watch real `claude` workers do them. **Godot is the only probed engine**; the Unity and UE5 profiles are written but have never been executed ([07](docs/design/07-engine-layer.md)).
+
+## Projects
+
+Work is scoped to a project: a directory you name, at a path you choose, with its own git repo. Create one from the floor — name, absolute path, engine, and whether to `git init` — and every task, workflow and build you send afterwards runs with that directory as the worker's working directory and indexes against that tree.
+
+The daemon commits for you. After each worker completes, it stages the project and writes a commit subject of `<role>: <first line of the brief>`, so history reads as ordinary studio work and you can diff or revert any single worker's output. **Committing is daemon work, not worker work:** no worker ever runs git or receives git tools, and no commit message is model-generated, so version control costs zero tokens.
+
+Nothing runs without a project selected. Earlier builds fell back to the daemon's own working directory, which meant the crew could edit this repo; that fallback is now an error.
 
 ## The problem
 

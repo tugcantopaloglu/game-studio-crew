@@ -24,6 +24,15 @@ pub enum StoreError {
 pub type Result<T> = std::result::Result<T, StoreError>;
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct ProjectRow {
+    pub id: String,
+    pub name: String,
+    pub root: String,
+    pub engine: String,
+    pub git: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RoleRow {
     pub id: String,
     pub tier: u8,
@@ -113,6 +122,8 @@ impl CacheHealth {
 
 enum Cmd {
     UpsertRole(RoleRow, Reply<()>),
+    InsertProject(ProjectRow, String, Reply<()>),
+    TouchProject(String, String, Reply<()>),
     InsertCapsule(CapsuleRow, String, Reply<()>),
     InsertDecision(DecisionRow, String, Reply<()>),
     InsertTask(TaskRow, String, Reply<()>),
@@ -186,6 +197,37 @@ impl Store {
 
     pub fn upsert_role(&self, role: RoleRow) -> Result<()> {
         self.send(|r| Cmd::UpsertRole(role, r))
+    }
+
+    pub fn insert_project(&self, project: ProjectRow, ts: impl Into<String>) -> Result<()> {
+        let ts = ts.into();
+        self.send(|r| Cmd::InsertProject(project, ts, r))
+    }
+
+    pub fn touch_project(&self, id: impl Into<String>, ts: impl Into<String>) -> Result<()> {
+        let (id, ts) = (id.into(), ts.into());
+        self.send(|r| Cmd::TouchProject(id, ts, r))
+    }
+
+    pub fn projects(&self) -> Result<Vec<ProjectRow>> {
+        let conn = self.reader()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, root, engine, git FROM projects
+             ORDER BY last_used DESC NULLS LAST, created_ts DESC",
+        )?;
+        let rows = stmt.query_map([], project_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn project(&self, id: &str) -> Result<Option<ProjectRow>> {
+        let conn = self.reader()?;
+        let mut stmt = conn
+            .prepare("SELECT id, name, root, engine, git FROM projects WHERE id = ?1")?;
+        let mut rows = stmt.query_map(params![id], project_from_row)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
     }
 
     pub fn insert_task(&self, task: TaskRow, ts: impl Into<String>) -> Result<()> {
@@ -462,9 +504,39 @@ fn outcome_tag(o: Outcome) -> String {
         .unwrap_or_default()
 }
 
+fn project_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
+    Ok(ProjectRow {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        root: r.get(2)?,
+        engine: r.get(3)?,
+        git: r.get::<_, i64>(4)? != 0,
+    })
+}
+
 fn handle_cmd(conn: &Connection, seq_by_run: &mut HashMap<String, u64>, cmd: Cmd) {
     match cmd {
         Cmd::Shutdown => {}
+
+        Cmd::InsertProject(p, ts, reply) => {
+            let res = conn
+                .execute(
+                    "INSERT INTO projects (id, name, root, engine, git, created_ts, last_used)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                    params![p.id, p.name, p.root, p.engine, p.git as i64, ts],
+                )
+                .map(|_| ())
+                .map_err(StoreError::from);
+            let _ = reply.send(res);
+        }
+
+        Cmd::TouchProject(id, ts, reply) => {
+            let res = conn
+                .execute("UPDATE projects SET last_used = ?2 WHERE id = ?1", params![id, ts])
+                .map(|_| ())
+                .map_err(StoreError::from);
+            let _ = reply.send(res);
+        }
 
         Cmd::UpsertRole(role, reply) => {
             let res = conn

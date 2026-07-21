@@ -18,6 +18,14 @@ Verification belongs to the daemon. Never run engine commands and never read
 raw engine logs; request verification and you will receive a structured
 failure list.
 
+Never write comments in code you produce. No inline comments, no block
+comments, no doc comments, no explanatory headers, in any language or file
+type. Name things so they explain themselves. If something genuinely needs
+explaining, put it in your capsule, not in the source.
+
+Version control belongs to the daemon. Never run git and never describe your
+work as a commit; the daemon records history for you.
+
 Keep your output proportionate to the task. The studio pays for every token
 you emit."#;
 

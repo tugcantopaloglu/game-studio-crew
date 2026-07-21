@@ -1,3 +1,4 @@
+pub mod git;
 mod proc;
 mod spec;
 mod stream;
@@ -17,6 +18,8 @@ pub const WALL_CLOCK_LIMIT: Duration = Duration::from_secs(600);
 pub enum CoreError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("git: {0}")]
+    Git(String),
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;
@@ -61,12 +64,24 @@ pub struct Worker {
 
 impl Worker {
     pub fn spawn(program: &str, args: &[String], brief: &str) -> Result<Self> {
+        Self::spawn_in(program, args, brief, None)
+    }
+
+    pub fn spawn_in(
+        program: &str,
+        args: &[String],
+        brief: &str,
+        cwd: Option<&std::path::Path>,
+    ) -> Result<Self> {
         let mut group = ProcessGroup::new()?;
         let mut cmd = Command::new(program);
         cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
         group.prepare(&mut cmd);
 
         let mut child = cmd.spawn()?;

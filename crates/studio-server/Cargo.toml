@@ -7,12 +7,14 @@ license.workspace = true
 
 [dependencies]
 studio-agents.workspace = true
+studio-core.workspace = true
 studio-events.workspace = true
 studio-store.workspace = true
 studio-workflow.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+time.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 axum = { version = "0.7", features = ["ws"] }
 futures-util = "0.3"

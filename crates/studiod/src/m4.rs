@@ -12,6 +12,7 @@ pub struct Emitter {
     pub store: Arc<Store>,
     pub state: AppState,
     pub run: String,
+    pub project: Option<std::path::PathBuf>,
 }
 
 impl Emitter {
@@ -53,6 +54,39 @@ pub fn register_roles(store: &Store) -> Result<()> {
             })?;
         }
     }
+    Ok(())
+}
+
+fn commit_worker_output(em: &Emitter, role: &Role, brief: &str, actor: &str) -> Result<()> {
+    let Some(root) = em.project.as_deref() else {
+        return Ok(());
+    };
+    if !studio_core::git::is_repo(root) {
+        return Ok(());
+    }
+
+    let subject = studio_core::git::subject(role.id, brief);
+    let sha = match studio_core::git::commit(root, &subject) {
+        Ok(Some(sha)) => sha,
+        Ok(None) => return Ok(()),
+        Err(e) => {
+            println!("  commit skipped: {e}");
+            return Ok(());
+        }
+    };
+
+    println!("  commit {sha}  {subject}");
+    em.emit(
+        actor,
+        EventType::CommitRecorded,
+        Scene::daemon(),
+        serde_json::json!({
+            "project": root.to_string_lossy(),
+            "role": role.id,
+            "sha": sha,
+            "subject": subject,
+        }),
+    )?;
     Ok(())
 }
 
@@ -182,7 +216,7 @@ fn run_worker_inner(
         json_schema,
     };
 
-    let worker = Worker::spawn("claude", &spec.to_args(), brief)
+    let worker = Worker::spawn_in("claude", &spec.to_args(), brief, em.project.as_deref())
         .with_context(|| format!("failed to spawn a worker for {}", role.id))?;
 
     let report = worker.drive(&WorkerLimits::default(), |ev| {
@@ -280,6 +314,8 @@ fn run_worker_inner(
             report.state.text.lines().next().unwrap_or("unknown error")
         );
     }
+
+    commit_worker_output(em, role, brief, &actor)?;
 
     let text = match &report.state.result_message {
         Some(m) if !m.trim().is_empty() => m.clone(),

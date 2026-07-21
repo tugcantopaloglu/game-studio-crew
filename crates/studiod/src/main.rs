@@ -28,7 +28,10 @@ pub fn id(prefix: &str) -> String {
 }
 
 pub fn studio_dir() -> PathBuf {
-    PathBuf::from(".studio")
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(".studio"),
+        Err(_) => PathBuf::from(".studio"),
+    }
 }
 
 fn guard_nested_session() -> Result<()> {
@@ -635,7 +638,12 @@ fn m4_proof() -> Result<()> {
     std::thread::sleep(std::time::Duration::from_secs(5));
     println!();
 
-    let em = m4::Emitter { store: store.clone(), state: state.clone(), run: run.clone() };
+    let em = m4::Emitter {
+        store: store.clone(),
+        state: state.clone(),
+        run: run.clone(),
+        project: None,
+    };
 
     em.emit(
         "daemon",
@@ -714,4 +722,32 @@ fn studio_mode() -> Result<()> {
     let store = std::sync::Arc::new(Store::open(studio_dir().join("studio-state.db"))?);
     m4::register_roles(&store)?;
     studio::serve_studio(store, id("run"), 7878)
+}
+
+#[cfg(test)]
+mod daemon_path_tests {
+    use super::*;
+
+    #[test]
+    fn the_studio_dir_is_absolute_so_workers_with_a_project_cwd_still_find_it() {
+        let dir = studio_dir();
+        assert!(
+            dir.is_absolute(),
+            "a relative .studio would resolve against the worker's project cwd, not the daemon's: {}",
+            dir.display()
+        );
+    }
+
+    #[test]
+    fn a_charter_path_handed_to_a_worker_is_absolute() {
+        let tools: Vec<String> = TOOLS.iter().map(|s| s.to_string()).collect();
+        let prefix = freeze(&charters::m1_charter(), &tools, Model::Opus).unwrap();
+        let path = write_charter(&prefix).unwrap();
+        assert!(
+            path.is_absolute(),
+            "system_prompt_file must be absolute once workers run in a project dir: {}",
+            path.display()
+        );
+        assert!(path.is_file());
+    }
 }

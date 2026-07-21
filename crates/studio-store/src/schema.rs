@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -33,6 +33,9 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
     if current < 2 {
         apply_step(conn, 2, V2)?;
+    }
+    if current < 3 {
+        apply_step(conn, 3, V3)?;
     }
 
     Ok(())
@@ -195,6 +198,22 @@ END;
 
 INSERT INTO decisions_fts(rowid, title, claim, rationale)
   SELECT rowid, title, claim, rationale FROM decisions;
+"#;
+
+const V3: &str = r#"
+CREATE TABLE projects (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL UNIQUE,
+  root       TEXT NOT NULL UNIQUE,
+  engine     TEXT NOT NULL,
+  git        INTEGER NOT NULL DEFAULT 0,
+  created_ts TEXT NOT NULL,
+  last_used  TEXT
+);
+CREATE INDEX projects_last_used ON projects(last_used DESC);
+
+ALTER TABLE tasks ADD COLUMN project TEXT REFERENCES projects(id);
+CREATE INDEX tasks_project ON tasks(project);
 "#;
 
 #[cfg(test)]
