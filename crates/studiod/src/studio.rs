@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
-use studio_agents::{nearest_common_ancestor, role, Role};
+use studio_agents::{nearest_common_ancestor, role};
 use studio_events::{EventType, Scene};
 use studio_server::{
     AppState, BuildRequest, MeetingRequest, StudioCommand, TaskRequest, WorkflowRequest,

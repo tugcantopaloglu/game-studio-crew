@@ -11,7 +11,7 @@ use studio_workflow::{
     WorkflowHost,
 };
 
-use crate::m4::{run_worker, Emitter};
+use crate::m4::Emitter;
 
 pub struct Host<'a> {
     pub em: &'a Emitter,
@@ -22,6 +22,8 @@ pub struct Host<'a> {
     pub seq: usize,
     pub auto_approve: bool,
     pub plan: Option<studio_workflow::Plan>,
+    pub last_verify: Option<studio_verify::VerifyResult>,
+    pub warmed: BTreeSet<String>,
 }
 
 impl<'a> Host<'a> {
@@ -33,11 +35,22 @@ impl<'a> Host<'a> {
 
 impl<'a> WorkflowHost for Host<'a> {
     fn admit(&mut self, node: &Node) -> Admission {
+        let prefix_tokens = match role(&node.role) {
+            Some(r) => crate::m4::prefix_tokens_for(r, false),
+            None => 8_000,
+        };
+        let brief_tokens = studio_context::estimate_tokens(&self.brief) as u64
+            + self
+                .plan
+                .as_ref()
+                .and_then(|p| p.brief_for(&node.id))
+                .map(|b| studio_context::estimate_tokens(b) as u64)
+                .unwrap_or(0);
         let projection = Projection {
-            prefix_tokens: 8_000,
-            brief_tokens: 1_500,
+            prefix_tokens,
+            brief_tokens,
             output_reserve: 2_000,
-            prefix_is_warm: self.seq > 0,
+            prefix_is_warm: self.warmed.contains(&node.role),
         };
         match self.budget.admit(projection) {
             studio_budget::Admission::Admit => Admission::Admit,
@@ -84,8 +97,12 @@ impl<'a> WorkflowHost for Host<'a> {
                     format!("\n\nUpstream capsules: {}", inputs.join(", "))
                 };
                 let full = format!("{brief}{upstream}");
-                return match run_worker(self.em, r, &full, self.seq) {
-                    Ok(()) => NodeOutcome::Completed { capsule: format!("cap_{}", node.id) },
+                return match crate::m4::run_worker_metered(self.em, r, &full, self.seq, false) {
+                    Ok((_, tokens)) => {
+                        self.budget.record(tokens);
+                        self.warmed.insert(node.role.clone());
+                        NodeOutcome::Completed { capsule: format!("cap_{}", node.id) }
+                    }
                     Err(e) => NodeOutcome::Failed { reason: e.to_string() },
                 };
             }
@@ -101,8 +118,12 @@ impl<'a> WorkflowHost for Host<'a> {
             node.id, self.brief, context
         );
 
-        match run_worker(self.em, r, &brief, self.seq) {
-            Ok(()) => NodeOutcome::Completed { capsule: format!("cap_{}", node.id) },
+        match crate::m4::run_worker_metered(self.em, r, &brief, self.seq, false) {
+            Ok((_, tokens)) => {
+                self.budget.record(tokens);
+                self.warmed.insert(node.role.clone());
+                NodeOutcome::Completed { capsule: format!("cap_{}", node.id) }
+            }
             Err(e) => NodeOutcome::Failed { reason: e.to_string() },
         }
     }
@@ -170,15 +191,18 @@ impl<'a> WorkflowHost for Host<'a> {
             }),
         );
 
-        match result.verdict {
+        let outcome = match result.verdict {
             Verdict::Pass => GateOutcome::Pass,
             Verdict::Fail => GateOutcome::Fail { failures: result.failures.len() },
             Verdict::Inconclusive => GateOutcome::Inconclusive {
                 reason: result
                     .inconclusive_reason
+                    .clone()
                     .unwrap_or_else(|| "verification was inconclusive".into()),
             },
-        }
+        };
+        self.last_verify = Some(result);
+        outcome
     }
 
     fn repair(&mut self, node: &Node, gate: &Gate, round: u32) -> GateOutcome {
@@ -194,16 +218,17 @@ impl<'a> WorkflowHost for Host<'a> {
             None => return GateOutcome::Fail { failures: 1 },
         };
 
-        let driver = match &self.driver {
-            Some(d) => d,
-            None => return GateOutcome::Inconclusive { reason: "no engine bound".into() },
-        };
-        let scope = match Self::scope_of(gate) {
-            Some(s) => s,
-            None => return GateOutcome::Inconclusive { reason: "no scope".into() },
-        };
+        if self.driver.is_none() {
+            return GateOutcome::Inconclusive { reason: "no engine bound".into() };
+        }
+        if Self::scope_of(gate).is_none() {
+            return GateOutcome::Inconclusive { reason: "no scope".into() };
+        }
 
-        let failures = driver.verify(scope, &self.paths);
+        let failures = match self.last_verify.take() {
+            Some(v) => v,
+            None => return GateOutcome::Inconclusive { reason: "no verify result to repair".into() },
+        };
         if failures.verdict == Verdict::Pass {
             return GateOutcome::Pass;
         }
@@ -215,7 +240,15 @@ impl<'a> WorkflowHost for Host<'a> {
             self.paths.project.display(),
             failures.brief_for_worker()
         );
-        let _ = run_worker(self.em, r, &brief, self.seq);
+
+        match crate::m4::run_worker_metered(self.em, r, &brief, self.seq, true) {
+            Ok((_, tokens)) => self.budget.record(tokens),
+            Err(e) => {
+                return GateOutcome::Inconclusive {
+                    reason: format!("the repair worker could not run: {e}"),
+                }
+            }
+        }
 
         self.gate(gate, node)
     }
@@ -280,6 +313,8 @@ pub fn run_planned(
         seq: *seq,
         auto_approve: true,
         plan: plan.clone(),
+        last_verify: None,
+        warmed: BTreeSet::new(),
     };
 
     let report = execute(workflow, &mut host, &BTreeSet::new())

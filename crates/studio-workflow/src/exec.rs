@@ -147,21 +147,22 @@ fn run_gate<H: WorkflowHost>(
         });
     }
 
-    if gate.kind == GateKind::Verify && matches!(result, GateOutcome::Fail { .. }) {
-        if gate.on_fail == OnFail::Repair {
-            for round in 1..=MAX_REPAIR_ROUNDS {
-                report.repair_rounds += 1;
-                result = host.repair(node, gate, round);
-                match &result {
-                    GateOutcome::Pass => break,
-                    GateOutcome::Inconclusive { reason } => {
-                        return Err(RunOutcome::RoutedToInfra {
-                            node: node.id.clone(),
-                            reason: reason.clone(),
-                        })
-                    }
-                    _ => {}
+    if gate.kind == GateKind::Verify
+        && matches!(result, GateOutcome::Fail { .. })
+        && gate.on_fail == OnFail::Repair
+    {
+        for round in 1..=MAX_REPAIR_ROUNDS {
+            report.repair_rounds += 1;
+            result = host.repair(node, gate, round);
+            match &result {
+                GateOutcome::Pass => break,
+                GateOutcome::Inconclusive { reason } => {
+                    return Err(RunOutcome::RoutedToInfra {
+                        node: node.id.clone(),
+                        reason: reason.clone(),
+                    })
                 }
+                _ => {}
             }
         }
     }
