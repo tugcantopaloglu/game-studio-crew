@@ -1,4 +1,4 @@
-X# 00: System Overview
+# 00: System Overview
 
 > **Status:** v0.3, 2026-07-21. M1-M5 built and proven against the real CLI and a real engine; M6, the code index, is under way.
 > Part of the Game Studio Crew system design set. See [README](../../README.md).
