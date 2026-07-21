@@ -13,32 +13,47 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         );",
     )?;
 
-    let current: i64 = conn
-        .query_row(
-            "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
+    let current: i64 = match conn.query_row(
+        "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'",
+        [],
+        |r| r.get(0),
+    ) {
+        Ok(v) => v,
+        Err(rusqlite::Error::QueryReturnedNoRows) => 0,
+        Err(e) => return Err(e),
+    };
 
     if current >= SCHEMA_VERSION {
         return Ok(());
     }
 
     if current < 1 {
-        conn.execute_batch(V1)?;
+        apply_step(conn, 1, V1)?;
     }
     if current < 2 {
-        conn.execute_batch(V2)?;
+        apply_step(conn, 2, V2)?;
     }
 
-    conn.execute(
-        "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        [SCHEMA_VERSION.to_string()],
-    )?;
-
     Ok(())
+}
+
+fn apply_step(conn: &Connection, version: i64, ddl: &str) -> rusqlite::Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let stepped = conn.execute_batch(ddl).and_then(|_| {
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [version.to_string()],
+        )
+        .map(|_| ())
+    });
+    match stepped {
+        Ok(()) => conn.execute_batch("COMMIT"),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
 }
 
 const V1: &str = r#"

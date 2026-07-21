@@ -34,28 +34,28 @@ pub fn parse(src: &str) -> Option<Scene> {
                 "gd_scene" => {
                     seen_header = true;
                     scene.asset_type = "scene".into();
-                    scene.uid = attribute(&attributes, "uid");
+                    scene.uid = attribute(attributes, "uid");
                 }
                 "gd_resource" => {
                     seen_header = true;
-                    scene.asset_type = attribute(&attributes, "type")
+                    scene.asset_type = attribute(attributes, "type")
                         .map(|t| t.to_ascii_lowercase())
                         .unwrap_or_else(|| "resource".into());
-                    scene.uid = attribute(&attributes, "uid");
+                    scene.uid = attribute(attributes, "uid");
                 }
                 "ext_resource" => {
                     if let (Some(id), Some(path)) =
-                        (attribute(&attributes, "id"), attribute(&attributes, "path"))
+                        (attribute(attributes, "id"), attribute(attributes, "path"))
                     {
                         external.push((id, strip_res_prefix(&path)));
                     }
                 }
                 "node" => {
-                    if let Some(name) = attribute(&attributes, "name") {
-                        let parent = attribute(&attributes, "parent");
+                    if let Some(name) = attribute(attributes, "name") {
+                        let parent = attribute(attributes, "parent");
                         pending = Some(SceneNode {
                             node_path: node_path(&name, parent.as_deref()),
-                            node_type: attribute(&attributes, "type"),
+                            node_type: attribute(attributes, "type"),
                             parent_path: parent,
                             script: None,
                         });

@@ -53,14 +53,30 @@ impl Index {
         collect(root, root, &mut found)?;
 
         let symbols_before = self.count("symbols")? as i64;
+        let known = self.file_stats()?;
 
         let mut report = ScanReport::default();
         for relative in &found {
             let absolute = root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let Ok(meta) = std::fs::metadata(&absolute) else {
+                continue;
+            };
+            let mtime = modified_from(&meta);
+            let size = meta.len() as i64;
+
+            if crate::lang::is_binary_path(relative) {
+                if let Some((seen_mtime, seen_size)) = known.get(relative) {
+                    if seen_mtime == &mtime && seen_size == &size {
+                        report.seen += 1;
+                        report.unchanged += 1;
+                        continue;
+                    }
+                }
+            }
+
             let Ok(bytes) = std::fs::read(&absolute) else {
                 continue;
             };
-            let mtime = modified_seconds(&absolute);
 
             report.seen += 1;
             match self.index_file(relative, &bytes, &mtime)? {
@@ -83,10 +99,12 @@ impl Index {
     }
 
     fn paths_outside(&self, present: &[String]) -> Result<Vec<String>> {
+        let present: std::collections::HashSet<&str> =
+            present.iter().map(String::as_str).collect();
         let known = self.query_names("SELECT path FROM files", [])?;
         Ok(known
             .into_iter()
-            .filter(|p| !present.contains(p))
+            .filter(|p| !present.contains(p.as_str()))
             .collect())
     }
 }
@@ -127,9 +145,8 @@ fn relative_slash_path(root: &Path, path: &Path) -> Option<String> {
     Some(relative.to_string_lossy().replace('\\', "/"))
 }
 
-fn modified_seconds(path: &Path) -> String {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
+fn modified_from(meta: &std::fs::Metadata) -> String {
+    meta.modified()
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs().to_string())

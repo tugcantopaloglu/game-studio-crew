@@ -207,10 +207,10 @@ impl Index {
         )?;
 
         if hits.len() < limit {
-            let suffix = format!("%.{name}");
+            let suffix = format!("%.{}", escape_like(name));
             let more = self.query_symbols(
                 "SELECT fqname, path, kind, signature, doc, line_start, line_end
-                 FROM symbols WHERE fqname LIKE ?1 LIMIT ?2",
+                 FROM symbols WHERE fqname LIKE ?1 ESCAPE '\\' LIMIT ?2",
                 params![suffix, limit as i64],
             )?;
             merge(&mut hits, more, limit);
@@ -349,11 +349,35 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    pub(crate) fn file_stats(
+        &self,
+    ) -> Result<std::collections::HashMap<String, (String, i64)>> {
+        let mut stmt = self.conn.prepare("SELECT path, mtime, size FROM files")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get::<_, String>(1)?, row.get::<_, i64>(2)?),
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?)
+    }
+
     fn query_names(&self, sql: &str, args: impl rusqlite::Params) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(args, |row| row.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+}
+
+fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn merge(hits: &mut Vec<SymbolRecord>, more: Vec<SymbolRecord>, limit: usize) {
@@ -407,6 +431,27 @@ mod tests {
             index.index_file("a.gd", PLAYER.as_bytes(), "t1").unwrap(),
             Refresh::Unchanged
         );
+    }
+
+    #[test]
+    fn an_underscore_in_a_name_is_not_a_wildcard() {
+        let mut index = seeded();
+        index
+            .index_file("scripts/other.gd", b"class_name Other\n\nfunc takeXdamage():\n\tpass\n", "t0")
+            .unwrap();
+
+        let hits = index.lookup("take_damage", 8).unwrap();
+        assert!(
+            hits.iter().all(|h| h.fqname.ends_with(".take_damage")),
+            "the underscore must match literally, got {:?}",
+            hits.iter().map(|h| &h.fqname).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_percent_in_a_query_does_not_match_everything() {
+        let index = seeded();
+        assert!(index.lookup("%", 8).unwrap().is_empty());
     }
 
     #[test]

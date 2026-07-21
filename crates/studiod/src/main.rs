@@ -352,8 +352,9 @@ fn index_project() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
 
-    fs::create_dir_all(studio_dir())?;
-    let mut index = studio_index::Index::open(&studio_dir().join("studio-index.db"))?;
+    let dir = root.join(".studio");
+    fs::create_dir_all(&dir)?;
+    let mut index = studio_index::Index::open(&dir.join("studio-index.db"))?;
 
     let started = std::time::Instant::now();
     let report = index.scan(&root)?;
