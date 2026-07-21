@@ -34,9 +34,15 @@
   .ev.bad .t { color: var(--error); }
   #help { padding: 8px 13px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11px; }
   #compose { padding: 10px 13px; border-top: 1px solid var(--line); display: grid; gap: 6px; }
-  #compose select, #compose textarea, #compose button {
+  #compose select, #compose textarea, #compose button, #compose input[type=text] {
     font: inherit; background: #0e1119; color: var(--text);
     border: 1px solid var(--line); border-radius: 4px; padding: 5px 7px; }
+  #project-form { display: grid; gap: 6px; padding: 8px; border: 1px dashed var(--line);
+    border-radius: 4px; background: #0a0d13; }
+  #project-form input[type=text] { width: 100%; }
+  #np-git-wrap { display: flex; align-items: center; gap: 5px; color: var(--dim);
+    font-size: 11px; padding: 0 4px; }
+  #project.none { border-color: var(--error); }
   #compose textarea { resize: vertical; min-height: 46px; }
   #compose button { cursor: pointer; background: #1d2431; }
   #compose button:hover { background: #26303f; }
@@ -58,7 +64,7 @@
     padding: 8px 10px; font-size: 12px; z-index: 5; }
   #tip b { display: block; margin-bottom: 3px; }
   #tip .s { color: var(--dim); }
-  #track { position: absolute; left: 12px; bottom: 12px; right: 12px; display: none;
+  #track { position: absolute; left: 12px; bottom: 12px; right: 180px; display: none;
     background: #0a0d13ee; border: 1px solid var(--line); border-radius: 6px; padding: 9px 12px; z-index: 4; }
   #track .name { color: var(--dim); font-size: 11px; margin-bottom: 6px; }
   #track .lane { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
@@ -103,6 +109,23 @@
   <div id="feed"></div>
   <div id="compose">
     <div class="row">
+      <select id="project" title="the repo the crew works in"></select>
+      <button id="new-project" title="create a project">new</button>
+    </div>
+    <div id="project-form" hidden>
+      <input id="np-name" type="text" placeholder="name">
+      <input id="np-root" type="text" placeholder="absolute path, e.g. D:\games\neon-drift">
+      <div class="row">
+        <select id="np-engine">
+          <option value="godot">godot</option>
+          <option value="unity">unity</option>
+          <option value="ue5">ue5</option>
+        </select>
+        <label id="np-git-wrap"><input id="np-git" type="checkbox" checked> git</label>
+      </div>
+      <button id="np-create">create</button>
+    </div>
+    <div class="row">
       <select id="who"></select>
       <button id="mode-btn" title="switch between task and meeting">task</button>
     </div>
@@ -141,18 +164,27 @@ const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 400);
 const orbit = { theta: Math.PI * 0.25, phi: Math.PI * 0.30, dist: 44, target: new THREE.Vector3(0, 0.5, 0) };
 let freeCam = false;
 
-scene.add(new THREE.AmbientLight(0x8fa0bc, 0.85));
-scene.add(new THREE.HemisphereLight(0xb8ccf0, 0x14181f, 0.7));
-const key = new THREE.DirectionalLight(0xfff2dc, 1.6);
+scene.add(new THREE.AmbientLight(0x8fa0bc, 0.25));
+scene.add(new THREE.HemisphereLight(0xb8ccf0, 0x14181f, 0.9));
+const key = new THREE.DirectionalLight(0xfff2dc, 2.0);
 key.position.set(18, 30, 14);
 key.castShadow = true;
-key.shadow.mapSize.set(2048, 2048);
+key.shadow.mapSize.set(4096, 4096);
 key.shadow.camera.near = 1; key.shadow.camera.far = 110;
 const S = 30;
 key.shadow.camera.left = -S; key.shadow.camera.right = S;
 key.shadow.camera.top = S; key.shadow.camera.bottom = -S;
-key.shadow.bias = -0.0009;
+key.shadow.bias = -0.0004;
+key.shadow.normalBias = 0.03;
 scene.add(key);
+
+function fitShadowToFloor(f) {
+  const pad = 3;
+  const half = Math.max(f.width, f.height) / 2 + pad;
+  key.shadow.camera.left = -half; key.shadow.camera.right = half;
+  key.shadow.camera.top = half; key.shadow.camera.bottom = -half;
+  key.shadow.camera.updateProjectionMatrix();
+}
 const fill = new THREE.DirectionalLight(0x4a6494, 0.45);
 fill.position.set(-16, 12, -18);
 scene.add(fill);
@@ -365,7 +397,8 @@ function animate() {
   const t = clock.getElapsedTime();
   for (const [role, a] of avatars) {
     const st = deskState(role);
-    const busy = st.ring === "running" || st.ring === "meeting";
+    const stuck = st.ring === "error" || st.ring === "blocked";
+    const busy = st.ring === "running" || st.ring === "meeting" || stuck;
     const walking = wanderStep(a, busy, dt, t);
 
     if (walking) {
@@ -375,6 +408,10 @@ function animate() {
       while (d > Math.PI) d -= Math.PI * 2;
       while (d < -Math.PI) d += Math.PI * 2;
       a.body.rotation.y += d * 0.16;
+    } else if (stuck) {
+      a.body.position.y = 0;
+      a.body.rotation.z = 0;
+      a.body.rotation.y += (0 - a.body.rotation.y) * 0.08;
     } else {
       a.body.position.y = busy
         ? Math.sin(t * 6 + a.seed) * 0.02
@@ -383,7 +420,16 @@ function animate() {
       const rest = busy ? Math.sin(t * 3 + a.seed) * 0.06 : 0;
       a.body.rotation.y += (rest - a.body.rotation.y) * 0.08;
     }
-    a.ringMat.opacity = st.ring === "idle" ? 0.28 : 0.7 + Math.sin(t * 4 + a.seed) * 0.3;
+
+    if (stuck) {
+      a.ringMat.opacity = 0.55 + Math.sin(t * 7 + a.seed) * 0.45;
+    } else {
+      a.ringMat.opacity = st.ring === "idle" ? 0.28 : 0.7 + Math.sin(t * 4 + a.seed) * 0.3;
+    }
+    if (a.alarm) {
+      a.alarm.visible = stuck;
+      if (stuck) a.alarm.intensity = 2.6 + Math.sin(t * 7 + a.seed) * 2.0;
+    }
   }
 
   for (const a of ambient) {
@@ -527,8 +573,10 @@ function apply(ev, replaying) {
   if (stats.history.length > 26) stats.history.shift();
   stats.feed.push({ seq: ev.seq, type: ev.type, bad: BAD.has(ev.type) });
   if (stats.feed.length > 12) stats.feed.shift();
-  renderStats();
-  renderTrack();
+  if (!replaying) {
+    renderStats();
+    renderTrack();
+  }
   screensDirty = true;
 }
 
@@ -649,6 +697,64 @@ fetch("/roles").then((r) => r.json()).then((rows) => {
     .join("");
 });
 
+const projectSel = document.getElementById("project");
+const projectForm = document.getElementById("project-form");
+
+function renderProjects(rows) {
+  if (!rows.length) {
+    projectSel.innerHTML = `<option value="">no project yet - create one</option>`;
+    projectSel.classList.add("none");
+    return;
+  }
+  projectSel.classList.remove("none");
+  const remembered = localStorage.getItem("studio.project");
+  projectSel.innerHTML = rows
+    .map((p) => `<option value="${esc(p.id)}" title="${esc(p.root)}">${esc(p.name)}${p.git ? " *" : ""}</option>`)
+    .join("");
+  if (remembered && rows.some((p) => p.id === remembered)) projectSel.value = remembered;
+}
+
+function loadProjects() {
+  return fetch("/projects").then((r) => r.json()).then(renderProjects).catch(() => {});
+}
+loadProjects();
+
+projectSel.onchange = () => localStorage.setItem("studio.project", projectSel.value);
+
+document.getElementById("new-project").onclick = () => {
+  projectForm.hidden = !projectForm.hidden;
+};
+
+document.getElementById("np-create").onclick = async () => {
+  const body = {
+    name: document.getElementById("np-name").value.trim(),
+    root: document.getElementById("np-root").value.trim(),
+    engine: document.getElementById("np-engine").value,
+    git: document.getElementById("np-git").checked,
+  };
+  if (!body.name || !body.root) { sent.textContent = "a project needs a name and a path"; return; }
+
+  sent.textContent = "creating";
+  try {
+    const res = await fetch("/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) { sent.textContent = await res.text(); return; }
+    const made = await res.json();
+    localStorage.setItem("studio.project", made.id);
+    await loadProjects();
+    projectSel.value = made.id;
+    projectForm.hidden = true;
+    document.getElementById("np-name").value = "";
+    document.getElementById("np-root").value = "";
+    sent.textContent = made.git ? `${made.name} ready, git initialised` : `${made.name} ready`;
+  } catch (err) {
+    sent.textContent = "the daemon is not reachable";
+  }
+};
+
 document.getElementById("send").onclick = async () => {
   const brief = briefBox.value.trim();
   if (!brief) { sent.textContent = "write a brief first"; return; }
@@ -659,10 +765,16 @@ document.getElementById("send").onclick = async () => {
     return;
   }
 
+  const project = projectSel.value || null;
+  if (composeMode !== "meeting" && !project) {
+    sent.textContent = "pick or create a project first";
+    return;
+  }
+
   const url = composeMode === "build" ? "/build"
     : composeMode === "task" ? "/task" : "/meeting";
-  const body = composeMode === "build" ? { prompt: brief }
-    : composeMode === "task" ? { role: picked[0], brief }
+  const body = composeMode === "build" ? { prompt: brief, project }
+    : composeMode === "task" ? { role: picked[0], brief, project }
     : { kind: "arbitration", participants: picked, topic: brief };
 
   sent.textContent = "sending";
@@ -697,6 +809,7 @@ document.getElementById("tolive").onclick = () => {
 
 fetch("/floor").then((r) => r.json()).then((f) => {
   miniFloor = f;
+  fitShadowToFloor(f);
   const built = buildOffice(f, scene);
   avatars = built.avatars;
   ambient = built.ambient || [];

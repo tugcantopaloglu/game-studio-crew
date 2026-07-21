@@ -3,9 +3,11 @@ import {
   buildCharacter, buildDesk, buildChair, buildPlant, buildCabinet,
   buildWhiteboard, buildServerRack, buildEasel, buildSofa, buildTestBench,
   buildMeetingTable, buildCoffeeBar, buildWaterCooler, buildShelf, buildBoxes,
+  characterBounds,
 } from "/voxel.js";
 
 export const VOX = 0.085;
+const PICK_MATERIAL = new THREE.MeshBasicMaterial({ visible: false });
 export const WALL_H = 2.6;
 export const WALL_T = 0.16;
 const DOOR_W = 2.6;
@@ -195,13 +197,6 @@ function wallScreens(parent, room, cx, cz, tint, doorSide, glassSide) {
     screens.push({ ctx, tex, style, tint, department: room.department });
   }
 
-  const bounce = new THREE.PointLight(tint, 7, 9, 2);
-  bounce.position.set(
-    m.along === "x" ? (m.a0 + m.a1) / 2 : m.fixed + (m.key === "-x" ? 1 : -1),
-    1.6,
-    m.along === "x" ? m.fixed + (m.key === "-z" ? 1 : -1) : (m.a0 + m.a1) / 2
-  );
-  parent.add(bounce);
 }
 
 export function refreshScreens(data) {
@@ -592,8 +587,22 @@ export function buildOffice(floor, scene) {
     const body = place(buildCharacter(d.role), 0, 0, 0);
     person.add(body.group);
 
+    const cb = characterBounds();
+    const proxy = new THREE.Mesh(
+      new THREE.BoxGeometry(cb.w * VOX, cb.h * VOX, cb.d * VOX),
+      PICK_MATERIAL
+    );
+    proxy.position.y = (cb.h * VOX) / 2;
+    proxy.visible = false;
+    person.add(proxy);
+
+    const alarm = new THREE.PointLight(0xff3b30, 0, 3.2, 2);
+    alarm.position.y = 1.15;
+    alarm.visible = false;
+    person.add(alarm);
+
     avatars.set(d.role, {
-      person, body: body.group, hit: body.mesh, ringMat,
+      person, body: body.group, hit: proxy, ringMat, alarm,
       tier: d.tier, title: d.title, dept: d.department,
       home,
       bounds: {
