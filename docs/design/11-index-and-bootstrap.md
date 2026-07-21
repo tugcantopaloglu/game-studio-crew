@@ -1,6 +1,6 @@
 # 11: Index and Bootstrap
 
-> **Status:** v0.1, 2026-07-20, design phase, no runtime code.
+> **Status:** v0.2, 2026-07-21. The **code index is built and wired**: `files`, `symbols`, `symbols_fts` and `refs` are populated by `studio-index` from GDScript and C# sources, `studiod index` builds them, and the `symbol_lookup` MCP tool serves slices out of them. **Asset extraction is not built**: `assets` and `scene_nodes` remain design-only, as does the `notify` watcher, the `index_updated` event, the C++ extractor and the UE registry dump. Those sections below are specification, not description.
 > **This document is the single source of truth for the index SQLite schema.** It is a **distinct database** from the runtime **state store** ([03](03-state-store.md)), different file (`studio-index.db`), different lifecycle, never conflated. The context engine ([02](02-context-engine.md)) reads the index to build symbol slices; the standards layer ([10](10-standards-and-trust.md)) reads diffs and refs from it.
 
 ## What bootstrap does
@@ -44,21 +44,22 @@ CREATE TABLE files (
 );
 
 CREATE TABLE symbols (
-  fqname     TEXT PRIMARY KEY,   -- fully-qualified name
-  path       TEXT NOT NULL REFERENCES files(path),
+  fqname     TEXT NOT NULL,      -- fully-qualified name
+  path       TEXT NOT NULL,
   kind       TEXT NOT NULL,      -- class | method | field | func | signal | ...
   signature  TEXT,
   doc        TEXT,               -- leading doc comment
-  line_start INTEGER,
-  line_end   INTEGER
+  line_start INTEGER NOT NULL,
+  line_end   INTEGER NOT NULL,
+  PRIMARY KEY (fqname, path)
 );
-CREATE VIRTUAL TABLE symbols_fts USING fts5(fqname, signature, doc, content='symbols', content_rowid='rowid');
+CREATE VIRTUAL TABLE symbols_fts USING fts5(fqname, signature, doc, path UNINDEXED);
 
 CREATE TABLE refs (               -- symbol references; SYNTACTIC ONLY (13)
-  from_symbol TEXT NOT NULL REFERENCES symbols(fqname),
+  from_symbol TEXT NOT NULL,
   to_name     TEXT NOT NULL,      -- referenced name (may be unresolved)
   path        TEXT NOT NULL,
-  line        INTEGER
+  line        INTEGER NOT NULL
 );
 CREATE INDEX refs_to ON refs(to_name);
 
@@ -80,9 +81,17 @@ CREATE TABLE scene_nodes (        -- scene/prefab/map graph, extracted per engin
 
 The symbol slice the context engine pulls ([02](02-context-engine.md)) is `symbols` + a one-hop `refs` neighborhood; the diff/blast-radius the trust model uses ([10](10-standards-and-trust.md)) is computed from `files.blake3` deltas plus `refs`.
 
+Three details of the schema above changed when it met the implementation, and the reasons generalise:
+
+- **`symbols` is keyed on `(fqname, path)`, not `fqname` alone.** A bare `fqname` primary key silently drops one of two same-named symbols in different files, which is common the moment a project has `a/util.gd` and `b/util.gd`. Over-keying loses nothing; under-keying loses symbols with no error.
+- **`refs.from_symbol` carries no foreign key.** Refs are syntactic ([13](13-risks.md) R8), so `to_name` is routinely unresolved by design; making the *source* side a strict FK while the target side is deliberately loose bought consistency the data model does not actually have.
+- **`symbols_fts` is a standalone FTS5 table, not an external-content one.** External content requires issuing matched `delete` commands with the pre-edit values on every reindex; a standalone table is cleared by `DELETE ... WHERE path = ?` along with the file's other rows. The cost is a duplicated copy of `fqname`/`signature`/`doc`; the gain is that stale search hits cannot outlive a reindex. A test pins exactly that.
+
+**Lookup resolves names before it searches text.** `symbol_lookup` tries the exact `fqname`, then a `.name` suffix match, and only falls back to full-text search when both miss *and* the query carries no dot. A dotted query is a name, not a search: answering `Player.take_damage` with `Player.heal` because they share a prefix is worse than answering nothing.
+
 ## Tree-sitter extractors per language
 
-Symbols and refs come from **tree-sitter** parsers, one grammar per language: C# (Unity), C++ (UE5 gameplay), GDScript (Godot), plus config/markup as needed. Extractors walk the parse tree to populate `symbols` and `refs`. **Refs are syntactic, not semantic**: tree-sitter sees names, not resolved types, so `refs.to_name` may be unresolved or ambiguous ([13](13-risks.md)); consumers treat refs as a strong hint, not a call graph, and the trust model's cross-file tiering ([10](10-standards-and-trust.md)) accounts for false edges.
+Symbols and refs come from **tree-sitter** parsers, one grammar per language: C# (Unity), C++ (UE5 gameplay), GDScript (Godot), plus config/markup as needed. **GDScript and C# are built; C++ is not** — a `.cpp` or `.h` file is tracked in `files` so its hash and blast radius are known, but it yields no symbols yet. Node type names for both built grammars were read off real parse trees before the extractors were written, not guessed from grammar documentation. Extractors walk the parse tree to populate `symbols` and `refs`. **Refs are syntactic, not semantic**: tree-sitter sees names, not resolved types, so `refs.to_name` may be unresolved or ambiguous ([13](13-risks.md)); consumers treat refs as a strong hint, not a call graph, and the trust model's cross-file tiering ([10](10-standards-and-trust.md)) accounts for false edges.
 
 ## Asset extraction per engine
 
@@ -93,6 +102,8 @@ Beyond code, the index maps engine assets into `assets`/`scene_nodes`:
 - **UE5:** `.umap`/`.uasset` are **binary** ([10](10-standards-and-trust.md), [13](13-risks.md)). Extraction relies on **asset-registry dumps** produced by the editor (a commandlet), not by parsing the binary directly. These dumps are expensive, so they are **debounced** (below) and their coverage is coarser than text scenes.
 
 ## Incremental freshness
+
+**Built today:** refresh is a **scan** (`studiod index [root]`) that walks the project, skipping VCS, editor and build directories — and `.studio/` itself, which the first real run caught the index feeding its own database into. Every file is hashed, and the hash gate below already applies: a second scan with no edits reparses nothing. Files that vanished between scans are dropped from the index. **Not built:** the watcher that makes this incremental without a scan.
 
 The index is kept live with the **`notify`** filesystem watcher, gated on content hashes:
 

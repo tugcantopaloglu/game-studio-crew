@@ -16,6 +16,7 @@ studio-store.workspace = true
 studio-core.workspace = true
 studio-mcp.workspace = true
 studio-engine.workspace = true
+studio-index.workspace = true
 studio-verify.workspace = true
 studio-workflow.workspace = true
 studio-budget.workspace = true

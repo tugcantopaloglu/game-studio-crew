@@ -335,8 +335,39 @@ fn mcp_server() -> Result<()> {
         flag("--task"),
         flag("--escalates-to"),
     );
+
+    let index_db = studio_dir().join("studio-index.db");
+    if index_db.exists() {
+        tools = tools.with_index(studio_index::Index::open(&index_db)?);
+    }
+
     let stdin = std::io::stdin();
     studio_mcp::serve(&mut tools, stdin.lock(), std::io::stdout())?;
+    Ok(())
+}
+
+fn index_project() -> Result<()> {
+    let root = std::env::args()
+        .nth(2)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    fs::create_dir_all(studio_dir())?;
+    let mut index = studio_index::Index::open(&studio_dir().join("studio-index.db"))?;
+
+    let started = std::time::Instant::now();
+    let report = index.scan(&root)?;
+    let elapsed = started.elapsed();
+
+    println!("indexed {}", root.display());
+    println!("  files seen      {}", report.seen);
+    println!("  reparsed        {}", report.indexed);
+    println!("  hash-unchanged  {}", report.unchanged);
+    println!("  dropped         {}", report.removed);
+    println!("  symbols         {}", index.count("symbols")?);
+    println!("  refs            {}", index.count("refs")?);
+    println!("  elapsed         {:.2}s", elapsed.as_secs_f64());
+
     Ok(())
 }
 
@@ -516,8 +547,9 @@ fn main() -> Result<()> {
         "floor" => floor_only(),
         "studio" => studio_mode(),
         "mcp-server" => mcp_server(),
+        "index" => index_project(),
         _ => {
-            println!("usage: studiod <m1|m2|mcp-server>");
+            println!("usage: studiod <m1|m2|index|mcp-server>");
             println!();
             println!("  m1   run the M1 acceptance proof: spawn two same-prefix workers,");
             println!("       record the ledger, and verify usage capture, cache reuse and reaping.");

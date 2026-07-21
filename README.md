@@ -2,7 +2,7 @@
 
 A ground-up rebuild of `claude-code-game-studios` as a **Rust daemon** that drives `claude` CLI subprocesses as stateless workers, owns all context and budget itself, and streams a realtime event feed to a browser-based visual studio floor.
 
-> **Status:** M1 through M5 built and running against the real CLI and a real engine. `studiod studio` serves an interactive 3D studio floor: you assign tasks, convene meetings and start workflows from the browser, and watch real `claude` workers do them. **Godot is the only probed engine**; the Unity and UE5 profiles are written but have never been executed ([07](docs/design/07-engine-layer.md)).
+> **Status:** M1 through M5 built and running against the real CLI and a real engine; M6, the code index, is under way. `studiod studio` serves an interactive 3D studio floor: you assign tasks, convene meetings and start workflows from the browser, and watch real `claude` workers do them. **Godot is the only probed engine**; the Unity and UE5 profiles are written but have never been executed ([07](docs/design/07-engine-layer.md)).
 
 ## The problem
 
@@ -33,6 +33,7 @@ The original crew packs **49 agents, 73 slash commands, 12 hooks and 11 rule fil
 - Charters are byte-frozen and content-hashed so **prompt caching** (1-hour TTL, keyed on exact system-prompt bytes plus tool set) pays for them once and every same-role worker within the window reads from cache.
 - **13 roles, not 49**: fewer distinct prefixes means fewer cold starts, and a cold start costs a **2.0×** write premium.
 - A three-rung summarization ladder distilled by the daemon at **zero token cost** keeps briefs small.
+- **Symbols, not files.** A tree-sitter index answers `symbol_lookup` with a signature, doc comment and one-hop neighbourhood, so a worker learns that `Enemy.attack` calls `Player.take_damage` without either file entering its context ([11](docs/design/11-index-and-bootstrap.md)).
 
 Measured effect: a warm invocation's prefix costs **$0.0051 against $0.0888 cold and $0.2258 undefended, a 17.4× warm-to-cold reduction**, across separate subprocesses. These are M1 probe measurements, not estimates. See [`02-context-engine.md`](docs/design/02-context-engine.md) and [`probes/`](probes/README.md).
 

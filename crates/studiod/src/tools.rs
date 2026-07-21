@@ -1,9 +1,13 @@
 use studio_context::{render, Capsule, CapsuleKind};
+use studio_index::Index;
 use studio_mcp::{DecisionHit, StudioTools, SymbolHit, ToolError};
 use studio_store::{CapsuleRow, DecisionRow, Store};
 
+const SYMBOL_LOOKUP_LIMIT: usize = 8;
+
 pub struct StoreTools {
     store: Store,
+    index: Option<Index>,
     now: fn() -> String,
     id: fn(&str) -> String,
     role: String,
@@ -20,7 +24,12 @@ impl StoreTools {
         task: String,
         escalates_to: String,
     ) -> Self {
-        Self { store, now, id, role, task, escalates_to }
+        Self { store, index: None, now, id, role, task, escalates_to }
+    }
+
+    pub fn with_index(mut self, index: Index) -> Self {
+        self.index = Some(index);
+        self
     }
 }
 
@@ -86,8 +95,43 @@ impl StudioTools for StoreTools {
             .collect())
     }
 
-    fn symbol_lookup(&mut self, _name: &str) -> Result<Vec<SymbolHit>, ToolError> {
-        Ok(Vec::new())
+    fn symbol_lookup(&mut self, name: &str) -> Result<Vec<SymbolHit>, ToolError> {
+        let Some(index) = &self.index else {
+            return Err(ToolError::Rejected(
+                "this worker was started without a code index, so symbol lookup is unavailable. \
+                 Run `studiod index` in the project first."
+                    .into(),
+            ));
+        };
+
+        let records = index
+            .lookup(name, SYMBOL_LOOKUP_LIMIT)
+            .map_err(|e| ToolError::Rejected(format!("symbol lookup failed: {e}")))?;
+
+        let mut hits = Vec::with_capacity(records.len());
+        for record in records {
+            let slice = index
+                .slice(&record.fqname, &record.path)
+                .map_err(|e| ToolError::Rejected(format!("symbol slice failed: {e}")))?;
+
+            let (calls, called_by) = match slice {
+                Some(s) => (s.calls, s.called_by),
+                None => (Vec::new(), Vec::new()),
+            };
+
+            hits.push(SymbolHit {
+                fqname: record.fqname,
+                path: record.path,
+                signature: record.signature,
+                line_start: Some(record.line_start),
+                line_end: Some(record.line_end),
+                doc: record.doc,
+                calls,
+                called_by,
+            });
+        }
+
+        Ok(hits)
     }
 
     fn escalate(&mut self, _reason: &str, _capsule: Option<Capsule>) -> Result<String, ToolError> {

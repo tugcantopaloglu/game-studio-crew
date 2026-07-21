@@ -23,6 +23,41 @@ pub fn qualified(tool: &str) -> String {
     format!("mcp__{SERVER_NAME}__{tool}")
 }
 
+const NEIGHBOURS_SHOWN: usize = 8;
+
+fn render_hit(hit: &SymbolHit) -> String {
+    let signature = hit.signature.clone().unwrap_or_default();
+    let mut line = match (hit.line_start, hit.line_end) {
+        (Some(a), Some(b)) => format!("{} {}:{}-{} {}", hit.fqname, hit.path, a, b, signature),
+        _ => format!("{} {} {}", hit.fqname, hit.path, signature),
+    };
+
+    if let Some(doc) = hit.doc.as_deref().filter(|d| !d.is_empty()) {
+        line.push_str(&format!("\n  doc: {doc}"));
+    }
+    if !hit.calls.is_empty() {
+        line.push_str(&format!("\n  calls: {}", neighbours(&hit.calls)));
+    }
+    if !hit.called_by.is_empty() {
+        line.push_str(&format!("\n  called by: {}", neighbours(&hit.called_by)));
+    }
+
+    line
+}
+
+fn neighbours(names: &[String]) -> String {
+    let shown = names
+        .iter()
+        .take(NEIGHBOURS_SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    match names.len().checked_sub(NEIGHBOURS_SHOWN) {
+        Some(rest) if rest > 0 => format!("{shown} (+{rest} more)"),
+        _ => shown,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SymbolHit {
     pub fqname: String,
@@ -30,6 +65,9 @@ pub struct SymbolHit {
     pub signature: Option<String>,
     pub line_start: Option<u32>,
     pub line_end: Option<u32>,
+    pub doc: Option<String>,
+    pub calls: Vec<String>,
+    pub called_by: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -96,7 +134,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_SYMBOL_LOOKUP,
-            "description": "Pull a symbol's signature and location from the index. Use this instead of reading whole files.",
+            "description": "Pull a symbol's signature, location and one-hop neighbours from the index. Use this instead of reading whole files. Neighbours are matched syntactically by name, so treat them as a strong hint rather than a resolved call graph.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"name": {"type": "string"}},
@@ -233,15 +271,7 @@ pub fn handle_request<T: StudioTools>(tools: &mut T, line: &str) -> Option<Value
                         Ok(hits) => {
                             let text = hits
                                 .iter()
-                                .map(|h| {
-                                    let sig = h.signature.clone().unwrap_or_default();
-                                    match (h.line_start, h.line_end) {
-                                        (Some(a), Some(b)) => {
-                                            format!("{} {}:{}-{} {}", h.fqname, h.path, a, b, sig)
-                                        }
-                                        _ => format!("{} {} {}", h.fqname, h.path, sig),
-                                    }
-                                })
+                                .map(render_hit)
                                 .collect::<Vec<_>>()
                                 .join("\n");
                             Some(ok_result(id, text))
@@ -518,11 +548,53 @@ mod tests {
             signature: Some("void Dash(Vector2 dir)".into()),
             line_start: Some(40),
             line_end: Some(58),
+            doc: Some("dashes in a direction".into()),
+            calls: vec!["Normalize".into(), "Move".into()],
+            called_by: vec!["InputRouter.OnDash".into()],
         }];
         let r = call(&mut s, TOOL_SYMBOL_LOOKUP, json!({"name": "Player.Dash"}));
         let t = text_of(&r);
         assert!(t.contains("void Dash(Vector2 dir)"));
         assert!(t.contains("40-58"));
+        assert!(!t.contains("class Player"));
+    }
+
+    #[test]
+    fn a_hit_carries_its_one_hop_neighbourhood_and_doc() {
+        let mut s = Spy::default();
+        s.symbols = vec![SymbolHit {
+            fqname: "Player.Dash".into(),
+            path: "src/Player.cs".into(),
+            signature: Some("void Dash(Vector2 dir)".into()),
+            line_start: Some(40),
+            line_end: Some(58),
+            doc: Some("dashes in a direction".into()),
+            calls: vec!["Normalize".into(), "Move".into()],
+            called_by: vec!["InputRouter.OnDash".into()],
+        }];
+        let t = text_of(&call(&mut s, TOOL_SYMBOL_LOOKUP, json!({"name": "Player.Dash"})));
+        assert!(t.contains("dashes in a direction"));
+        assert!(t.contains("calls: Normalize, Move"));
+        assert!(t.contains("called by: InputRouter.OnDash"));
+    }
+
+    #[test]
+    fn a_long_neighbour_list_is_capped_with_a_visible_remainder() {
+        let names: Vec<String> = (0..12).map(|i| format!("f{i}")).collect();
+        let mut s = Spy::default();
+        s.symbols = vec![SymbolHit {
+            fqname: "A.b".into(),
+            path: "a.gd".into(),
+            signature: None,
+            line_start: None,
+            line_end: None,
+            doc: None,
+            calls: names,
+            called_by: Vec::new(),
+        }];
+        let t = text_of(&call(&mut s, TOOL_SYMBOL_LOOKUP, json!({"name": "A.b"})));
+        assert!(t.contains("(+4 more)"));
+        assert!(!t.contains("f8"));
     }
 
     #[test]
