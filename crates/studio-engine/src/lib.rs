@@ -251,6 +251,14 @@ impl Substitutions {
     }
 }
 
+pub fn render_command(template: &str, subs: &Substitutions) -> Result<Vec<String>> {
+    let mut args = Vec::new();
+    for token in split_command(template) {
+        args.push(subs.apply(&token)?);
+    }
+    Ok(args)
+}
+
 pub fn split_command(rendered: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
@@ -349,7 +357,7 @@ mod tests {
     #[test]
     fn capability_overlays_never_appear_in_the_frozen_prose() {
         for p in EngineProfile::builtin() {
-            for (_, text) in &p.prose.capabilities {
+            for text in p.prose.capabilities.values() {
                 assert!(
                     !p.prose.profile.contains(text.as_str()),
                     "{} folds a capability overlay into the frozen prefix",

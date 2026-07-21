@@ -1,9 +1,80 @@
 use crate::parsers::{parse_report, scan_log};
 use crate::{FailureKind, VerifyResult, Verdict};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Instant;
-use studio_engine::{resolve_binary, split_command, EngineProfile, Substitutions, VerifyScope};
+use std::time::{Duration, Instant};
+use studio_engine::{render_command, resolve_binary, EngineProfile, Substitutions, VerifyScope};
+
+pub const DEFAULT_VERIFY_TIMEOUT: Duration = Duration::from_secs(900);
+
+struct RunOutput {
+    log: String,
+    exit_code: Option<i32>,
+    timed_out: bool,
+}
+
+fn is_crash_code(code: i32) -> bool {
+    code as u32 >= 0xC000_0000 || code == 139 || code == 134 || code == 137
+}
+
+fn run_command(args: &[String], cwd: &Path, timeout: Duration) -> std::io::Result<RunOutput> {
+    let mut child = Command::new(&args[0])
+        .args(&args[1..])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+
+    let out_handle = std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(r) = stdout.as_mut() {
+            let mut raw = Vec::new();
+            let _ = r.read_to_end(&mut raw);
+            s = String::from_utf8_lossy(&raw).into_owned();
+        }
+        s
+    });
+    let err_handle = std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(r) = stderr.as_mut() {
+            let mut raw = Vec::new();
+            let _ = r.read_to_end(&mut raw);
+            s = String::from_utf8_lossy(&raw).into_owned();
+        }
+        s
+    });
+
+    let started = Instant::now();
+    let mut timed_out = false;
+    let mut status = None;
+    loop {
+        match child.try_wait()? {
+            Some(s) => {
+                status = Some(s);
+                break;
+            }
+            None => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    timed_out = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+
+    let mut log = out_handle.join().unwrap_or_default();
+    log.push_str(&err_handle.join().unwrap_or_default());
+
+    Ok(RunOutput { log, exit_code: status.and_then(|s| s.code()), timed_out })
+}
 
 #[derive(Debug, Clone)]
 pub struct ProjectPaths {
@@ -25,12 +96,18 @@ pub struct ProfileDriver {
     pub profile: EngineProfile,
     pub engine_binary: PathBuf,
     pub extra: Vec<(String, String)>,
+    pub timeout: Duration,
 }
 
 impl ProfileDriver {
     pub fn resolve(profile: EngineProfile) -> Result<Self, studio_engine::EngineError> {
         let engine_binary = resolve_binary(&profile)?;
-        Ok(Self { profile, engine_binary, extra: Vec::new() })
+        Ok(Self {
+            profile,
+            engine_binary,
+            extra: Vec::new(),
+            timeout: DEFAULT_VERIFY_TIMEOUT,
+        })
     }
 
     fn substitutions(&self, paths: &ProjectPaths) -> Substitutions {
@@ -79,39 +156,74 @@ impl EngineDriver for ProfileDriver {
             Err(e) => return self.inconclusive(scope, e.to_string(), started),
         };
 
-        let rendered = match self.substitutions(paths).apply(template) {
-            Ok(r) => r,
+        let args = match render_command(template, &self.substitutions(paths)) {
+            Ok(a) => a,
             Err(e) => return self.inconclusive(scope, e.to_string(), started),
         };
-
-        let args = split_command(&rendered);
         if args.is_empty() {
             return self.inconclusive(scope, "empty command line".into(), started);
         }
 
-        let output = Command::new(&args[0])
-            .args(&args[1..])
-            .current_dir(&paths.project)
-            .stdin(Stdio::null())
-            .output();
+        let report_spec = self.profile.report(scope);
+        let report_path = match report_spec {
+            Some(spec) => match self.substitutions(paths).apply(&spec.path) {
+                Ok(p) => Some(PathBuf::from(p)),
+                Err(e) => return self.inconclusive(scope, e.to_string(), started),
+            },
+            None => None,
+        };
 
-        let output = match output {
-            Ok(o) => o,
+        if let Some(path) = report_path.as_ref() {
+            if path.exists() {
+                if let Err(e) = std::fs::remove_file(path) {
+                    return self.inconclusive(
+                        scope,
+                        format!(
+                            "could not clear the previous report at {}: {e}",
+                            path.display()
+                        ),
+                        started,
+                    );
+                }
+            }
+        }
+
+        let run = match run_command(&args, &paths.project, self.timeout) {
+            Ok(r) => r,
             Err(e) => {
                 return self.inconclusive(scope, format!("could not run the engine: {e}"), started)
             }
         };
 
-        let mut log = String::from_utf8_lossy(&output.stdout).into_owned();
-        log.push_str(&String::from_utf8_lossy(&output.stderr));
-        let exit_code = output.status.code();
+        if run.timed_out {
+            return self.inconclusive(
+                scope,
+                format!(
+                    "the engine did not exit within {}s and was killed",
+                    self.timeout.as_secs()
+                ),
+                started,
+            );
+        }
 
-        let report_spec = self.profile.report(scope);
+        let log = run.log;
+        let exit_code = run.exit_code;
+
+        if let Some(code) = exit_code {
+            if is_crash_code(code) {
+                return self.inconclusive(
+                    scope,
+                    format!("the engine crashed with exit code {code}"),
+                    started,
+                );
+            }
+        }
+
         let parsed = match report_spec {
             Some(spec) => {
-                let path = match self.substitutions(paths).apply(&spec.path) {
-                    Ok(p) => PathBuf::from(p),
-                    Err(e) => return self.inconclusive(scope, e.to_string(), started),
+                let path = match report_path.as_ref() {
+                    Some(p) => p,
+                    None => return self.inconclusive(scope, "no report path".into(), started),
                 };
 
                 if !path.exists() {
@@ -129,7 +241,7 @@ impl EngineDriver for ProfileDriver {
                     );
                 }
 
-                match std::fs::read_to_string(&path) {
+                match std::fs::read_to_string(path) {
                     Ok(body) => parse_report(&spec.format, &body),
                     Err(e) => {
                         return self.inconclusive(scope, format!("report unreadable: {e}"), started)
@@ -139,9 +251,7 @@ impl EngineDriver for ProfileDriver {
             None => scan_log(exit_code, &log, Self::failure_kind(scope)),
         };
 
-        let raw_report_path = report_spec.and_then(|spec| {
-            self.substitutions(paths).apply(&spec.path).ok()
-        });
+        let raw_report_path = report_path.map(|p| p.to_string_lossy().into_owned());
 
         VerifyResult {
             verdict: parsed.verdict,
@@ -203,7 +313,12 @@ profile = "fake engine prose"
     }
 
     fn driver(profile: EngineProfile) -> ProfileDriver {
-        ProfileDriver { profile, engine_binary: PathBuf::from("node"), extra: Vec::new() }
+        ProfileDriver {
+            profile,
+            engine_binary: PathBuf::from("node"),
+            extra: Vec::new(),
+            timeout: DEFAULT_VERIFY_TIMEOUT,
+        }
     }
 
     #[test]
@@ -241,26 +356,77 @@ profile = "fake engine prose"
         assert!(r.inconclusive_reason.unwrap().contains("no report"));
     }
 
+    const WRITES_ONE_PASSING_CASE: &str = "{engine} -e require('fs').writeFileSync('{out}/r.xml','<testsuites><testsuite><testcase/></testsuite></testsuites>')";
+
     #[test]
     fn a_report_that_exists_is_parsed() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("out");
-        std::fs::create_dir_all(&out).unwrap();
-        let xml = out.join("r.xml").to_string_lossy().replace('\\', "/");
-        std::fs::write(
-            &xml,
-            r#"<testsuites><testsuite name="s"><testcase name="a" classname="c"/></testsuite></testsuites>"#,
-        )
-        .unwrap();
-
-        let d = driver(fake_profile(
-            "{engine} -e console.log('done')",
-            Some(("junit", "{out}/r.xml")),
-        ));
+        let d = driver(fake_profile(WRITES_ONE_PASSING_CASE, Some(("junit", "{out}/r.xml"))));
         let paths = ProjectPaths::new(dir.path(), &out);
         let r = d.verify(VerifyScope::Compile, &paths);
         assert_eq!(r.verdict, Verdict::Pass, "{:?}", r.inconclusive_reason);
         assert!(r.raw_report_path.is_some());
+    }
+
+    #[test]
+    fn a_stale_report_from_an_earlier_round_is_not_a_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(
+            out.join("r.xml"),
+            "<testsuites><testsuite><testcase/></testsuite></testsuites>",
+        )
+        .unwrap();
+
+        let d = driver(fake_profile(
+            "{engine} -e process.exit(1)",
+            Some(("junit", "{out}/r.xml")),
+        ));
+        let paths = ProjectPaths::new(dir.path(), &out);
+        let r = d.verify(VerifyScope::Compile, &paths);
+        assert_eq!(
+            r.verdict,
+            Verdict::Inconclusive,
+            "a crashed run must not inherit the previous round's green report"
+        );
+    }
+
+    #[test]
+    fn a_report_with_no_test_cases_is_not_a_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out");
+        let d = driver(fake_profile(
+            "{engine} -e require('fs').writeFileSync('{out}/r.xml','<testsuites><testsuite/></testsuites>')",
+            Some(("junit", "{out}/r.xml")),
+        ));
+        let paths = ProjectPaths::new(dir.path(), &out);
+        let r = d.verify(VerifyScope::Compile, &paths);
+        assert_eq!(
+            r.verdict,
+            Verdict::Inconclusive,
+            "an empty suite means the tests never ran, not that they passed"
+        );
+    }
+
+    #[test]
+    fn an_engine_that_never_exits_is_killed_and_inconclusive() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut d = driver(fake_profile("{engine} -e setInterval(Boolean,1000)", None));
+        d.timeout = Duration::from_millis(400);
+        let paths = ProjectPaths::new(dir.path(), dir.path().join("out"));
+        let r = d.verify(VerifyScope::Compile, &paths);
+        assert_eq!(r.verdict, Verdict::Inconclusive);
+        assert!(r.inconclusive_reason.unwrap().contains("did not exit"));
+    }
+
+    #[test]
+    fn a_path_with_spaces_stays_one_argument() {
+        let subs = Substitutions::new().set("project", "C:/Program Files/My Game");
+        let args = render_command("{engine} --path {project}", &subs.clone().set("engine", "godot"))
+            .unwrap();
+        assert_eq!(args, vec!["godot", "--path", "C:/Program Files/My Game"]);
     }
 
     #[test]

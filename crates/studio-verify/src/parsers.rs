@@ -59,6 +59,7 @@ pub fn parse_junit(body: &str) -> ParsedReport {
 
     let mut failures = Vec::new();
     let mut saw_suite = false;
+    let mut cases = 0usize;
     let mut current_case: Option<(String, String)> = None;
     let mut pending: Option<Failure> = None;
     let mut buf = Vec::new();
@@ -72,6 +73,7 @@ pub fn parse_junit(body: &str) -> ParsedReport {
             Ok(Event::Start(ref e)) => { depth += 1; match e.name().as_ref() {
                 b"testsuite" | b"testsuites" => saw_suite = true,
                 b"testcase" => {
+                    cases += 1;
                     current_case = Some((
                         attr(e, "classname").unwrap_or_default(),
                         attr(e, "name").unwrap_or_default(),
@@ -86,6 +88,7 @@ pub fn parse_junit(body: &str) -> ParsedReport {
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
                 b"testsuite" | b"testsuites" => saw_suite = true,
                 b"testcase" => {
+                    cases += 1;
                     current_case = Some((
                         attr(e, "classname").unwrap_or_default(),
                         attr(e, "name").unwrap_or_default(),
@@ -133,6 +136,11 @@ pub fn parse_junit(body: &str) -> ParsedReport {
     if !saw_suite {
         return ParsedReport::inconclusive("no testsuite element; the run produced no tests");
     }
+    if cases == 0 {
+        return ParsedReport::inconclusive(
+            "the junit report contains no test cases; the suite did not run",
+        );
+    }
     if failures.is_empty() {
         ParsedReport::pass()
     } else {
@@ -151,6 +159,7 @@ pub fn parse_nunit3(body: &str) -> ParsedReport {
 
     let mut failures = Vec::new();
     let mut saw_run = false;
+    let mut cases = 0usize;
     let mut current: Option<Failure> = None;
     let mut in_message = false;
     let mut in_stack = false;
@@ -164,6 +173,7 @@ pub fn parse_nunit3(body: &str) -> ParsedReport {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => match e.name().as_ref() {
                 b"test-run" => saw_run = true,
                 b"test-case" => {
+                    cases += 1;
                     if attr(e, "result").as_deref() == Some("Failed") {
                         let full = attr(e, "fullname").or_else(|| attr(e, "name")).unwrap_or_default();
                         current = Some(Failure {
@@ -211,6 +221,11 @@ pub fn parse_nunit3(body: &str) -> ParsedReport {
 
     if !saw_run {
         return ParsedReport::inconclusive("no test-run element; the editor produced no results");
+    }
+    if cases == 0 {
+        return ParsedReport::inconclusive(
+            "the nunit3 report contains no test cases; the suite did not run",
+        );
     }
     if failures.is_empty() {
         ParsedReport::pass()
