@@ -91,12 +91,56 @@ fn run_build(em: &Emitter, req: BuildRequest, seq: &mut usize) -> Result<()> {
         );
     }
 
-    let wf = plan
+    let mut wf = plan
         .to_workflow()
         .map_err(|e| anyhow::anyhow!("plan did not convert to a workflow: {e}"))?;
 
+    if let Some(gate) = compile_gate(em.project.as_deref(), &wf) {
+        println!("  gate: compile after {}", gate.after);
+        wf.gates.push(gate);
+    }
+
     crate::wf::run_planned(em, &wf, &req.prompt, em.project.clone(), seq, Some(plan))?;
     Ok(())
+}
+
+fn compile_gate(
+    project: Option<&std::path::Path>,
+    wf: &studio_workflow::Workflow,
+) -> Option<studio_workflow::Gate> {
+    let root = project?;
+    let profiles = studio_engine::EngineProfile::builtin();
+    let detected = studio_engine::detect(root, &profiles);
+    if detected.first()?.id != "godot" {
+        return None;
+    }
+
+    let godot = profiles.iter().find(|p| p.id == "godot")?;
+    if let Err(e) = studio_engine::resolve_binary(godot) {
+        println!("  gate: skipping compile verification ({e})");
+        return None;
+    }
+
+    let feeds_someone: std::collections::BTreeSet<&str> =
+        wf.edges.iter().map(|e| e.from.as_str()).collect();
+    let mut leaves = wf
+        .nodes
+        .iter()
+        .map(|n| n.id.as_str())
+        .filter(|id| !feeds_someone.contains(id));
+
+    let after = match (leaves.next(), leaves.next()) {
+        (Some(only), None) => only.to_string(),
+        (Some(_), Some(_)) => wf.nodes.last()?.id.clone(),
+        _ => return None,
+    };
+
+    Some(studio_workflow::Gate {
+        after,
+        kind: studio_workflow::GateKind::Verify,
+        scope: Some(studio_engine::VerifyScope::Compile.key().to_string()),
+        on_fail: studio_workflow::OnFail::Repair,
+    })
 }
 
 fn run_flow(em: &Emitter, req: WorkflowRequest, seq: &mut usize) -> Result<()> {
@@ -114,7 +158,19 @@ fn run_task(em: &Emitter, req: TaskRequest, seq: &mut usize) -> Result<()> {
     let r = role(&req.role).with_context(|| format!("unknown role {}", req.role))?;
     *seq += 1;
     println!("  task -> {} : {}", r.id, first_line(&req.brief));
-    run_worker(em, r, &req.brief, *seq)
+
+    let hands_on = !r.tools().is_empty();
+    let brief = match (&em.project, hands_on) {
+        (Some(root), true) => format!(
+            "{}\n\nYou are working in the project at {}. Create or edit the files \
+             this task needs, using paths relative to that directory.",
+            req.brief,
+            root.display()
+        ),
+        _ => req.brief.clone(),
+    };
+
+    crate::m4::run_worker_metered(em, r, &brief, *seq, hands_on).map(|_| ())
 }
 
 fn run_meeting(em: &Emitter, req: MeetingRequest, seq: &mut usize) -> Result<()> {

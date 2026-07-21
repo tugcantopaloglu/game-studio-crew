@@ -31,6 +31,22 @@ impl<'a> Host<'a> {
         let key = gate.scope.as_deref()?;
         VerifyScope::ALL.into_iter().find(|s| s.key() == key)
     }
+
+    fn acting_hint(&self, r: &studio_agents::Role) -> String {
+        if !acts(r) {
+            return String::new();
+        }
+        format!(
+            "\n\nYou are working in the project at {}. Create or edit the files this \
+             node needs, using paths relative to that directory. Do not stop at \
+             describing the work; the next node reads your files, not your prose.",
+            self.paths.project.display()
+        )
+    }
+}
+
+fn acts(r: &studio_agents::Role) -> bool {
+    !r.tools().is_empty()
 }
 
 impl<'a> WorkflowHost for Host<'a> {
@@ -96,8 +112,8 @@ impl<'a> WorkflowHost for Host<'a> {
                 } else {
                     format!("\n\nUpstream capsules: {}", inputs.join(", "))
                 };
-                let full = format!("{brief}{upstream}");
-                return match crate::m4::run_worker_metered(self.em, r, &full, self.seq, false) {
+                let full = format!("{brief}{upstream}{}", self.acting_hint(r));
+                return match crate::m4::run_worker_metered(self.em, r, &full, self.seq, acts(r)) {
                     Ok((_, tokens)) => {
                         self.budget.record(tokens);
                         self.warmed.insert(node.role.clone());
@@ -114,11 +130,14 @@ impl<'a> WorkflowHost for Host<'a> {
             format!("\n\nUpstream capsules: {}", inputs.join(", "))
         };
         let brief = format!(
-            "Workflow node '{}'.\n\n{}{}\n\nAnswer in one or two sentences. Use no tools.",
-            node.id, self.brief, context
+            "Workflow node '{}'.\n\n{}{}{}",
+            node.id,
+            self.brief,
+            context,
+            self.acting_hint(r)
         );
 
-        match crate::m4::run_worker_metered(self.em, r, &brief, self.seq, false) {
+        match crate::m4::run_worker_metered(self.em, r, &brief, self.seq, acts(r)) {
             Ok((_, tokens)) => {
                 self.budget.record(tokens);
                 self.warmed.insert(node.role.clone());
@@ -297,7 +316,7 @@ pub fn run_planned(
         Some(root) if root.join("project.godot").exists() => {
             let profile = EngineProfile::parse(studio_engine::GODOT_PROFILE)
                 .map_err(|e| anyhow::anyhow!("godot profile: {e}"))?;
-            let out = root.parent().unwrap_or(&root).join("wf-out");
+            let out = root.join(".studio-out");
             let d = ProfileDriver::resolve(profile).ok();
             (d, ProjectPaths::new(root, out))
         }

@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::Command;
 
 const GITIGNORE: &str = "\
+.studio-out/
 .godot/
 .import/
 build/
@@ -52,6 +53,10 @@ pub fn init(root: &Path) -> Result<()> {
     if !ignore.exists() {
         std::fs::write(&ignore, GITIGNORE)?;
     }
+
+    if has_changes(root)? {
+        commit_as(root, "studio: open the project")?;
+    }
     Ok(())
 }
 
@@ -63,26 +68,31 @@ pub fn commit(root: &Path, subject: &str) -> Result<Option<String>> {
     if !is_repo(root) || !has_changes(root)? {
         return Ok(None);
     }
+    commit_as(root, subject).map(Some)
+}
+
+fn commit_as(root: &Path, subject: &str) -> Result<String> {
     git(root, &["add", "-A"])?;
 
-    let mut args = vec!["commit", "-m", subject];
-    let identity = [
-        "-c",
-        "user.name=Game Studio",
-        "-c",
-        "user.email=studio@localhost",
-    ];
-    let mut full: Vec<&str> = identity.to_vec();
-    full.append(&mut args);
-
-    let out = Command::new("git").args(&full).current_dir(root).output()?;
+    let out = Command::new("git")
+        .args([
+            "-c",
+            "user.name=Game Studio",
+            "-c",
+            "user.email=studio@localhost",
+            "commit",
+            "-m",
+            subject,
+        ])
+        .current_dir(root)
+        .output()?;
     if !out.status.success() {
         return Err(CoreError::Git(format!(
             "commit failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    Ok(Some(git(root, &["rev-parse", "--short", "HEAD"])?))
+    git(root, &["rev-parse", "--short", "HEAD"])
 }
 
 pub fn subject(role: &str, brief: &str) -> String {
@@ -178,6 +188,44 @@ mod tests {
         }
 
         assert!(commit(&dir, "artist: nothing changed").unwrap().is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn init_leaves_a_clean_tree_so_the_first_worker_does_not_inherit_the_ignore_file() {
+        if !available() {
+            return;
+        }
+        let dir = scratch("cleaninit");
+        init(&dir).unwrap();
+
+        assert!(
+            !has_changes(&dir).unwrap(),
+            "an untracked .gitignore would be swept into whichever worker commits first"
+        );
+        assert!(commit(&dir, "game_designer: first real work").unwrap().is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_output_never_reaches_a_commit() {
+        if !available() {
+            return;
+        }
+        let dir = scratch("ignored");
+        init(&dir).unwrap();
+
+        std::fs::create_dir_all(dir.join(".studio-out")).unwrap();
+        std::fs::write(dir.join(".studio-out/report.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.join(".godot")).unwrap();
+        std::fs::write(dir.join(".godot/cache"), "x").unwrap();
+
+        assert!(
+            !has_changes(&dir).unwrap(),
+            "engine and verify artefacts must be ignored, not committed"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

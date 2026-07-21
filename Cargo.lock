@@ -1011,6 +1011,7 @@ dependencies = [
  "serde_json",
  "studio-agents",
  "studio-core",
+ "studio-engine",
  "studio-events",
  "studio-store",
  "studio-workflow",

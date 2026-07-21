@@ -596,13 +596,32 @@ export function buildOffice(floor, scene) {
     proxy.visible = false;
     person.add(proxy);
 
-    const alarm = new THREE.PointLight(0xff3b30, 0, 3.2, 2);
-    alarm.position.y = 1.15;
+    const alarm = new THREE.PointLight(0xff3b30, 0, 3.4, 2);
+    alarm.position.y = 1.55;
     alarm.visible = false;
     person.add(alarm);
 
+    const halo = new THREE.Mesh(
+      new THREE.SphereGeometry(0.075, 10, 8),
+      new THREE.MeshBasicMaterial({ color: 0x4ad991, transparent: true, opacity: 0.95 })
+    );
+    halo.position.y = 1.62;
+    halo.visible = false;
+    person.add(halo);
+
+    const beam = new THREE.Mesh(
+      new THREE.ConeGeometry(0.26, 0.72, 12, 1, true),
+      new THREE.MeshBasicMaterial({
+        color: 0x4ad991, transparent: true, opacity: 0.11,
+        depthWrite: false, side: THREE.DoubleSide,
+      })
+    );
+    beam.position.y = 1.26;
+    beam.visible = false;
+    person.add(beam);
+
     avatars.set(d.role, {
-      person, body: body.group, hit: proxy, ringMat, alarm,
+      person, body: body.group, hit: proxy, ringMat, alarm, halo, beam,
       tier: d.tier, title: d.title, dept: d.department,
       home,
       bounds: {
@@ -809,7 +828,7 @@ export function wanderStep(a, busy, dt, now) {
   const dz = a.target.z - p.z;
   const dist = Math.hypot(dx, dz);
   if (dist > 0.06) {
-    const speed = a.mode === "returning" ? 2.2 : a.mode === "meeting" ? 1.5 : 0.85;
+    const speed = a.mode === "returning" ? 5.4 : a.mode === "meeting" ? 2.4 : 0.85;
     const step = Math.min(dist, speed * dt);
     p.x += (dx / dist) * step;
     p.z += (dz / dist) * step;

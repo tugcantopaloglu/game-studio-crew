@@ -456,6 +456,42 @@ mod tests {
     }
 }
 
+pub fn scaffold(engine: &str, root: &Path, name: &str) -> Result<Vec<PathBuf>> {
+    match engine {
+        "godot" => scaffold_godot(root, name),
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn scaffold_godot(root: &Path, name: &str) -> Result<Vec<PathBuf>> {
+    if root.join("project.godot").exists() {
+        return Ok(Vec::new());
+    }
+
+    let escaped = name.replace('\\', "").replace('"', "");
+    let project = format!(
+        "config_version=5\n\n\
+         [application]\n\n\
+         config/name=\"{escaped}\"\n\
+         run/main_scene=\"res://scenes/main.tscn\"\n\
+         config/features=PackedStringArray(\"4.2\")\n\n\
+         [rendering]\n\n\
+         renderer/rendering_method=\"gl_compatibility\"\n"
+    );
+
+    let main_scene = "[gd_scene format=3]\n\n[node name=\"Main\" type=\"Node2D\"]\n";
+
+    std::fs::create_dir_all(root.join("scenes"))?;
+    std::fs::create_dir_all(root.join("scripts"))?;
+    std::fs::write(root.join("project.godot"), project)?;
+    std::fs::write(root.join("scenes/main.tscn"), main_scene)?;
+
+    Ok(vec![
+        root.join("project.godot"),
+        root.join("scenes/main.tscn"),
+    ])
+}
+
 pub const GODOT_CI_HELPER: &str = include_str!("../helpers/studio_ci.gd");
 
 pub fn install_helpers(profile: &EngineProfile, project: &Path) -> Result<Vec<PathBuf>> {
@@ -521,5 +557,57 @@ mod bootstrap_tests {
         let dir = tempfile::tempdir().unwrap();
         let ue5 = EngineProfile::parse(UE5_PROFILE).unwrap();
         assert!(install_helpers(&ue5, dir.path()).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod scaffold_tests {
+    use super::*;
+
+    #[test]
+    fn a_scaffolded_godot_project_is_detected_as_godot() {
+        let dir = tempfile::tempdir().unwrap();
+        let made = scaffold("godot", dir.path(), "Neon Drift").unwrap();
+        assert_eq!(made.len(), 2);
+
+        let found = detect(dir.path(), &EngineProfile::builtin());
+        assert_eq!(found.len(), 1, "an empty project detects no engine at all");
+        assert_eq!(found[0].id, "godot");
+    }
+
+    #[test]
+    fn the_scaffold_carries_the_project_name_and_a_main_scene() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold("godot", dir.path(), "Neon Drift").unwrap();
+
+        let cfg = std::fs::read_to_string(dir.path().join("project.godot")).unwrap();
+        assert!(cfg.contains(r#"config/name="Neon Drift""#), "{cfg}");
+        assert!(cfg.contains("res://scenes/main.tscn"), "{cfg}");
+        assert!(dir.path().join("scenes/main.tscn").is_file());
+        assert!(dir.path().join("scripts").is_dir());
+    }
+
+    #[test]
+    fn a_quote_in_the_name_cannot_break_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold("godot", dir.path(), r#"ev"il\"#).unwrap();
+        let cfg = std::fs::read_to_string(dir.path().join("project.godot")).unwrap();
+        assert_eq!(cfg.matches('"').count() % 2, 0, "unbalanced quotes:\n{cfg}");
+    }
+
+    #[test]
+    fn scaffolding_never_overwrites_an_existing_project() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("project.godot"), "mine").unwrap();
+        assert!(scaffold("godot", dir.path(), "x").unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(dir.path().join("project.godot")).unwrap(), "mine");
+    }
+
+    #[test]
+    fn an_unprobed_engine_scaffolds_nothing_rather_than_guessing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(scaffold("unity", dir.path(), "x").unwrap().is_empty());
+        assert!(scaffold("ue5", dir.path(), "x").unwrap().is_empty());
+        assert!(detect(dir.path(), &EngineProfile::builtin()).is_empty());
     }
 }

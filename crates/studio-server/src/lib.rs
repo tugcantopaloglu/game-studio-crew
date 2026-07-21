@@ -367,6 +367,14 @@ async fn create_project(
     let canonical = root.canonicalize().map(strip_verbatim).unwrap_or(root);
     let engine = req.engine.unwrap_or_else(|| "godot".into());
 
+    if let Err(e) = studio_engine::scaffold(&engine, &canonical, &name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("could not scaffold the {engine} project: {e}"),
+        )
+            .into_response();
+    }
+
     let git_ready = if req.git {
         if !studio_core::git::available() {
             return (

@@ -430,6 +430,21 @@ function animate() {
       a.alarm.visible = stuck;
       if (stuck) a.alarm.intensity = 2.6 + Math.sin(t * 7 + a.seed) * 2.0;
     }
+
+    const lit = st.ring === "running" || st.ring === "meeting";
+    if (a.halo) {
+      a.halo.visible = lit || stuck;
+      if (a.halo.visible) {
+        const tint = stuck ? RING.error : RING[st.ring];
+        a.halo.material.color.setHex(tint);
+        a.beam.material.color.setHex(tint);
+        const pulse = stuck ? 7 : 3.4;
+        a.halo.material.opacity = 0.7 + Math.sin(t * pulse + a.seed) * 0.3;
+        a.beam.material.opacity = 0.08 + Math.sin(t * pulse + a.seed) * 0.05;
+        a.halo.scale.setScalar(1 + Math.sin(t * pulse + a.seed) * 0.16);
+      }
+      a.beam.visible = a.halo.visible;
+    }
   }
 
   for (const a of ambient) {

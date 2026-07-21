@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 studio-agents.workspace = true
 studio-core.workspace = true
+studio-engine.workspace = true
 studio-events.workspace = true
 studio-store.workspace = true
 studio-workflow.workspace = true
