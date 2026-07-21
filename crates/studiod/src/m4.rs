@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use studio_agents::{Role, REGISTRY};
-use studio_context::{freeze, CharterSource, Model};
+use studio_context::{freeze, CharterSource};
 use studio_core::{Effort, SessionMode, Worker, WorkerLimits, WorkerSpec};
 use studio_core::map_cli_event;
-use studio_events::{EventType, Scene, WorkerState};
+use studio_events::{EventType, Outcome, Scene, WorkerState};
 use studio_server::AppState;
 use studio_store::{LedgerEntry, RoleRow, Store, TaskRow};
 
@@ -67,6 +67,55 @@ pub fn run_worker_capturing(
     index: usize,
     json_schema: Option<String>,
 ) -> Result<String> {
+    run_worker_inner(em, role, brief, index, json_schema, false).map(|(text, _)| text)
+}
+
+pub fn run_worker_metered(
+    em: &Emitter,
+    role: &Role,
+    brief: &str,
+    index: usize,
+    acting: bool,
+) -> Result<(String, u64)> {
+    run_worker_inner(em, role, brief, index, None, acting)
+}
+
+pub fn charter_for(role: &Role, acting: bool) -> CharterSource {
+    CharterSource {
+        studio_conventions: crate::charters::L0_STUDIO_CONVENTIONS.into(),
+        engine_profile: crate::charters::L1_GENERIC_ENGINE.into(),
+        role_charter: format!(
+            "You are the {}. {}\n\n{}",
+            role.title,
+            match role.tier {
+                1 => "You set studio direction and arbitrate across departments.",
+                2 => "You lead your department and decompose work for it.",
+                _ => "You do hands-on work in your department.",
+            },
+            if acting {
+                "Use your tools to make the change the brief asks for, then report what you changed in one short sentence."
+            } else {
+                "Answer the brief in one short sentence. Use no tools."
+            }
+        ),
+    }
+}
+
+pub fn prefix_tokens_for(role: &Role, acting: bool) -> u64 {
+    let charter = charter_for(role, acting);
+    freeze(&charter, &role.tools(), role.model)
+        .map(|p| p.estimated_tokens as u64)
+        .unwrap_or(8_000)
+}
+
+fn run_worker_inner(
+    em: &Emitter,
+    role: &Role,
+    brief: &str,
+    index: usize,
+    json_schema: Option<String>,
+    acting: bool,
+) -> Result<(String, u64)> {
     let actor = format!("{}#{}", role.id, index);
     let task_id = crate::id("task");
 
@@ -83,19 +132,7 @@ pub fn run_worker_capturing(
         crate::now(),
     )?;
 
-    let charter = CharterSource {
-        studio_conventions: crate::charters::L0_STUDIO_CONVENTIONS.into(),
-        engine_profile: crate::charters::L1_GENERIC_ENGINE.into(),
-        role_charter: format!(
-            "You are the {}. {}\n\nAnswer the brief in one short sentence. Use no tools.",
-            role.title,
-            match role.tier {
-                1 => "You set studio direction and arbitrate across departments.",
-                2 => "You lead your department and decompose work for it.",
-                _ => "You do hands-on work in your department.",
-            }
-        ),
-    };
+    let charter = charter_for(role, acting);
     let tools = role.tools();
     let prefix = freeze(&charter, &tools, role.model)
         .map_err(|e| anyhow::anyhow!("charter freeze failed for {}: {e}", role.id))?;
@@ -131,7 +168,7 @@ pub fn run_worker_capturing(
     let spec = WorkerSpec {
         system_prompt_file: charter_path.to_string_lossy().into_owned(),
         tools: tools.clone(),
-        allowed_tools: Vec::new(),
+        allowed_tools: if acting { tools.clone() } else { Vec::new() },
         model: role.model,
         effort: match role.effort {
             studio_agents::Effort::Low => Effort::Low,
@@ -227,6 +264,15 @@ pub fn run_worker_capturing(
         report.state.cost_usd
     );
 
+    if report.outcome != Outcome::Completed {
+        anyhow::bail!(
+            "{} did not complete ({:?}): {}",
+            role.id,
+            report.outcome,
+            report.state.text.lines().next().unwrap_or("no output")
+        );
+    }
+
     if report.state.is_error {
         anyhow::bail!(
             "{} failed: {}",
@@ -235,8 +281,9 @@ pub fn run_worker_capturing(
         );
     }
 
-    Ok(match &report.state.result_message {
+    let text = match &report.state.result_message {
         Some(m) if !m.trim().is_empty() => m.clone(),
         _ => report.state.text.clone(),
-    })
+    };
+    Ok((text, usage.total_input() + usage.output))
 }

@@ -27,6 +27,7 @@ pub struct WorkerReport {
     pub state: StreamStateSnapshot,
     pub exit_code: Option<i32>,
     pub duration: Duration,
+    pub stderr: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -55,6 +56,7 @@ impl Default for WorkerLimits {
 pub struct Worker {
     child: Child,
     group: ProcessGroup,
+    stdin_pump: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Worker {
@@ -70,11 +72,28 @@ impl Worker {
         let mut child = cmd.spawn()?;
         group.adopt(&child)?;
 
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(brief.as_bytes())?;
-        }
+        let stdin_pump = child.stdin.take().map(|mut stdin| {
+            let payload = brief.as_bytes().to_vec();
+            std::thread::spawn(move || {
+                let _ = stdin.write_all(&payload);
+            })
+        });
 
-        Ok(Self { child, group })
+        Ok(Self { child, group, stdin_pump })
+    }
+
+    fn wait_bounded(&mut self, started: Instant, limits: &WorkerLimits) -> Result<Option<i32>> {
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                return Ok(status.code());
+            }
+            if started.elapsed() >= limits.wall_clock {
+                let _ = self.group.kill_tree();
+                let _ = self.child.wait();
+                return Ok(None);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     pub fn drive(
@@ -84,6 +103,15 @@ impl Worker {
     ) -> Result<WorkerReport> {
         let started = Instant::now();
         let stdout = self.child.stdout.take().expect("stdout piped at spawn");
+        let stderr = self.child.stderr.take();
+
+        let err_pump = std::thread::spawn(move || {
+            let mut raw = Vec::new();
+            if let Some(mut r) = stderr {
+                let _ = std::io::Read::read_to_end(&mut r, &mut raw);
+            }
+            String::from_utf8_lossy(&raw).into_owned()
+        });
 
         let (tx, rx) = std::sync::mpsc::channel::<String>();
         let pump = std::thread::spawn(move || {
@@ -135,9 +163,13 @@ impl Worker {
             let _ = self.child.wait();
             None
         } else {
-            self.child.wait()?.code()
+            self.wait_bounded(started, limits)?
         };
         let _ = pump.join();
+        let stderr_text = err_pump.join().unwrap_or_default();
+        if let Some(h) = self.stdin_pump.take() {
+            let _ = h.join();
+        }
 
         let snapshot = StreamStateSnapshot {
             result_message: state.result_message.clone(),
@@ -172,6 +204,7 @@ impl Worker {
             state: snapshot,
             exit_code,
             duration: started.elapsed(),
+            stderr: stderr_text,
         })
     }
 
@@ -289,6 +322,43 @@ mod tests {
             "a silent worker must not hold its slot forever, got {:?}",
             report.outcome
         );
+    }
+
+    #[test]
+    fn a_worker_that_floods_stderr_still_completes() {
+        let script = r#"
+            const noise = "x".repeat(2000) + "\n";
+            for (let i = 0; i < 200; i++) process.stderr.write(noise);
+            process.stdout.write(JSON.stringify({type:"result",subtype:"success",is_error:false,total_cost_usd:0,usage:{}}) + "\n");
+        "#;
+        let limits = WorkerLimits {
+            stall_timeout: Duration::from_secs(20),
+            wall_clock: Duration::from_secs(30),
+        };
+        let w = Worker::spawn("node", &node_emitting(script), "").unwrap();
+        let report = w.drive(&limits, |_| {}).unwrap();
+        assert_eq!(
+            report.outcome,
+            Outcome::Completed,
+            "stderr larger than the pipe buffer must not wedge the worker"
+        );
+        assert!(report.stderr.len() > 100_000);
+    }
+
+    #[test]
+    fn a_large_brief_does_not_block_the_spawning_thread() {
+        let big = "b".repeat(400_000);
+        let script = r#"
+            let s = "";
+            process.stdin.on("data", d => s += d);
+            process.stdin.on("end", () => {
+              process.stdout.write(JSON.stringify({type:"stream_event",event:{type:"content_block_delta",delta:{type:"text_delta",text:String(s.length)}}}) + "\n");
+              process.stdout.write(JSON.stringify({type:"result",subtype:"success",is_error:false,total_cost_usd:0,usage:{}}) + "\n");
+            });
+        "#;
+        let w = Worker::spawn("node", &node_emitting(script), &big).unwrap();
+        let report = w.drive(&WorkerLimits::default(), |_| {}).unwrap();
+        assert_eq!(report.state.text, "400000");
     }
 
     #[test]
