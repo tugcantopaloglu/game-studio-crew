@@ -120,6 +120,16 @@ pub struct Metered {
     pub cost_usd: f64,
 }
 
+fn limits_for(acting: bool) -> WorkerLimits {
+    if !acting {
+        return WorkerLimits::default();
+    }
+    WorkerLimits {
+        stall_timeout: std::time::Duration::from_secs(300),
+        wall_clock: std::time::Duration::from_secs(2700),
+    }
+}
+
 pub fn charter_for(role: &Role, acting: bool) -> CharterSource {
     CharterSource {
         studio_conventions: crate::charters::L0_STUDIO_CONVENTIONS.into(),
@@ -225,7 +235,7 @@ fn run_worker_inner(
     let worker = Worker::spawn_in("claude", &spec.to_args(), brief, em.project.as_deref())
         .with_context(|| format!("failed to spawn a worker for {}", role.id))?;
 
-    let report = worker.drive(&WorkerLimits::default(), |ev| {
+    let report = worker.drive(&limits_for(acting), |ev| {
         if let Some((ty, data)) = map_cli_event(ev) {
             let _ = em.emit(&actor, ty, scene.clone(), data);
         }
@@ -334,4 +344,33 @@ fn run_worker_inner(
         cache_creation: usage.cache_creation,
     });
     Ok(Metered { text, billed_tokens: billed, cost_usd: report.state.cost_usd })
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    #[test]
+    fn an_advisory_worker_keeps_the_short_default() {
+        let l = limits_for(false);
+        let d = WorkerLimits::default();
+        assert_eq!(l.wall_clock, d.wall_clock);
+        assert_eq!(l.stall_timeout, d.stall_timeout);
+    }
+
+    #[test]
+    fn an_acting_worker_gets_long_enough_to_write_a_test_suite() {
+        let acting = limits_for(true);
+        let advisory = WorkerLimits::default();
+
+        assert!(
+            acting.wall_clock >= std::time::Duration::from_secs(1800),
+            "a qa_engineer writing several suites was killed at the ten minute default"
+        );
+        assert!(acting.wall_clock > advisory.wall_clock);
+        assert!(
+            acting.stall_timeout > advisory.stall_timeout,
+            "a worker thinking between tool calls must not read as hung"
+        );
+    }
 }
