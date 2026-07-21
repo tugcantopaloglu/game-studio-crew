@@ -695,7 +695,7 @@ export function showBoard(kind, topic, participants, chair) {
 
   x.font = "600 14px ui-monospace, monospace";
   x.fillStyle = "#3d4657";
-  const words = String(topic || "").split(/s+/);
+  const words = String(topic || "").split(/\s+/);
   let line = "", y = 60;
   for (const w of words) {
     if ((line + " " + w).length > 34) { x.fillText(line, 14, y); y += 20; line = w; }

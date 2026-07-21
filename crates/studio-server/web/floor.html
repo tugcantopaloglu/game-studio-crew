@@ -283,19 +283,29 @@ function pickAgent(e) {
 }
 
 const detail = document.getElementById("detail");
+
+function esc(v) {
+  return String(v == null ? "" : v)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function showDetail(role) {
   selected = role;
   if (!role) { detail.style.display = "none"; return; }
   const a = avatars.get(role), st = deskState(role);
   detail.innerHTML =
-    `<h2>${a.title}</h2>` +
-    `<div class="row"><span class="k">role</span><span>${role}</span></div>` +
-    `<div class="row"><span class="k">tier</span><span>${a.tier}</span></div>` +
-    `<div class="row"><span class="k">dept</span><span>${a.dept}</span></div>` +
-    `<div class="row"><span class="k">state</span><span>${st.ring}</span></div>` +
-    `<div class="row"><span class="k">tokens</span><span>${st.tokens.toLocaleString()}</span></div>` +
-    (st.tool ? `<div class="row"><span class="k">tool</span><span>${st.tool}</span></div>` : "") +
-    (st.summary ? `<div class="sum">${st.summary}</div>` : `<div class="sum k">no capsule yet</div>`) +
+    `<h2>${esc(a.title)}</h2>` +
+    `<div class="row"><span class="k">role</span><span>${esc(role)}</span></div>` +
+    `<div class="row"><span class="k">tier</span><span>${esc(a.tier)}</span></div>` +
+    `<div class="row"><span class="k">dept</span><span>${esc(a.dept)}</span></div>` +
+    `<div class="row"><span class="k">state</span><span>${esc(st.ring)}</span></div>` +
+    `<div class="row"><span class="k">tokens</span><span>${esc(st.tokens.toLocaleString())}</span></div>` +
+    (st.tool ? `<div class="row"><span class="k">tool</span><span>${esc(st.tool)}</span></div>` : "") +
+    (st.summary ? `<div class="sum">${esc(st.summary)}</div>` : `<div class="sum k">no capsule yet</div>`) +
     `<button id="unfollow">${following === role ? "stop following" : "follow"}</button>`;
   detail.style.display = "block";
   document.getElementById("unfollow").onclick = () => {
@@ -330,10 +340,10 @@ function hoverTest(e) {
 
   const a = avatars.get(best), st = deskState(best);
   tip.innerHTML =
-    `<b>${a.title}</b><div class="s">tier ${a.tier} &middot; ${a.dept} &middot; ${st.ring}</div>` +
-    (st.tool ? `<div class="s">tool: ${st.tool}</div>` : "") +
-    (st.tokens ? `<div class="s">${st.tokens.toLocaleString()} tokens</div>` : "") +
-    (st.summary ? `<div>${st.summary}</div>` : "");
+    `<b>${esc(a.title)}</b><div class="s">tier ${esc(a.tier)} &middot; ${esc(a.dept)} &middot; ${esc(st.ring)}</div>` +
+    (st.tool ? `<div class="s">tool: ${esc(st.tool)}</div>` : "") +
+    (st.tokens ? `<div class="s">${esc(st.tokens.toLocaleString())} tokens</div>` : "") +
+    (st.summary ? `<div>${esc(st.summary)}</div>` : "");
   tip.style.display = "block";
   tip.style.left = Math.min(e.clientX - r.left + 14, r.width - 300) + "px";
   tip.style.top = (e.clientY - r.top + 14) + "px";
@@ -535,7 +545,7 @@ function renderTrack() {
     const cls = workflow.skipped.includes(n) ? "skipped"
       : workflow.entered.includes(n) ? (workflow.entered[workflow.entered.length - 1] === n && !workflow.done ? "active" : "done")
       : "";
-    parts.push('<span class="chip ' + cls + '">' + n + "</span>");
+    parts.push('<span class="chip ' + cls + '">' + esc(n) + "</span>");
     if (n in workflow.gates) {
       const ok = workflow.gates[n];
       parts.push('<span class="gate ' + (ok ? "pass" : "fail") + '">' + (ok ? "gate pass" : "gate fail") + "</span>");
@@ -580,7 +590,7 @@ function logEvent(ev) {
   const row = document.createElement("div");
   row.className = "ev" + (TERMINAL.has(ev.type) ? " terminal" : "") + (BAD.has(ev.type) ? " bad" : "");
   const who = ev.actor === "daemon" ? "" : " " + roleOf(ev.actor);
-  row.innerHTML = `<span class="seq">${ev.seq}</span><span class="t">${ev.type}${who}</span>`;
+  row.innerHTML = `<span class="seq">${esc(ev.seq)}</span><span class="t">${esc(ev.type)}${esc(who)}</span>`;
   feed.appendChild(row);
   while (feed.childElementCount > 400) feed.removeChild(feed.firstChild);
   feed.scrollTop = feed.scrollHeight;
@@ -635,7 +645,7 @@ applyMode();
 
 fetch("/roles").then((r) => r.json()).then((rows) => {
   who.innerHTML = rows
-    .map((r) => `<option value="${r.id}">${r.title}</option>`)
+    .map((r) => `<option value="${esc(r.id)}">${esc(r.title)}</option>`)
     .join("");
 });
 

@@ -85,6 +85,32 @@ pub fn compact_for_snapshot(events: Vec<Envelope>) -> Vec<Envelope> {
     c.flush()
 }
 
+fn origin_is_local(origin: &str) -> bool {
+    let rest = match origin.split_once("://") {
+        Some((scheme, rest)) if scheme == "http" || scheme == "https" => rest,
+        _ => return false,
+    };
+    let host = rest.split('/').next().unwrap_or("");
+    let host = match host.rsplit_once(':') {
+        Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => host,
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1")
+}
+
+async fn guard_origin(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<Response, StatusCode> {
+    if let Some(origin) = req.headers().get(header::ORIGIN) {
+        let ok = origin.to_str().map(origin_is_local).unwrap_or(false);
+        if !ok {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+    Ok(next.run(req).await)
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
@@ -101,6 +127,7 @@ pub fn router(state: AppState) -> Router {
         .route("/workflows", get(workflows))
         .route("/workflow", post(start_workflow))
         .route("/build", post(start_build))
+        .layer(axum::middleware::from_fn(guard_origin))
         .with_state(state)
 }
 
@@ -333,7 +360,7 @@ async fn ws_run(mut socket: WebSocket, state: AppState, q: SinceQuery) {
             },
             broadcast = rx.recv() => match broadcast {
                 Err(broadcast::error::RecvError::Closed) => return,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => return,
                 Ok(e) => {
                     if q.run.as_deref().is_some_and(|r| r != e.run) {
                         continue;
@@ -365,6 +392,64 @@ mod tests {
 
     fn ev(seq: u64, actor: &str, ty: EventType) -> Envelope {
         Envelope::new(seq, "t", "run_1", actor, Scene::daemon(), ty, serde_json::json!({}))
+    }
+
+    async fn post_with_origin(origin: Option<&str>) -> StatusCode {
+        use tower::ServiceExt;
+
+        let slug: String = origin
+            .unwrap_or("none")
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let dir = std::env::temp_dir().join(format!("studio-origin-{slug}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let store = Arc::new(Store::open(dir.join("s.db")).unwrap());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let app = router(AppState::new(store).with_commands(tx));
+
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/task")
+            .header("content-type", "application/json");
+        if let Some(o) = origin {
+            req = req.header("origin", o);
+        }
+        let req = req
+            .body(axum::body::Body::from(
+                r#"{"role":"gameplay_engineer","brief":"a brief long enough"}"#,
+            ))
+            .unwrap();
+
+        app.oneshot(req).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn a_cross_origin_post_cannot_spawn_a_worker() {
+        assert_eq!(post_with_origin(Some("http://evil.test")).await, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn a_same_origin_post_is_accepted() {
+        assert_ne!(
+            post_with_origin(Some("http://127.0.0.1:7878")).await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn only_local_origins_are_accepted() {
+        assert!(origin_is_local("http://127.0.0.1:7878"));
+        assert!(origin_is_local("http://localhost:7878"));
+        assert!(origin_is_local("http://localhost"));
+        assert!(origin_is_local("http://[::1]:7878"));
+
+        assert!(!origin_is_local("http://evil.test"));
+        assert!(!origin_is_local("https://evil.test:7878"));
+        assert!(!origin_is_local("http://127.0.0.1.evil.test"));
+        assert!(!origin_is_local("http://notlocalhost"));
+        assert!(!origin_is_local("null"));
+        assert!(!origin_is_local("file://"));
     }
 
     #[test]
