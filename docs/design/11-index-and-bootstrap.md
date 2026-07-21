@@ -103,11 +103,15 @@ Beyond code, the index maps engine assets into `assets`/`scene_nodes`:
 
 ## Incremental freshness
 
-**Built today:** refresh is a **scan** (`studiod index [root]`) that walks the project, skipping VCS, editor and build directories — and `.studio/` itself, which the first real run caught the index feeding its own database into. Every file is hashed, and the hash gate below already applies: a second scan with no edits reparses nothing. Files that vanished between scans are dropped from the index. **Not built:** the watcher that makes this incremental without a scan.
+**Built today:** refresh is a **scan** that walks the project, skipping VCS, editor and build directories — and `.studio/` itself, which the first real run caught the index feeding its own database into. Every file is hashed, and the hash gate below already applies: a second scan with no edits reparses nothing. Files that vanished between scans are dropped from the index.
+
+The scan runs from two places. `studiod index [root]` does it on demand, and **`studiod studio` bootstraps the index before it accepts a single command, then rescans after each one completes**. That second hook is what keeps the index honest in a live studio: workers write files, so an index built only at startup would answer the next task from a stale picture of code the studio itself changed. The hash gate is what makes rescanning after every command affordable — a command that touched nothing reparses nothing and stays silent.
+
+**Not built:** the watcher that makes this incremental without a scan. A rescan is O(files hashed), not O(files parsed), which is cheap enough for a game project but is still work proportional to repository size rather than to the edit.
 
 The index is kept live with the **`notify`** filesystem watcher, gated on content hashes:
 
 - A filesystem event triggers a **blake3 re-hash** of the changed file. If the hash is unchanged (touch, editor rewrite with identical bytes), **nothing is re-indexed**: the hash gate prevents redundant tree-sitter parses. If changed, only that file's symbols/refs/assets are re-extracted.
 - **UE registry dumps are debounced.** Because dumping the asset registry is an expensive editor commandlet, `.umap`/`.uasset` changes don't trigger a dump per event; they set a dirty flag and a debounce timer (default a few seconds of quiescence) coalesces a burst of binary changes into one registry dump. This keeps a designer saving maps repeatedly from pinning the editor on back-to-back dumps.
 
-Every index change emits `index_updated` ([05](05-event-protocol.md)) with the changed paths and symbol delta, so downstream consumers (context engine, trust model, floor) react without polling.
+Every index change emits `index_updated` ([05](05-event-protocol.md)) with the changed paths and symbol delta, so downstream consumers (context engine, trust model, floor) react without polling. **This is emitted today** on every refresh that actually moved something, carrying `paths_changed`, `symbols_delta` and a capped sample of the paths; the floor turns the running total into a `symbols` figure beside cache hit rate. A refresh that changed nothing emits nothing, so the event stream stays a record of real change rather than a heartbeat.

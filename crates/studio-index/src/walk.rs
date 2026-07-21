@@ -8,6 +8,14 @@ pub struct ScanReport {
     pub indexed: usize,
     pub unchanged: usize,
     pub removed: usize,
+    pub changed_paths: Vec<String>,
+    pub symbols_delta: i64,
+}
+
+impl ScanReport {
+    pub fn touched_anything(&self) -> bool {
+        self.indexed > 0 || self.removed > 0
+    }
 }
 
 const IGNORED_DIRS: &[&str] = &[
@@ -44,6 +52,8 @@ impl Index {
         let mut found = Vec::new();
         collect(root, root, &mut found)?;
 
+        let symbols_before = self.count("symbols")? as i64;
+
         let mut report = ScanReport::default();
         for relative in &found {
             let absolute = root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -54,7 +64,10 @@ impl Index {
 
             report.seen += 1;
             match self.index_file(relative, &bytes, &mtime)? {
-                Refresh::Indexed => report.indexed += 1,
+                Refresh::Indexed => {
+                    report.indexed += 1;
+                    report.changed_paths.push(relative.clone());
+                }
                 Refresh::Unchanged => report.unchanged += 1,
             }
         }
@@ -62,8 +75,10 @@ impl Index {
         for stale in self.paths_outside(&found)? {
             self.forget(&stale)?;
             report.removed += 1;
+            report.changed_paths.push(stale);
         }
 
+        report.symbols_delta = self.count("symbols")? as i64 - symbols_before;
         Ok(report)
     }
 
@@ -195,6 +210,43 @@ mod tests {
 
         assert_eq!(second.indexed, 0);
         assert_eq!(second.unchanged, 1);
+    }
+
+    #[test]
+    fn a_quiet_scan_reports_nothing_touched_so_no_event_need_be_emitted() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "scripts/player.gd", "class_name Player\n\nfunc go():\n\tpass\n");
+
+        let mut index = Index::open_in_memory().unwrap();
+        let first = index.scan(dir.path()).unwrap();
+        let second = index.scan(dir.path()).unwrap();
+
+        assert!(first.touched_anything());
+        assert!(!second.touched_anything());
+        assert!(second.changed_paths.is_empty());
+        assert_eq!(second.symbols_delta, 0);
+    }
+
+    #[test]
+    fn a_scan_reports_which_paths_moved_and_how_the_symbol_count_shifted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "scripts/player.gd", "class_name Player\n\nfunc go():\n\tpass\n");
+
+        let mut index = Index::open_in_memory().unwrap();
+        let first = index.scan(root).unwrap();
+        assert_eq!(first.changed_paths, vec!["scripts/player.gd"]);
+        assert_eq!(first.symbols_delta, 1);
+
+        write(root, "scripts/player.gd", "class_name Player\n\nfunc go():\n\tpass\n\nfunc stop():\n\tpass\n");
+        let second = index.scan(root).unwrap();
+        assert_eq!(second.changed_paths, vec!["scripts/player.gd"]);
+        assert_eq!(second.symbols_delta, 1);
+
+        fs::remove_file(root.join("scripts/player.gd")).unwrap();
+        let third = index.scan(root).unwrap();
+        assert_eq!(third.changed_paths, vec!["scripts/player.gd"]);
+        assert_eq!(third.symbols_delta, -2);
     }
 
     #[test]

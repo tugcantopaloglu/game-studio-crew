@@ -116,7 +116,7 @@ Both resolved in the favorable direction. Their fallbacks remain documented in [
 - **M4 (complete):** event protocol, coalescer, WebSocket transport, and the studio floor. Rendered in 3D with voxel characters rather than the 2D grid originally specified ([ADR 0005](adr/0005-voxel-3d-floor.md)), with the office, wandering agents, follow camera and click-to-inspect.
 - **M5 (complete for Godot):** workflow DAGs and their executor, budget governance and the degradation ladder, the R0-R4 trust model, meetings driven by real events, the workflow track, minimap and timeline scrubber. **The Unity and UE5 profiles are written but unprobed** ([07](07-engine-layer.md), [13](13-risks.md) R11); only Godot has been run end to end.
 
-- **M6 (in progress):** the code index ([11](11-index-and-bootstrap.md)). `studio-index` parses GDScript and C# with tree-sitter into a separate `studio-index.db`, gated on blake3 so an unchanged file is never reparsed, and `symbol_lookup` now answers out of it with a signature, doc and one-hop neighbourhood instead of returning nothing. **Asset extraction, the C++ extractor and the filesystem watcher are not built.**
+- **M6 (in progress):** the code index ([11](11-index-and-bootstrap.md)). `studio-index` parses GDScript and C# with tree-sitter into a separate `studio-index.db`, gated on blake3 so an unchanged file is never reparsed, and `symbol_lookup` now answers out of it with a signature, doc and one-hop neighbourhood instead of returning nothing. `studiod studio` bootstraps the index at startup and rescans after every command, emitting `index_updated` when something actually moved. **Asset extraction, the C++ extractor and the filesystem watcher are not built.**
 
 ## Reading order
 

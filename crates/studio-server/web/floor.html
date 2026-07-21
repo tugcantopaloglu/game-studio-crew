@@ -98,6 +98,7 @@
     <div class="stat"><span>tokens</span><b id="s-tokens">0</b></div>
     <div class="stat"><span>spend</span><b id="s-spend">$0.0000</b></div>
     <div class="stat"><span>cache hit</span><b id="s-cache">-</b></div>
+    <div class="stat"><span>symbols</span><b id="s-symbols">-</b></div>
   </div>
   <div id="feed"></div>
   <div id="compose">
@@ -166,7 +167,7 @@ const allEvents = [];
 let scrubbing = false;
 let workflow = null;
 const state = new Map();
-let stats = { events: 0, tokens: 0, spend: 0, cacheRead: 0, cacheWrite: 0, run: "-", history: [], feed: [] };
+let stats = { events: 0, tokens: 0, spend: 0, cacheRead: 0, cacheWrite: 0, symbols: 0, run: "-", history: [], feed: [] };
 let screensDirty = true;
 let lastScreenPaint = 0;
 let lastMini = 0;
@@ -425,7 +426,7 @@ function resetState() {
   meetings.clear();
   hideBoard();
   workflow = null;
-  stats = { events: 0, tokens: 0, spend: 0, cacheRead: 0, cacheWrite: 0, run: stats.run, history: [], feed: [] };
+  stats = { events: 0, tokens: 0, spend: 0, cacheRead: 0, cacheWrite: 0, symbols: 0, run: stats.run, history: [], feed: [] };
 }
 
 function rebuildTo(seq) {
@@ -496,6 +497,9 @@ function apply(ev, replaying) {
       break;
     case "workflow_ended":
       if (workflow) { workflow.done = true; workflow.outcome = ev.data.outcome; }
+      break;
+    case "index_updated":
+      stats.symbols = Math.max(0, stats.symbols + (ev.data.symbols_delta || 0));
       break;
     case "token_usage": {
       const d = ev.data;
@@ -568,6 +572,7 @@ function renderStats() {
   document.getElementById("s-spend").textContent = "$" + stats.spend.toFixed(4);
   const tot = stats.cacheRead + stats.cacheWrite;
   document.getElementById("s-cache").textContent = tot ? ((stats.cacheRead / tot) * 100).toFixed(0) + "%" : "-";
+  document.getElementById("s-symbols").textContent = stats.symbols ? stats.symbols.toLocaleString() : "-";
 }
 
 const feed = document.getElementById("feed");

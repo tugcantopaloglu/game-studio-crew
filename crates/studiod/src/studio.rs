@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::path::PathBuf;
 use std::sync::Arc;
 use studio_agents::{nearest_common_ancestor, role, Role};
 use studio_events::{EventType, Scene};
@@ -8,6 +9,46 @@ use studio_server::{
 use studio_store::Store;
 
 use crate::m4::{run_worker, Emitter};
+
+const INDEX_PATHS_SAMPLED: usize = 10;
+
+pub struct ProjectIndex {
+    index: studio_index::Index,
+    root: PathBuf,
+}
+
+impl ProjectIndex {
+    pub fn open(root: PathBuf, database: PathBuf) -> Result<Self> {
+        let index = studio_index::Index::open(&database)?;
+        Ok(Self { index, root })
+    }
+
+    pub fn refresh(&mut self, em: &Emitter) -> Result<()> {
+        let report = self.index.scan(&self.root)?;
+        if !report.touched_anything() {
+            return Ok(());
+        }
+
+        let sample: Vec<&String> = report.changed_paths.iter().take(INDEX_PATHS_SAMPLED).collect();
+        em.emit(
+            "daemon",
+            EventType::IndexUpdated,
+            Scene::daemon(),
+            serde_json::json!({
+                "paths_changed": report.changed_paths.len(),
+                "symbols_delta": report.symbols_delta,
+                "paths": sample,
+            }),
+        )?;
+
+        println!(
+            "  index: {} path(s) changed, {:+} symbol(s)",
+            report.changed_paths.len(),
+            report.symbols_delta
+        );
+        Ok(())
+    }
+}
 
 pub fn run_command(em: &Emitter, cmd: StudioCommand, seq: &mut usize) -> Result<()> {
     match cmd {
@@ -215,6 +256,12 @@ pub fn serve_studio(store: Arc<Store>, run: String, port: u16) -> Result<()> {
         serde_json::json!({"title": "interactive studio"}),
     )?;
 
+    let mut project = ProjectIndex::open(
+        PathBuf::from("."),
+        crate::studio_dir().join("studio-index.db"),
+    )?;
+    project.refresh(&em)?;
+
     println!("studio floor on http://127.0.0.1:{port}/?run={run}");
     println!("waiting for tasks and meetings from the floor");
     println!();
@@ -224,8 +271,120 @@ pub fn serve_studio(store: Arc<Store>, run: String, port: u16) -> Result<()> {
         if let Err(e) = run_command(&em, cmd, &mut seq) {
             println!("  command failed: {e}");
         }
+        if let Err(e) = project.refresh(&em) {
+            println!("  index refresh failed: {e}");
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::ProjectIndex;
+    use crate::m4::Emitter;
+    use std::sync::Arc;
+    use studio_server::AppState;
+    use studio_store::Store;
+
+    struct Harness {
+        project: ProjectIndex,
+        emitter: Emitter,
+        store: Arc<Store>,
+        run: String,
+        _dirs: (tempfile::TempDir, tempfile::TempDir),
+    }
+
+    fn harness() -> Harness {
+        let project_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+
+        let store = Arc::new(Store::open(state_dir.path().join("studio-state.db")).unwrap());
+        let run = "run_test".to_string();
+        let emitter = Emitter {
+            store: store.clone(),
+            state: AppState::new(store.clone()),
+            run: run.clone(),
+        };
+
+        let project = ProjectIndex::open(
+            project_dir.path().to_path_buf(),
+            state_dir.path().join("studio-index.db"),
+        )
+        .unwrap();
+
+        Harness { project, emitter, store, run, _dirs: (project_dir, state_dir) }
+    }
+
+    impl Harness {
+        fn write(&self, relative: &str, body: &str) {
+            let path = self.project.root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+
+        fn index_events(&self) -> Vec<serde_json::Value> {
+            self.store
+                .events_since(&self.run, 0)
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.event_type == studio_events::EventType::IndexUpdated)
+                .map(|e| e.data)
+                .collect()
+        }
+    }
+
+    #[test]
+    fn a_refresh_that_finds_new_code_announces_it() {
+        let mut h = harness();
+        h.write("scripts/player.gd", "class_name Player\n\nfunc go():\n\tpass\n");
+        h.project.refresh(&h.emitter).unwrap();
+
+        let events = h.index_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["paths_changed"], 1);
+        assert_eq!(events[0]["symbols_delta"], 1);
+        assert_eq!(events[0]["paths"][0], "scripts/player.gd");
+    }
+
+    #[test]
+    fn a_refresh_that_changes_nothing_stays_silent() {
+        let mut h = harness();
+        h.write("scripts/player.gd", "class_name Player\n\nfunc go():\n\tpass\n");
+        h.project.refresh(&h.emitter).unwrap();
+        h.project.refresh(&h.emitter).unwrap();
+        h.project.refresh(&h.emitter).unwrap();
+
+        assert_eq!(h.index_events().len(), 1);
+    }
+
+    #[test]
+    fn a_worker_editing_a_file_makes_the_next_lookup_see_the_edit() {
+        let mut h = harness();
+        h.write("scripts/player.gd", "class_name Player\n\nfunc go():\n\tpass\n");
+        h.project.refresh(&h.emitter).unwrap();
+        assert_eq!(h.project.index.lookup("Player.go", 5).unwrap().len(), 1);
+
+        h.write("scripts/player.gd", "class_name Player\n\nfunc sprint():\n\tpass\n");
+        h.project.refresh(&h.emitter).unwrap();
+
+        assert!(h.project.index.lookup("Player.go", 5).unwrap().is_empty());
+        assert_eq!(h.project.index.lookup("Player.sprint", 5).unwrap().len(), 1);
+        assert_eq!(h.index_events().len(), 2);
+    }
+
+    #[test]
+    fn a_deletion_is_announced_with_a_negative_symbol_delta() {
+        let mut h = harness();
+        h.write("scripts/player.gd", "class_name Player\n\nfunc go():\n\tpass\n");
+        h.project.refresh(&h.emitter).unwrap();
+
+        std::fs::remove_file(h.project.root.join("scripts/player.gd")).unwrap();
+        h.project.refresh(&h.emitter).unwrap();
+
+        let events = h.index_events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1]["symbols_delta"], -1);
+    }
 }
 
 #[cfg(test)]
