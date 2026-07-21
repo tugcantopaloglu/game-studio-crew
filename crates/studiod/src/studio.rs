@@ -23,6 +23,12 @@ impl ProjectIndex {
         Ok(Self { index, root })
     }
 
+    pub fn refresh_quietly(&mut self, em: &Emitter) {
+        if let Err(e) = self.refresh(em) {
+            println!("  index refresh failed: {e}");
+        }
+    }
+
     pub fn refresh(&mut self, em: &Emitter) -> Result<()> {
         let report = self.index.scan(&self.root)?;
         if !report.touched_anything() {
@@ -268,12 +274,11 @@ pub fn serve_studio(store: Arc<Store>, run: String, port: u16) -> Result<()> {
 
     let mut seq = 0usize;
     for cmd in rx {
+        project.refresh_quietly(&em);
         if let Err(e) = run_command(&em, cmd, &mut seq) {
             println!("  command failed: {e}");
         }
-        if let Err(e) = project.refresh(&em) {
-            println!("  index refresh failed: {e}");
-        }
+        project.refresh_quietly(&em);
     }
     Ok(())
 }
@@ -370,6 +375,29 @@ mod index_tests {
         assert!(h.project.index.lookup("Player.go", 5).unwrap().is_empty());
         assert_eq!(h.project.index.lookup("Player.sprint", 5).unwrap().len(), 1);
         assert_eq!(h.index_events().len(), 2);
+    }
+
+    #[test]
+    fn an_edit_made_while_the_studio_was_idle_is_indexed_before_the_next_command_runs() {
+        let mut h = harness();
+        h.write("scripts/player.gd", "class_name Player\n\nfunc go():\n\tpass\n");
+        h.project.refresh(&h.emitter).unwrap();
+
+        h.write("scripts/player.gd", "class_name Player\n\nfunc go():\n\tpass\n\nfunc dash():\n\tpass\n");
+        h.project.refresh_quietly(&h.emitter);
+
+        assert_eq!(h.project.index.lookup("Player.dash", 5).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn refreshing_twice_around_a_command_announces_the_change_only_once() {
+        let mut h = harness();
+        h.write("scripts/player.gd", "class_name Player\n\nfunc go():\n\tpass\n");
+
+        h.project.refresh_quietly(&h.emitter);
+        h.project.refresh_quietly(&h.emitter);
+
+        assert_eq!(h.index_events().len(), 1);
     }
 
     #[test]

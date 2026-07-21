@@ -1,10 +1,16 @@
-# M1 CLI probes
+# Probes
 
-Settles the CLI behaviors the design depended on but could not confirm from
-documentation. **All three verdicts are in**, and one of them overturned a
-founding assumption. See [ADR 0004](../docs/design/adr/0004-explicit-context-control-not-bare.md).
+Settles behaviors the design depended on but could not confirm from
+documentation. Two groups: the **M1 CLI probes**, which settled how the `claude`
+CLI actually behaves, and later **cost probes**, which answer whether a piece of
+machinery is worth building.
 
-## Run
+## M1 CLI probes
+
+**All three verdicts are in**, and one of them overturned a founding assumption.
+See [ADR 0004](../docs/design/adr/0004-explicit-context-control-not-bare.md).
+
+### Run
 
 ```bash
 bash probes/run-probes.sh
@@ -19,7 +25,7 @@ On Windows use Git Bash explicitly, since PowerShell resolves `bash` to WSL:
 & "C:\Program Files\Git\bin\bash.exe" probes/run-probes.sh
 ```
 
-## Results
+### Results
 
 | Probe | Question | Verdict |
 |---|---|---|
@@ -27,7 +33,7 @@ On Windows use Git Bash explicitly, since PowerShell resolves `bash` to WSL:
 | B | Does `--mcp-config` attach? | **YES**, with the ADR 0004 flag set: `status: "connected"`, tool advertised, invoked, value returned. No outbox fallback needed. |
 | C | Does an identical frozen prefix hit cache across separate subprocesses? | **YES.** 8867 written cold ($0.0888), 8867 read warm ($0.0051). **17.4×.** |
 
-## What the probes overturned
+### What the probes overturned
 
 `--bare` **cannot be used.** It fails `Not logged in` in 222 ms against valid
 subscription credentials, because it reads auth strictly from
@@ -78,3 +84,36 @@ cache key, a role's allowlist fragments the cache exactly as its charter does.
 * The final `result` carries `usage`, `total_cost_usd`, `modelUsage`, `session_id`, `terminal_reason`.
 * On Windows, paths written into `mcp.json` must be Windows-form (`cygpath -m`);
   a Git Bash `/c/...` path reaches a native `node` that cannot resolve it.
+
+## Cost probes
+
+### Index scan cost
+
+Answers whether the `notify` filesystem watcher specified in
+[11](../docs/design/11-index-and-bootstrap.md) is worth building, given that the
+studio already rescans the project around every command.
+
+```bash
+cargo build --release -p studiod
+bash probes/index-scan.sh                 # 40 modules x 50 units = 4001 files
+MODULES=10 UNITS=10 bash probes/index-scan.sh   # quicker, smaller
+```
+
+**Verdict: the watcher is declined.** On a 4001-file synthetic Godot project,
+release build:
+
+| | elapsed |
+|---|---|
+| cold, nothing indexed | **2.50s**, once |
+| warm, not one byte changed | **0.24s** |
+| warm, one script edited | **0.24s** |
+
+About 60µs per file, so even a 40k-file project lands near 2.4s. Each command
+spawns `claude` workers that run for seconds to minutes, which puts the refresh
+under one percent of the command it hangs off. A watcher would need a thread,
+debouncing, tolerance for editors that write via temp-file-and-rename, and a
+reconciling scan anyway because it can drop events under load — a second
+mechanism bought with a measured sub-one-percent saving.
+
+The number is what makes this a decision rather than a deferral. Re-run the
+probe if a project ever makes the refresh visible.

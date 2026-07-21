@@ -1,6 +1,6 @@
 # 11: Index and Bootstrap
 
-> **Status:** v0.3, 2026-07-21. The **code index and Godot asset extraction are built and wired**: `files`, `symbols`, `symbols_fts`, `refs`, `assets` and `scene_nodes` are all populated by `studio-index`, `studiod index` builds them, `studiod studio` keeps them fresh, and the `symbol_lookup` MCP tool serves slices out of them. **Not built:** the `notify` watcher, the C++ extractor, and Unity and UE5 asset extraction — the latter two are unprobed engines ([13](13-risks.md) R11), so their sections below are specification, not description.
+> **Status:** v0.4, 2026-07-21. The **code index and Godot asset extraction are built and wired**: `files`, `symbols`, `symbols_fts`, `refs`, `assets` and `scene_nodes` are all populated by `studio-index`, `studiod index` builds them, `studiod studio` keeps them fresh around every command, and the `symbol_lookup` MCP tool serves slices out of them. **The `notify` watcher is measured and declined**, not deferred — see *Incremental freshness*. **Not built:** the C++ extractor, and Unity and UE5 asset extraction, both unprobed engines ([13](13-risks.md) R11), so those sections below are specification, not description.
 > **This document is the single source of truth for the index SQLite schema.** It is a **distinct database** from the runtime **state store** ([03](03-state-store.md)), different file (`studio-index.db`), different lifecycle, never conflated. The context engine ([02](02-context-engine.md)) reads the index to build symbol slices; the standards layer ([10](10-standards-and-trust.md)) reads diffs and refs from it.
 
 ## What bootstrap does
@@ -108,9 +108,16 @@ Beyond code, the index maps engine assets into `assets`/`scene_nodes`:
 
 **Built today:** refresh is a **scan** that walks the project, skipping VCS, editor and build directories — and `.studio/` itself, which the first real run caught the index feeding its own database into. Every file is hashed, and the hash gate below already applies: a second scan with no edits reparses nothing. Files that vanished between scans are dropped from the index.
 
-The scan runs from two places. `studiod index [root]` does it on demand, and **`studiod studio` bootstraps the index before it accepts a single command, then rescans after each one completes**. That second hook is what keeps the index honest in a live studio: workers write files, so an index built only at startup would answer the next task from a stale picture of code the studio itself changed. The hash gate is what makes rescanning after every command affordable — a command that touched nothing reparses nothing and stays silent.
+The scan runs from two places. `studiod index [root]` does it on demand, and **`studiod studio` bootstraps the index at startup, then rescans both before and after every command**. Both hooks are load-bearing and they catch different writers:
 
-**Not built:** the watcher that makes this incremental without a scan. A rescan is O(files hashed), not O(files parsed), which is cheap enough for a game project but is still work proportional to repository size rather than to the edit.
+- **After** a command, because workers write files. An index refreshed only at startup would answer the next task from a picture of code the studio itself has already changed.
+- **Before** a command, because *humans* write files. The studio spends most of its life idle, and an edit made in an editor during that idle window would otherwise not reach the index until after the command that needed it had already finished. Refreshing only afterwards closed the worker-staleness window and left the human one open.
+
+The hash gate makes running both affordable, and a refresh that moved nothing emits nothing, so the doubled call does not double the event stream.
+
+**The `notify` watcher below is deliberately not built.** The argument for it was that a scan is O(files hashed) rather than O(edit), so it should not scale. Measured on a synthetic 4001-file Godot project (release build): a cold index costs **2.50s once**, and every subsequent refresh costs **0.24s** whether one file changed or none — roughly 60µs per file, so even a 40k-file project lands near 2.4s. Each command spawns `claude` workers that run for seconds to minutes, so the refresh is under one percent of the command it hangs off.
+
+A watcher would not remove that cost so much as move it: `notify` needs a thread, debouncing, and tolerance for editors that write via temp-file-and-rename (which arrives as delete/create pairs), and because it can drop events under load a periodic reconciling scan has to stay anyway. It is a second mechanism layered on the one that already works, bought with a measured sub-one-percent saving. The number is what makes this a decision rather than a deferral; if a project ever makes the refresh visible, it is written down here at what scale to revisit.
 
 The index is kept live with the **`notify`** filesystem watcher, gated on content hashes:
 
