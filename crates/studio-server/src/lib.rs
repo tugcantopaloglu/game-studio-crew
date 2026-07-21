@@ -5,6 +5,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::sync::Arc;
 use studio_events::{plan_resume, Coalescer, Envelope, ResumePlan};
 use studio_store::Store;
@@ -36,6 +37,8 @@ pub struct WorkflowRequest {
     pub brief: String,
     #[serde(default)]
     pub project: Option<String>,
+    #[serde(default)]
+    pub ask_above: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -43,6 +46,8 @@ pub struct BuildRequest {
     pub prompt: String,
     #[serde(default)]
     pub project: Option<String>,
+    #[serde(default)]
+    pub ask_above: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,17 +58,41 @@ pub enum StudioCommand {
     Build(BuildRequest),
 }
 
+pub type Approvals = Arc<std::sync::Mutex<HashMap<String, std::sync::mpsc::Sender<bool>>>>;
+
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<Store>,
     pub live: broadcast::Sender<Envelope>,
     pub commands: Option<std::sync::mpsc::Sender<StudioCommand>>,
+    pub approvals: Approvals,
 }
 
 impl AppState {
     pub fn new(store: Arc<Store>) -> Self {
         let (live, _) = broadcast::channel(1024);
-        Self { store, live, commands: None }
+        Self {
+            store,
+            live,
+            commands: None,
+            approvals: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn await_approval(&self, id: &str) -> std::sync::mpsc::Receiver<bool> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Ok(mut pending) = self.approvals.lock() {
+            pending.insert(id.to_string(), tx);
+        }
+        rx
+    }
+
+    pub fn resolve_approval(&self, id: &str, approve: bool) -> bool {
+        let sender = self.approvals.lock().ok().and_then(|mut p| p.remove(id));
+        match sender {
+            Some(tx) => tx.send(approve).is_ok(),
+            None => false,
+        }
     }
 
     pub fn with_commands(mut self, tx: std::sync::mpsc::Sender<StudioCommand>) -> Self {
@@ -131,6 +160,7 @@ pub fn router(state: AppState) -> Router {
         .route("/meeting", post(convene_meeting))
         .route("/roles", get(roles))
         .route("/projects", get(projects).post(create_project))
+        .route("/approve", post(approve))
         .route("/workflows", get(workflows))
         .route("/workflow", post(start_workflow))
         .route("/build", post(start_build))
@@ -423,6 +453,27 @@ fn now_rfc3339() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApprovalReply {
+    pub approval_id: String,
+    pub approve: bool,
+}
+
+async fn approve(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<ApprovalReply>,
+) -> Response {
+    if state.resolve_approval(&req.approval_id, req.approve) {
+        (StatusCode::ACCEPTED, "recorded".to_string()).into_response()
+    } else {
+        (
+            StatusCode::CONFLICT,
+            "nothing is waiting on that approval; it may have already been answered".to_string(),
+        )
+            .into_response()
+    }
+}
+
 async fn floor() -> impl IntoResponse {
     axum::Json(studio_agents::layout::studio_floor())
 }
@@ -654,5 +705,60 @@ mod tests {
     fn the_served_floor_matches_the_registry() {
         let floor = studio_agents::layout::studio_floor();
         assert_eq!(floor.desks.len(), studio_agents::REGISTRY.len());
+    }
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn state() -> AppState {
+        let dir = std::env::temp_dir().join(format!(
+            "studio-approve-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        AppState::new(Arc::new(Store::open(dir.join("s.db")).unwrap()))
+    }
+
+    #[test]
+    fn a_waiting_run_receives_the_answer_the_floor_sends() {
+        let s = state();
+        let rx = s.await_approval("ask_1");
+        assert!(s.resolve_approval("ask_1", true));
+        assert_eq!(rx.recv().unwrap(), true);
+    }
+
+    #[test]
+    fn a_refusal_reaches_the_waiting_run_too() {
+        let s = state();
+        let rx = s.await_approval("ask_2");
+        assert!(s.resolve_approval("ask_2", false));
+        assert_eq!(rx.recv().unwrap(), false);
+    }
+
+    #[test]
+    fn answering_an_unknown_or_repeated_approval_is_reported_not_silently_dropped() {
+        let s = state();
+        assert!(!s.resolve_approval("never_asked", true));
+
+        let _rx = s.await_approval("ask_3");
+        assert!(s.resolve_approval("ask_3", true));
+        assert!(
+            !s.resolve_approval("ask_3", true),
+            "the second answer must not claim success"
+        );
+    }
+
+    #[test]
+    fn a_run_whose_floor_closed_sees_the_channel_break_rather_than_hanging() {
+        let s = state();
+        let rx = s.await_approval("ask_4");
+        s.approvals.lock().unwrap().clear();
+        assert!(rx.recv().is_err());
     }
 }

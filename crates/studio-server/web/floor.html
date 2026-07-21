@@ -43,6 +43,16 @@
   #np-git-wrap { display: flex; align-items: center; gap: 5px; color: var(--dim);
     font-size: 11px; padding: 0 4px; }
   #project.none { border-color: var(--error); }
+  #ask { padding: 11px 13px; border-top: 1px solid var(--line);
+    background: #1a1408; border-left: 3px solid #d9c24a; }
+  #ask h2 { margin: 0 0 5px; font-size: 12px; letter-spacing: .06em;
+    text-transform: uppercase; color: #d9c24a; }
+  #ask p { margin: 0 0 9px; font-size: 12px; color: var(--text); }
+  #ask .row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  #ask button { font: inherit; cursor: pointer; background: #1d2431; color: var(--text);
+    border: 1px solid var(--line); border-radius: 4px; padding: 5px 7px; }
+  #ask button:hover { background: #26303f; }
+  #ask-no { border-color: #6b3230; }
   #compose textarea { resize: vertical; min-height: 46px; }
   #compose button { cursor: pointer; background: #1d2431; }
   #compose button:hover { background: #26303f; }
@@ -126,12 +136,27 @@
       <button id="np-create">create</button>
     </div>
     <div class="row">
+      <select id="spend" title="what happens when a run gets expensive">
+        <option value="400000">ask me every 400k tokens</option>
+        <option value="1000000">ask me every 1M tokens</option>
+        <option value="">run with any tokens</option>
+      </select>
+    </div>
+    <div class="row">
       <select id="who"></select>
       <button id="mode-btn" title="switch between task and meeting">task</button>
     </div>
     <textarea id="brief" placeholder="what should they do?"></textarea>
     <button id="send">send to the floor</button>
     <div id="sent"></div>
+  </div>
+  <div id="ask" hidden>
+    <h2>keep going?</h2>
+    <p id="ask-body"></p>
+    <div class="row">
+      <button id="ask-yes">continue</button>
+      <button id="ask-no">stop the run</button>
+    </div>
   </div>
   <div id="help">drag pan &middot; wheel zoom &middot; click an agent to follow &middot; <kbd>O</kbd> orbit &middot; <kbd>Esc</kbd> release</div>
 </div>
@@ -572,6 +597,9 @@ function apply(ev, replaying) {
     case "index_updated":
       stats.symbols = Math.max(0, stats.symbols + (ev.data.symbols_delta || 0));
       break;
+    case "budget_approval_needed":
+      if (!replaying) showApproval(ev.data);
+      break;
     case "token_usage": {
       const d = ev.data;
       stats.tokens += (d.input || 0) + (d.output || 0);
@@ -712,6 +740,40 @@ fetch("/roles").then((r) => r.json()).then((rows) => {
     .join("");
 });
 
+const askBox = document.getElementById("ask");
+const askBody = document.getElementById("ask-body");
+let pendingApproval = null;
+
+function showApproval(d) {
+  pendingApproval = d.approval_id;
+  const tokens = Number(d.spent || 0).toLocaleString();
+  const usd = Number(d.usd || 0).toFixed(2);
+  askBody.textContent =
+    `This run has billed ${tokens} tokens (about $${usd}) and is waiting at node ` +
+    `${d.node}. Continue, and I will ask again after the next ${Number(d.threshold || 0).toLocaleString()}.`;
+  askBox.hidden = false;
+}
+
+async function answerApproval(approve) {
+  if (!pendingApproval) return;
+  const id = pendingApproval;
+  pendingApproval = null;
+  askBox.hidden = true;
+  try {
+    await fetch("/approve", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ approval_id: id, approve }),
+    });
+    sent.textContent = approve ? "carrying on" : "stopping after this node";
+  } catch (err) {
+    sent.textContent = "could not reach the daemon";
+  }
+}
+
+document.getElementById("ask-yes").onclick = () => answerApproval(true);
+document.getElementById("ask-no").onclick = () => answerApproval(false);
+
 const projectSel = document.getElementById("project");
 const projectForm = document.getElementById("project-form");
 
@@ -788,7 +850,10 @@ document.getElementById("send").onclick = async () => {
 
   const url = composeMode === "build" ? "/build"
     : composeMode === "task" ? "/task" : "/meeting";
-  const body = composeMode === "build" ? { prompt: brief, project }
+  const askRaw = document.getElementById("spend").value;
+  const ask_above = askRaw ? Number(askRaw) : null;
+
+  const body = composeMode === "build" ? { prompt: brief, project, ask_above }
     : composeMode === "task" ? { role: picked[0], brief, project }
     : { kind: "arbitration", participants: picked, topic: brief };
 

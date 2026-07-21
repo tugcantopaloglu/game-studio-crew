@@ -100,7 +100,7 @@ fn run_build(em: &Emitter, req: BuildRequest, seq: &mut usize) -> Result<()> {
         wf.gates.push(gate);
     }
 
-    crate::wf::run_planned(em, &wf, &req.prompt, em.project.clone(), seq, Some(plan))?;
+    crate::wf::run_planned(em, &wf, &req.prompt, em.project.clone(), seq, Some(plan), req.ask_above)?;
     Ok(())
 }
 
@@ -150,7 +150,7 @@ fn run_flow(em: &Emitter, req: WorkflowRequest, seq: &mut usize) -> Result<()> {
         .with_context(|| format!("unknown workflow {}", req.workflow))?;
 
     println!("  workflow {} : {}", wf.id, first_line(&req.brief));
-    crate::wf::run_workflow(em, &wf, &req.brief, em.project.clone(), seq)?;
+    crate::wf::run_workflow(em, &wf, &req.brief, em.project.clone(), seq, req.ask_above)?;
     Ok(())
 }
 

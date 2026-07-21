@@ -101,7 +101,7 @@ pub fn run_worker_capturing(
     index: usize,
     json_schema: Option<String>,
 ) -> Result<String> {
-    run_worker_inner(em, role, brief, index, json_schema, false).map(|(text, _)| text)
+    run_worker_inner(em, role, brief, index, json_schema, false).map(|m| m.text)
 }
 
 pub fn run_worker_metered(
@@ -110,8 +110,14 @@ pub fn run_worker_metered(
     brief: &str,
     index: usize,
     acting: bool,
-) -> Result<(String, u64)> {
+) -> Result<Metered> {
     run_worker_inner(em, role, brief, index, None, acting)
+}
+
+pub struct Metered {
+    pub text: String,
+    pub billed_tokens: u64,
+    pub cost_usd: f64,
 }
 
 pub fn charter_for(role: &Role, acting: bool) -> CharterSource {
@@ -149,7 +155,7 @@ fn run_worker_inner(
     index: usize,
     json_schema: Option<String>,
     acting: bool,
-) -> Result<(String, u64)> {
+) -> Result<Metered> {
     let actor = format!("{}#{}", role.id, index);
     let task_id = crate::id("task");
 
@@ -327,5 +333,5 @@ fn run_worker_inner(
         cache_read: usage.cache_read,
         cache_creation: usage.cache_creation,
     });
-    Ok((text, billed))
+    Ok(Metered { text, billed_tokens: billed, cost_usd: report.state.cost_usd })
 }

@@ -24,6 +24,9 @@ pub struct Host<'a> {
     pub plan: Option<studio_workflow::Plan>,
     pub last_verify: Option<studio_verify::VerifyResult>,
     pub warmed: BTreeSet<String>,
+    pub ask_above: Option<u64>,
+    pub next_ask_at: u64,
+    pub spent_usd: f64,
 }
 
 impl<'a> Host<'a> {
@@ -49,8 +52,56 @@ fn acts(r: &studio_agents::Role) -> bool {
     !r.tools().is_empty()
 }
 
+impl<'a> Host<'a> {
+    fn spend_approved(&mut self, node: &Node) -> Result<(), String> {
+        let step = match self.ask_above {
+            Some(step) if step > 0 => step,
+            _ => return Ok(()),
+        };
+
+        let spent = self.budget.task.spent;
+        if spent < self.next_ask_at {
+            return Ok(());
+        }
+
+        let approval_id = crate::id("ask");
+        let usd = self.spent_usd;
+        println!(
+            "  spend check: {spent} billed tokens (~${usd:.2}); waiting for you on the floor"
+        );
+
+        let rx = self.em.state.await_approval(&approval_id);
+        let _ = self.em.emit(
+            "daemon",
+            EventType::BudgetApprovalNeeded,
+            Scene::daemon(),
+            serde_json::json!({
+                "approval_id": approval_id,
+                "spent": spent,
+                "threshold": self.next_ask_at,
+                "node": node.id,
+                "usd": usd,
+            }),
+        );
+
+        match rx.recv() {
+            Ok(true) => {
+                self.next_ask_at = spent + step;
+                println!("  spend approved; next check at {} tokens", self.next_ask_at);
+                Ok(())
+            }
+            Ok(false) => Err(format!("you stopped the run at {spent} billed tokens")),
+            Err(_) => Err("the floor went away while the run waited for approval".into()),
+        }
+    }
+}
+
 impl<'a> WorkflowHost for Host<'a> {
     fn admit(&mut self, node: &Node) -> Admission {
+        if let Err(reason) = self.spend_approved(node) {
+            return Admission::Refuse { reason };
+        }
+
         let prefix_tokens = match role(&node.role) {
             Some(r) => crate::m4::prefix_tokens_for(r, false),
             None => 8_000,
@@ -114,8 +165,9 @@ impl<'a> WorkflowHost for Host<'a> {
                 };
                 let full = format!("{brief}{upstream}{}", self.acting_hint(r));
                 return match crate::m4::run_worker_metered(self.em, r, &full, self.seq, acts(r)) {
-                    Ok((_, tokens)) => {
-                        self.budget.record(tokens);
+                    Ok(m) => {
+                        self.budget.record(m.billed_tokens);
+                        self.spent_usd += m.cost_usd;
                         self.warmed.insert(node.role.clone());
                         NodeOutcome::Completed { capsule: format!("cap_{}", node.id) }
                     }
@@ -138,8 +190,9 @@ impl<'a> WorkflowHost for Host<'a> {
         );
 
         match crate::m4::run_worker_metered(self.em, r, &brief, self.seq, acts(r)) {
-            Ok((_, tokens)) => {
-                self.budget.record(tokens);
+            Ok(m) => {
+                self.budget.record(m.billed_tokens);
+                self.spent_usd += m.cost_usd;
                 self.warmed.insert(node.role.clone());
                 NodeOutcome::Completed { capsule: format!("cap_{}", node.id) }
             }
@@ -261,7 +314,10 @@ impl<'a> WorkflowHost for Host<'a> {
         );
 
         match crate::m4::run_worker_metered(self.em, r, &brief, self.seq, true) {
-            Ok((_, tokens)) => self.budget.record(tokens),
+            Ok(m) => {
+                self.budget.record(m.billed_tokens);
+                self.spent_usd += m.cost_usd;
+            }
             Err(e) => {
                 return GateOutcome::Inconclusive {
                     reason: format!("the repair worker could not run: {e}"),
@@ -288,8 +344,9 @@ pub fn run_workflow(
     brief: &str,
     project: Option<PathBuf>,
     seq: &mut usize,
+    ask_above: Option<u64>,
 ) -> Result<RunOutcome> {
-    run_planned(em, workflow, brief, project, seq, None)
+    run_planned(em, workflow, brief, project, seq, None, ask_above)
 }
 
 pub fn run_planned(
@@ -299,6 +356,7 @@ pub fn run_planned(
     project: Option<PathBuf>,
     seq: &mut usize,
     plan: Option<studio_workflow::Plan>,
+    ask_above: Option<u64>,
 ) -> Result<RunOutcome> {
     em.emit(
         "daemon",
@@ -331,7 +389,7 @@ pub fn run_planned(
 
     let mut host = Host {
         em,
-        budget: Enforcer::new(workflow.total_budget(), workflow.total_budget() * 2),
+        budget: Enforcer::new(u64::MAX, u64::MAX),
         driver,
         paths,
         brief: brief.to_string(),
@@ -340,6 +398,9 @@ pub fn run_planned(
         plan: plan.clone(),
         last_verify: None,
         warmed: BTreeSet::new(),
+        ask_above,
+        next_ask_at: ask_above.unwrap_or(u64::MAX),
+        spent_usd: 0.0,
     };
 
     let report = execute(workflow, &mut host, &BTreeSet::new())
