@@ -245,8 +245,9 @@ impl Index {
         };
 
         let calls = self.query_names(
-            "SELECT DISTINCT to_name FROM refs WHERE from_symbol = ?1 ORDER BY to_name",
-            params![fqname],
+            "SELECT DISTINCT to_name FROM refs
+             WHERE from_symbol = ?1 AND path = ?2 ORDER BY to_name",
+            params![fqname, path],
         )?;
 
         let leaf = fqname.rsplit('.').next().unwrap_or(fqname);
@@ -438,6 +439,23 @@ mod tests {
     }
 
     #[test]
+    fn a_cpp_declaration_does_not_borrow_the_calls_of_its_definition() {
+        let mut index = Index::open_in_memory().unwrap();
+        index
+            .index_file("Pawn.h", b"class APawn {\n  void Tick(float d);\n};\n", "t0")
+            .unwrap();
+        index
+            .index_file("Pawn.cpp", b"void APawn::Tick(float d) {\n  Move();\n}\n", "t0")
+            .unwrap();
+
+        let header = index.slice("APawn.Tick", "Pawn.h").unwrap().unwrap();
+        let body = index.slice("APawn.Tick", "Pawn.cpp").unwrap().unwrap();
+
+        assert!(header.calls.is_empty());
+        assert_eq!(body.calls, vec!["Move"]);
+    }
+
+    #[test]
     fn a_slice_for_an_unknown_symbol_is_none_rather_than_an_error() {
         let index = seeded();
         assert!(index.slice("Nobody.method", "scripts/player.gd").unwrap().is_none());
@@ -467,13 +485,15 @@ mod tests {
     }
 
     #[test]
-    fn a_cpp_file_is_tracked_as_a_file_even_without_an_extractor() {
+    fn a_cpp_file_is_indexed_as_cpp_and_yields_symbols() {
         let mut index = Index::open_in_memory().unwrap();
-        index.index_file("Source/Pawn.cpp", b"void f() {}", "t0").unwrap();
+        index
+            .index_file("Source/Pawn.cpp", b"void APawn::Tick(float d) {}", "t0")
+            .unwrap();
 
         let row = index.file("Source/Pawn.cpp").unwrap().unwrap();
         assert_eq!(row.lang.as_deref(), Some("cpp"));
-        assert_eq!(index.count("symbols").unwrap(), 0);
+        assert_eq!(index.lookup("APawn.Tick", 5).unwrap().len(), 1);
     }
 
     #[test]

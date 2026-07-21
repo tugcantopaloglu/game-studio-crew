@@ -11,6 +11,7 @@ rusqlite.workspace = true
 thiserror.workspace = true
 tree-sitter = "0.26"
 tree-sitter-c-sharp = "0.23"
+tree-sitter-cpp = "0.23"
 tree-sitter-gdscript = "6"
 
 [dev-dependencies]

@@ -24,7 +24,7 @@ impl Lang {
     }
 
     pub fn has_extractor(self) -> bool {
-        matches!(self, Lang::GdScript | Lang::CSharp)
+        matches!(self, Lang::GdScript | Lang::CSharp | Lang::Cpp)
     }
 }
 
@@ -66,10 +66,10 @@ mod tests {
     }
 
     #[test]
-    fn cpp_is_a_language_without_an_extractor_yet() {
+    fn every_recognised_language_has_an_extractor() {
         assert!(Lang::GdScript.has_extractor());
         assert!(Lang::CSharp.has_extractor());
-        assert!(!Lang::Cpp.has_extractor());
+        assert!(Lang::Cpp.has_extractor());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # 11: Index and Bootstrap
 
-> **Status:** v0.4, 2026-07-21. The **code index and Godot asset extraction are built and wired**: `files`, `symbols`, `symbols_fts`, `refs`, `assets` and `scene_nodes` are all populated by `studio-index`, `studiod index` builds them, `studiod studio` keeps them fresh around every command, and the `symbol_lookup` MCP tool serves slices out of them. **The `notify` watcher is measured and declined**, not deferred — see *Incremental freshness*. **Not built:** the C++ extractor, and Unity and UE5 asset extraction, both unprobed engines ([13](13-risks.md) R11), so those sections below are specification, not description.
+> **Status:** v0.5, 2026-07-21. The **code index and Godot asset extraction are built and wired**: `files`, `symbols`, `symbols_fts`, `refs`, `assets` and `scene_nodes` are all populated by `studio-index` from GDScript, C# and C++, `studiod index` builds them, `studiod studio` keeps them fresh around every command, and the `symbol_lookup` MCP tool serves slices out of them. **The `notify` watcher is measured and declined**, not deferred — see *Incremental freshness*. **Not built:** Unity and UE5 *asset* extraction, both unprobed engines ([13](13-risks.md) R11), so those sections below are specification, not description.
 > **This document is the single source of truth for the index SQLite schema.** It is a **distinct database** from the runtime **state store** ([03](03-state-store.md)), different file (`studio-index.db`), different lifecycle, never conflated. The context engine ([02](02-context-engine.md)) reads the index to build symbol slices; the standards layer ([10](10-standards-and-trust.md)) reads diffs and refs from it.
 
 ## What bootstrap does
@@ -92,7 +92,17 @@ Three details of the schema above changed when it met the implementation, and th
 
 ## Tree-sitter extractors per language
 
-Symbols and refs come from **tree-sitter** parsers, one grammar per language: C# (Unity), C++ (UE5 gameplay), GDScript (Godot), plus config/markup as needed. **GDScript and C# are built; C++ is not** — a `.cpp` or `.h` file is tracked in `files` so its hash and blast radius are known, but it yields no symbols yet. Node type names for both built grammars were read off real parse trees before the extractors were written, not guessed from grammar documentation. Extractors walk the parse tree to populate `symbols` and `refs`. **Refs are syntactic, not semantic**: tree-sitter sees names, not resolved types, so `refs.to_name` may be unresolved or ambiguous ([13](13-risks.md)); consumers treat refs as a strong hint, not a call graph, and the trust model's cross-file tiering ([10](10-standards-and-trust.md)) accounts for false edges.
+Symbols and refs come from **tree-sitter** parsers, one grammar per language: C# (Unity), C++ (UE5 gameplay), GDScript (Godot), plus config/markup as needed. **All three are built.** Node type names for every grammar were read off real parse trees before the extractors were written, not guessed from grammar documentation.
+
+### C++ needs a preprocessing pass, and finding that out was the point
+
+Vanilla `tree-sitter-cpp` **cannot parse Unreal gameplay code**. Measured one construct at a time, plain C++ parses clean and then every UE reflection construct breaks it individually: `UCLASS()`, `GENERATED_BODY()`, `UPROPERTY()`, and the `GAME_API`-style export macro each produce a parse error on their own. Together they turn a class body into an `ERROR` node, and its members into stray labelled statements.
+
+This matters more than it first appears. UE5 gameplay code is the *only* reason the C++ extractor exists, so an extractor built on the grammar's documented behaviour would have parsed the test suite's plain C++, passed, and produced silent garbage against every real Unreal file. That is R11's failure mode reproduced inside a component that has nothing to do with running an engine.
+
+The fix is a preprocessing pass that **blanks reflection macros to spaces before parsing**: each macro and its balanced parenthesis group is overwritten with spaces, as is any `[A-Z0-9_]+_API` export macro. Newlines are preserved, so **the blanked source has the same length and the same line count as the original** and every reported line number still points at the real file. After blanking, the same fixture parses without error.
+
+Two consequences worth naming. A C++ symbol appears **twice** — once for the declaration in the header, once for the definition in the `.cpp` — which the `(fqname, path)` key accommodates without collision, and which is the honest answer for a language that separates the two. And `calls` are filtered by path, so a header declaration does not inherit the call list of the body that implements it. Extractors walk the parse tree to populate `symbols` and `refs`. **Refs are syntactic, not semantic**: tree-sitter sees names, not resolved types, so `refs.to_name` may be unresolved or ambiguous ([13](13-risks.md)); consumers treat refs as a strong hint, not a call graph, and the trust model's cross-file tiering ([10](10-standards-and-trust.md)) accounts for false edges.
 
 ## Asset extraction per engine
 

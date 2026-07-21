@@ -1,3 +1,4 @@
+mod cpp;
 mod csharp;
 mod gdscript;
 
@@ -31,7 +32,7 @@ pub fn extract(lang: Lang, path: &str, src: &str) -> Extraction {
     match lang {
         Lang::GdScript => gdscript::extract(path, src),
         Lang::CSharp => csharp::extract(src),
-        Lang::Cpp => Extraction::default(),
+        Lang::Cpp => cpp::extract(src),
     }
 }
 
@@ -52,10 +53,10 @@ pub(crate) fn file_stem(path: &str) -> String {
 }
 
 pub(crate) fn qualify(scope: &str, name: &str) -> String {
-    if scope.is_empty() {
-        name.to_string()
-    } else {
-        format!("{scope}.{name}")
+    match (scope.is_empty(), name.is_empty()) {
+        (true, _) => name.to_string(),
+        (_, true) => scope.to_string(),
+        _ => format!("{scope}.{name}"),
     }
 }
 
@@ -113,9 +114,11 @@ mod tests {
     }
 
     #[test]
-    fn qualify_does_not_leave_a_leading_dot_at_file_scope() {
+    fn qualify_does_not_leave_a_dangling_dot_on_either_side() {
         assert_eq!(qualify("", "run"), "run");
         assert_eq!(qualify("Player", "run"), "Player.run");
+        assert_eq!(qualify("Player", ""), "Player");
+        assert_eq!(qualify("", ""), "");
     }
 
     #[test]
