@@ -1,10 +1,12 @@
 mod extract;
 mod lang;
+mod scene;
 mod schema;
 mod walk;
 
 pub use extract::{Extraction, Ref, Symbol};
 pub use lang::{is_binary_path, Lang};
+pub use scene::{Scene, SceneNode};
 pub use schema::SCHEMA_VERSION;
 pub use walk::{is_ignored_dir, ScanReport};
 
@@ -47,6 +49,13 @@ pub struct SymbolRecord {
     pub doc: Option<String>,
     pub line_start: u32,
     pub line_end: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneUse {
+    pub asset: String,
+    pub node_path: String,
+    pub node_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -105,6 +114,33 @@ impl Index {
         tx.execute("DELETE FROM symbols WHERE path = ?1", params![path])?;
         tx.execute("DELETE FROM symbols_fts WHERE path = ?1", params![path])?;
         tx.execute("DELETE FROM refs WHERE path = ?1", params![path])?;
+        tx.execute("DELETE FROM scene_nodes WHERE asset = ?1", params![path])?;
+        tx.execute("DELETE FROM assets WHERE path = ?1", params![path])?;
+
+        if !binary && lang::is_godot_asset_path(path) {
+            if let Some(parsed) = std::str::from_utf8(bytes).ok().and_then(scene::parse) {
+                tx.execute(
+                    "INSERT INTO assets (path, asset_type, guid, blake3) VALUES (?1, ?2, ?3, ?4)",
+                    params![path, parsed.asset_type, parsed.uid, hash],
+                )?;
+
+                let mut ids: Vec<(String, i64)> = Vec::new();
+                for node in &parsed.nodes {
+                    let parent = node
+                        .parent_path
+                        .as_deref()
+                        .and_then(|wanted| ids.iter().find(|(seen, _)| seen == wanted))
+                        .map(|(_, id)| *id);
+
+                    tx.execute(
+                        "INSERT INTO scene_nodes (asset, node_path, node_type, script, parent)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![path, node.node_path, node.node_type, node.script, parent],
+                    )?;
+                    ids.push((node.node_path.clone(), tx.last_insert_rowid()));
+                }
+            }
+        }
 
         if let Some(language) = language.filter(|l| l.has_extractor()) {
             if let Ok(source) = std::str::from_utf8(bytes) {
@@ -156,6 +192,8 @@ impl Index {
         tx.execute("DELETE FROM symbols WHERE path = ?1", params![path])?;
         tx.execute("DELETE FROM symbols_fts WHERE path = ?1", params![path])?;
         tx.execute("DELETE FROM refs WHERE path = ?1", params![path])?;
+        tx.execute("DELETE FROM scene_nodes WHERE asset = ?1", params![path])?;
+        tx.execute("DELETE FROM assets WHERE path = ?1", params![path])?;
         tx.execute("DELETE FROM files WHERE path = ?1", params![path])?;
         tx.commit()?;
         Ok(())
@@ -220,6 +258,36 @@ impl Index {
         Ok(Some(Slice { symbol, calls, called_by }))
     }
 
+    pub fn scenes_using(&self, script_path: &str) -> Result<Vec<SceneUse>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT asset, node_path, node_type FROM scene_nodes
+             WHERE script = ?1 ORDER BY asset, node_path",
+        )?;
+        let rows = stmt.query_map(params![script_path], |row| {
+            Ok(SceneUse {
+                asset: row.get(0)?,
+                node_path: row.get(1)?,
+                node_type: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn scene_tree(&self, asset: &str) -> Result<Vec<SceneUse>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT asset, node_path, node_type FROM scene_nodes
+             WHERE asset = ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![asset], |row| {
+            Ok(SceneUse {
+                asset: row.get(0)?,
+                node_path: row.get(1)?,
+                node_type: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn file(&self, path: &str) -> Result<Option<FileRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT path, lang, blake3, size, mtime, is_binary FROM files WHERE path = ?1",
@@ -243,6 +311,8 @@ impl Index {
             "files" => "SELECT COUNT(*) FROM files",
             "symbols" => "SELECT COUNT(*) FROM symbols",
             "refs" => "SELECT COUNT(*) FROM refs",
+            "assets" => "SELECT COUNT(*) FROM assets",
+            "scene_nodes" => "SELECT COUNT(*) FROM scene_nodes",
             _ => return Ok(0),
         };
         let n: i64 = self.conn.query_row(sql, [], |r| r.get(0))?;
@@ -454,6 +524,105 @@ mod tests {
             .index_file("scripts/player.gd", b"class_name Player\n\nfunc heal():\n\tpass\n", "t1")
             .unwrap();
         assert!(index.lookup("Player.take_damage", 5).unwrap().is_empty());
+    }
+
+    const MAIN_SCENE: &str = r#"[gd_scene load_steps=2 format=3 uid="uid://abc123"]
+
+[ext_resource type="Script" path="res://scripts/player.gd" id="1_p"]
+
+[node name="Main" type="Node2D"]
+
+[node name="Player" type="CharacterBody2D" parent="."]
+script = ExtResource("1_p")
+"#;
+
+    #[test]
+    fn a_scene_lands_in_assets_with_its_node_tree() {
+        let mut index = Index::open_in_memory().unwrap();
+        index.index_file("scenes/main.tscn", MAIN_SCENE.as_bytes(), "t0").unwrap();
+
+        assert_eq!(index.count("assets").unwrap(), 1);
+        let tree = index.scene_tree("scenes/main.tscn").unwrap();
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].node_path, ".");
+        assert_eq!(tree[1].node_path, "Player");
+        assert_eq!(tree[1].node_type.as_deref(), Some("CharacterBody2D"));
+    }
+
+    #[test]
+    fn a_script_can_be_traced_back_to_the_scene_node_that_mounts_it() {
+        let mut index = Index::open_in_memory().unwrap();
+        index.index_file("scenes/main.tscn", MAIN_SCENE.as_bytes(), "t0").unwrap();
+
+        let uses = index.scenes_using("scripts/player.gd").unwrap();
+        assert_eq!(uses.len(), 1);
+        assert_eq!(uses[0].asset, "scenes/main.tscn");
+        assert_eq!(uses[0].node_path, "Player");
+        assert_eq!(uses[0].node_type.as_deref(), Some("CharacterBody2D"));
+    }
+
+    #[test]
+    fn an_unmounted_script_is_used_by_no_scene() {
+        let mut index = Index::open_in_memory().unwrap();
+        index.index_file("scenes/main.tscn", MAIN_SCENE.as_bytes(), "t0").unwrap();
+        index.index_file("scripts/orphan.gd", b"func f():\n\tpass\n", "t0").unwrap();
+
+        assert!(index.scenes_using("scripts/orphan.gd").unwrap().is_empty());
+    }
+
+    #[test]
+    fn reindexing_a_scene_does_not_duplicate_its_nodes() {
+        let mut index = Index::open_in_memory().unwrap();
+        index.index_file("scenes/main.tscn", MAIN_SCENE.as_bytes(), "t0").unwrap();
+
+        let moved = MAIN_SCENE.replace("name=\"Player\"", "name=\"Hero\"");
+        index.index_file("scenes/main.tscn", moved.as_bytes(), "t1").unwrap();
+
+        assert_eq!(index.count("assets").unwrap(), 1);
+        assert_eq!(index.count("scene_nodes").unwrap(), 2);
+        assert_eq!(index.scenes_using("scripts/player.gd").unwrap()[0].node_path, "Hero");
+    }
+
+    #[test]
+    fn forgetting_a_scene_removes_its_asset_and_nodes() {
+        let mut index = Index::open_in_memory().unwrap();
+        index.index_file("scenes/main.tscn", MAIN_SCENE.as_bytes(), "t0").unwrap();
+        index.forget("scenes/main.tscn").unwrap();
+
+        assert_eq!(index.count("assets").unwrap(), 0);
+        assert_eq!(index.count("scene_nodes").unwrap(), 0);
+        assert!(index.scenes_using("scripts/player.gd").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_scene_child_points_at_its_parent_row() {
+        let mut index = Index::open_in_memory().unwrap();
+        index.index_file("scenes/main.tscn", MAIN_SCENE.as_bytes(), "t0").unwrap();
+
+        let parent: Option<i64> = index
+            .conn
+            .query_row(
+                "SELECT parent FROM scene_nodes WHERE node_path = 'Player'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let root: i64 = index
+            .conn
+            .query_row("SELECT id FROM scene_nodes WHERE node_path = '.'", [], |r| r.get(0))
+            .unwrap();
+
+        assert_eq!(parent, Some(root));
+    }
+
+    #[test]
+    fn project_godot_is_not_mistaken_for_a_scene() {
+        let mut index = Index::open_in_memory().unwrap();
+        index
+            .index_file("project.godot", b"[application]\nconfig/name=\"Snake\"\n", "t0")
+            .unwrap();
+
+        assert_eq!(index.count("assets").unwrap(), 0);
     }
 
     #[test]

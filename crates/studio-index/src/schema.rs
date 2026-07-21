@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -27,6 +27,9 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
     if current < 1 {
         conn.execute_batch(V1)?;
+    }
+    if current < 2 {
+        conn.execute_batch(V2)?;
     }
 
     conn.execute(
@@ -71,4 +74,24 @@ CREATE TABLE refs (
 CREATE INDEX refs_to ON refs(to_name);
 CREATE INDEX refs_from ON refs(from_symbol);
 CREATE INDEX refs_path ON refs(path);
+"#;
+
+const V2: &str = r#"
+CREATE TABLE assets (
+  path       TEXT PRIMARY KEY,
+  asset_type TEXT NOT NULL,
+  guid       TEXT,
+  blake3     TEXT NOT NULL
+);
+
+CREATE TABLE scene_nodes (
+  id         INTEGER PRIMARY KEY,
+  asset      TEXT NOT NULL,
+  node_path  TEXT NOT NULL,
+  node_type  TEXT,
+  script     TEXT,
+  parent     INTEGER REFERENCES scene_nodes(id)
+);
+CREATE INDEX scene_nodes_asset ON scene_nodes(asset);
+CREATE INDEX scene_nodes_script ON scene_nodes(script);
 "#;

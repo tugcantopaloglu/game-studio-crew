@@ -35,6 +35,10 @@ const BINARY_EXTENSIONS: &[&str] = &[
     "unitypackage", "aab", "apk",
 ];
 
+pub fn is_godot_asset_path(path: &str) -> bool {
+    matches!(extension(path).as_deref(), Some("tscn" | "tres" | "escn"))
+}
+
 pub fn is_binary_path(path: &str) -> bool {
     extension(path).is_some_and(|e| BINARY_EXTENSIONS.contains(&e.as_str()))
 }
@@ -76,6 +80,14 @@ mod tests {
         assert!(!is_binary_path("scenes/main.tscn"));
         assert!(!is_binary_path("scenes/theme.tres"));
         assert!(!is_binary_path("project.godot"));
+    }
+
+    #[test]
+    fn godot_text_assets_are_recognised_but_scripts_and_config_are_not() {
+        assert!(is_godot_asset_path("scenes/main.tscn"));
+        assert!(is_godot_asset_path("themes/dark.tres"));
+        assert!(!is_godot_asset_path("scripts/player.gd"));
+        assert!(!is_godot_asset_path("project.godot"));
     }
 
     #[test]

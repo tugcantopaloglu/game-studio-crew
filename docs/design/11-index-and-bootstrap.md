@@ -1,6 +1,6 @@
 # 11: Index and Bootstrap
 
-> **Status:** v0.2, 2026-07-21. The **code index is built and wired**: `files`, `symbols`, `symbols_fts` and `refs` are populated by `studio-index` from GDScript and C# sources, `studiod index` builds them, and the `symbol_lookup` MCP tool serves slices out of them. **Asset extraction is not built**: `assets` and `scene_nodes` remain design-only, as does the `notify` watcher, the `index_updated` event, the C++ extractor and the UE registry dump. Those sections below are specification, not description.
+> **Status:** v0.3, 2026-07-21. The **code index and Godot asset extraction are built and wired**: `files`, `symbols`, `symbols_fts`, `refs`, `assets` and `scene_nodes` are all populated by `studio-index`, `studiod index` builds them, `studiod studio` keeps them fresh, and the `symbol_lookup` MCP tool serves slices out of them. **Not built:** the `notify` watcher, the C++ extractor, and Unity and UE5 asset extraction — the latter two are unprobed engines ([13](13-risks.md) R11), so their sections below are specification, not description.
 > **This document is the single source of truth for the index SQLite schema.** It is a **distinct database** from the runtime **state store** ([03](03-state-store.md)), different file (`studio-index.db`), different lifecycle, never conflated. The context engine ([02](02-context-engine.md)) reads the index to build symbol slices; the standards layer ([10](10-standards-and-trust.md)) reads diffs and refs from it.
 
 ## What bootstrap does
@@ -72,9 +72,10 @@ CREATE TABLE assets (             -- engine assets, extracted per engine
 
 CREATE TABLE scene_nodes (        -- scene/prefab/map graph, extracted per engine
   id         INTEGER PRIMARY KEY,
-  asset      TEXT NOT NULL REFERENCES assets(path),
-  node_path  TEXT NOT NULL,       -- hierarchy path within the scene
+  asset      TEXT NOT NULL,
+  node_path  TEXT NOT NULL,       -- hierarchy path within the scene, root is "."
   node_type  TEXT,
+  script     TEXT,                -- project path of the script mounted on this node
   parent     INTEGER REFERENCES scene_nodes(id)
 );
 ```
@@ -98,7 +99,9 @@ Symbols and refs come from **tree-sitter** parsers, one grammar per language: C#
 Beyond code, the index maps engine assets into `assets`/`scene_nodes`:
 
 - **Unity:** parse YAML `.unity`/`.prefab` and `.meta` guids; build the scene node graph from the YAML hierarchy.
-- **Godot:** parse `.tscn`/`.tres` text scenes into `scene_nodes` (native text format, cheap).
+- **Godot: built.** `.tscn`/`.tres` are parsed into `assets` and `scene_nodes` (native text format, cheap enough to hand-parse — no grammar needed). Node paths are built the way Godot addresses them: the root is `.`, and a child of `parent="Player"` becomes `Player/Sprite`, so a path in the index is a path you can paste into `get_node`. `script = ExtResource("1_p")` is resolved through the file's `ext_resource` table to a project path, which is what makes the script-to-scene direction queryable.
+
+  **`scene_nodes.script` is an addition to the original schema.** Without it the index could describe a scene's shape but not answer the question a worker actually asks — *where is this script mounted?* A gameplay engineer editing `player.gd` needs to know it is the `CharacterBody2D` at `Player` in `scenes/main.tscn`, because that determines which node type's API is in scope. That link is the cheapest high-value edge in a Godot project and it lives on the node, so it is a column, not a table.
 - **UE5:** `.umap`/`.uasset` are **binary** ([10](10-standards-and-trust.md), [13](13-risks.md)). Extraction relies on **asset-registry dumps** produced by the editor (a commandlet), not by parsing the binary directly. These dumps are expensive, so they are **debounced** (below) and their coverage is coarser than text scenes.
 
 ## Incremental freshness

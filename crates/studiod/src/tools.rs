@@ -119,6 +119,18 @@ impl StudioTools for StoreTools {
                 None => (Vec::new(), Vec::new()),
             };
 
+            let mounted_at = index
+                .scenes_using(&record.path)
+                .map_err(|e| ToolError::Rejected(format!("scene lookup failed: {e}")))?
+                .into_iter()
+                .map(|use_site| match use_site.node_type {
+                    Some(node_type) => {
+                        format!("{} as {} ({})", use_site.asset, use_site.node_path, node_type)
+                    }
+                    None => format!("{} as {}", use_site.asset, use_site.node_path),
+                })
+                .collect();
+
             hits.push(SymbolHit {
                 fqname: record.fqname,
                 path: record.path,
@@ -128,6 +140,7 @@ impl StudioTools for StoreTools {
                 doc: record.doc,
                 calls,
                 called_by,
+                mounted_at,
             });
         }
 

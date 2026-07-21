@@ -33,7 +33,7 @@ The original crew packs **49 agents, 73 slash commands, 12 hooks and 11 rule fil
 - Charters are byte-frozen and content-hashed so **prompt caching** (1-hour TTL, keyed on exact system-prompt bytes plus tool set) pays for them once and every same-role worker within the window reads from cache.
 - **13 roles, not 49**: fewer distinct prefixes means fewer cold starts, and a cold start costs a **2.0×** write premium.
 - A three-rung summarization ladder distilled by the daemon at **zero token cost** keeps briefs small.
-- **Symbols, not files.** A tree-sitter index answers `symbol_lookup` with a signature, doc comment and one-hop neighbourhood, so a worker learns that `Enemy.attack` calls `Player.take_damage` without either file entering its context ([11](docs/design/11-index-and-bootstrap.md)).
+- **Symbols, not files.** A tree-sitter index answers `symbol_lookup` with a signature, doc comment, one-hop neighbourhood and the scene node the script is mounted on, so a worker learns that `Enemy.attack` calls `Player.take_damage` and that it runs on the `CharacterBody2D` at `Player` in `scenes/main.tscn` — without any of those files entering its context ([11](docs/design/11-index-and-bootstrap.md)).
 
 Measured effect: a warm invocation's prefix costs **$0.0051 against $0.0888 cold and $0.2258 undefended, a 17.4× warm-to-cold reduction**, across separate subprocesses. These are M1 probe measurements, not estimates. See [`02-context-engine.md`](docs/design/02-context-engine.md) and [`probes/`](probes/README.md).
 

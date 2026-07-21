@@ -41,6 +41,9 @@ fn render_hit(hit: &SymbolHit) -> String {
     if !hit.called_by.is_empty() {
         line.push_str(&format!("\n  called by: {}", neighbours(&hit.called_by)));
     }
+    if !hit.mounted_at.is_empty() {
+        line.push_str(&format!("\n  mounted at: {}", neighbours(&hit.mounted_at)));
+    }
 
     line
 }
@@ -68,6 +71,7 @@ pub struct SymbolHit {
     pub doc: Option<String>,
     pub calls: Vec<String>,
     pub called_by: Vec<String>,
+    pub mounted_at: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -134,7 +138,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_SYMBOL_LOOKUP,
-            "description": "Pull a symbol's signature, location and one-hop neighbours from the index. Use this instead of reading whole files. Neighbours are matched syntactically by name, so treat them as a strong hint rather than a resolved call graph.",
+            "description": "Pull a symbol's signature, location, one-hop neighbours and the scene nodes its file is mounted on. Use this instead of reading whole files. Neighbours are matched syntactically by name, so treat them as a strong hint rather than a resolved call graph.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"name": {"type": "string"}},
@@ -551,6 +555,7 @@ mod tests {
             doc: Some("dashes in a direction".into()),
             calls: vec!["Normalize".into(), "Move".into()],
             called_by: vec!["InputRouter.OnDash".into()],
+            mounted_at: Vec::new(),
         }];
         let r = call(&mut s, TOOL_SYMBOL_LOOKUP, json!({"name": "Player.Dash"}));
         let t = text_of(&r);
@@ -571,11 +576,48 @@ mod tests {
             doc: Some("dashes in a direction".into()),
             calls: vec!["Normalize".into(), "Move".into()],
             called_by: vec!["InputRouter.OnDash".into()],
+            mounted_at: Vec::new(),
         }];
         let t = text_of(&call(&mut s, TOOL_SYMBOL_LOOKUP, json!({"name": "Player.Dash"})));
         assert!(t.contains("dashes in a direction"));
         assert!(t.contains("calls: Normalize, Move"));
         assert!(t.contains("called by: InputRouter.OnDash"));
+    }
+
+    #[test]
+    fn a_hit_names_the_scene_node_its_script_is_mounted_on() {
+        let mut s = Spy::default();
+        s.symbols = vec![SymbolHit {
+            fqname: "Player.take_damage".into(),
+            path: "scripts/player.gd".into(),
+            signature: Some("func take_damage(n: int) -> void".into()),
+            line_start: Some(10),
+            line_end: Some(14),
+            doc: None,
+            calls: Vec::new(),
+            called_by: Vec::new(),
+            mounted_at: vec!["scenes/main.tscn as Player (CharacterBody2D)".into()],
+        }];
+        let t = text_of(&call(&mut s, TOOL_SYMBOL_LOOKUP, json!({"name": "take_damage"})));
+        assert!(t.contains("mounted at: scenes/main.tscn as Player (CharacterBody2D)"));
+    }
+
+    #[test]
+    fn an_unmounted_script_says_nothing_about_scenes() {
+        let mut s = Spy::default();
+        s.symbols = vec![SymbolHit {
+            fqname: "util.helper".into(),
+            path: "scripts/util.gd".into(),
+            signature: None,
+            line_start: None,
+            line_end: None,
+            doc: None,
+            calls: Vec::new(),
+            called_by: Vec::new(),
+            mounted_at: Vec::new(),
+        }];
+        let t = text_of(&call(&mut s, TOOL_SYMBOL_LOOKUP, json!({"name": "helper"})));
+        assert!(!t.contains("mounted at"));
     }
 
     #[test]
@@ -591,6 +633,7 @@ mod tests {
             doc: None,
             calls: names,
             called_by: Vec::new(),
+            mounted_at: Vec::new(),
         }];
         let t = text_of(&call(&mut s, TOOL_SYMBOL_LOOKUP, json!({"name": "A.b"})));
         assert!(t.contains("(+4 more)"));

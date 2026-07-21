@@ -366,6 +366,8 @@ fn index_project() -> Result<()> {
     println!("  dropped         {}", report.removed);
     println!("  symbols         {}", index.count("symbols")?);
     println!("  refs            {}", index.count("refs")?);
+    println!("  assets          {}", index.count("assets")?);
+    println!("  scene nodes     {}", index.count("scene_nodes")?);
     println!("  elapsed         {:.2}s", elapsed.as_secs_f64());
 
     Ok(())
