@@ -601,27 +601,53 @@ export function buildOffice(floor, scene) {
     alarm.visible = false;
     person.add(alarm);
 
-    const halo = new THREE.Mesh(
-      new THREE.SphereGeometry(0.075, 10, 8),
+    const lampY = 2.2;
+    const lamp = new THREE.Group();
+    lamp.visible = false;
+    person.add(lamp);
+
+    const shade = new THREE.Mesh(
+      new THREE.ConeGeometry(0.2, 0.18, 14, 1, true),
+      new THREE.MeshLambertMaterial({ color: 0x161c26, side: THREE.DoubleSide })
+    );
+    shade.position.y = lampY + 0.1;
+    lamp.add(shade);
+
+    const bulb = new THREE.Mesh(
+      new THREE.SphereGeometry(0.07, 10, 8),
       new THREE.MeshBasicMaterial({ color: 0x4ad991, transparent: true, opacity: 0.95 })
     );
-    halo.position.y = 1.62;
-    halo.visible = false;
-    person.add(halo);
+    bulb.position.y = lampY;
+    lamp.add(bulb);
 
-    const beam = new THREE.Mesh(
-      new THREE.ConeGeometry(0.26, 0.72, 12, 1, true),
+    const cone = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.16, 0.75, lampY, 18, 1, true),
       new THREE.MeshBasicMaterial({
-        color: 0x4ad991, transparent: true, opacity: 0.11,
-        depthWrite: false, side: THREE.DoubleSide,
+        color: 0x4ad991, transparent: true, opacity: 0.16,
+        depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
       })
     );
-    beam.position.y = 1.26;
-    beam.visible = false;
-    person.add(beam);
+    cone.position.y = lampY / 2;
+    lamp.add(cone);
+
+    const pool = new THREE.Mesh(
+      new THREE.CircleGeometry(0.75, 24),
+      new THREE.MeshBasicMaterial({
+        color: 0x4ad991, transparent: true, opacity: 0.12,
+        depthWrite: false, blending: THREE.AdditiveBlending,
+      })
+    );
+    pool.rotation.x = -Math.PI / 2;
+    pool.position.y = 0.015;
+    lamp.add(pool);
+
+    const spot = new THREE.SpotLight(0x4ad991, 0, 5, 0.55, 0.7, 1.5);
+    spot.position.y = lampY;
+    lamp.add(spot);
+    lamp.add(spot.target);
 
     avatars.set(d.role, {
-      person, body: body.group, hit: proxy, ringMat, alarm, halo, beam,
+      person, body: body.group, hit: proxy, ringMat, alarm, lamp, bulb, cone, pool, spot,
       tier: d.tier, title: d.title, dept: d.department,
       home,
       bounds: {
