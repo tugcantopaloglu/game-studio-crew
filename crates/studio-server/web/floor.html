@@ -182,6 +182,36 @@
   #cam { position: absolute; left: 14px; top: 14px; color: var(--dim);
     font: 600 10.5px var(--mono); letter-spacing: .08em; text-transform: uppercase;
     padding: 5px 10px; z-index: 4; }
+
+  #done { position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 14px;
+    z-index: 7; border-color: rgba(74,217,145,.4);
+    box-shadow: var(--shadow), 0 0 30px rgba(74,217,145,.14);
+    animation: drop .35s cubic-bezier(.2,.9,.3,1.2); }
+  #done.bad { border-color: rgba(226,99,109,.45);
+    box-shadow: var(--shadow), 0 0 30px rgba(226,99,109,.14); }
+  @keyframes drop { from { transform: translate(-50%, -26px); opacity: 0; } }
+  #done .badge { width: 30px; height: 30px; border-radius: 50%; flex: none;
+    display: grid; place-items: center; font-size: 15px; font-weight: 700;
+    background: rgba(74,217,145,.15); color: var(--running);
+    border: 1px solid rgba(74,217,145,.4); }
+  #done.bad .badge { background: rgba(226,99,109,.15); color: var(--error);
+    border-color: rgba(226,99,109,.45); }
+  #done .txt { display: flex; flex-direction: column; min-width: 0; max-width: 380px; }
+  #done .txt b { font-size: 12.5px; letter-spacing: .04em; }
+  #done .txt span { color: var(--dim); font-size: 11.5px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  #done button { font: 600 12px var(--sans); cursor: pointer; border-radius: 8px;
+    padding: 7px 14px; border: 1px solid var(--line-2); color: var(--text);
+    background: linear-gradient(180deg, #1b212c, #151a23); }
+  #done button:hover { background: linear-gradient(180deg, #222a37, #1a202b); }
+  #done-play { background: linear-gradient(180deg, #3fce88, #2aa96b) !important;
+    border-color: rgba(74,217,145,.5) !important; color: #04170d !important;
+    font-weight: 700 !important; letter-spacing: .03em; }
+  #done-play:hover { background: linear-gradient(180deg, #52dd97, #31b876) !important;
+    box-shadow: 0 2px 12px rgba(74,217,145,.3); }
+  #done-play:disabled { opacity: .5; cursor: default; }
+  #done-x { padding: 7px 10px !important; color: var(--dim) !important; }
 </style>
 </head>
 <body>
@@ -189,6 +219,12 @@
   <div id="tip" class="overlay"></div><div id="cam" class="overlay">isometric</div><div id="detail" class="overlay"></div>
   <div id="scrub" class="overlay"><span class="lbl">live</span><input id="seek" type="range" min="0" max="0" value="0"><button id="tolive">latest</button></div>
   <div id="track" class="overlay"><div class="name"></div><div class="lane"></div></div>
+  <div id="done" class="overlay" hidden>
+    <div class="badge">&#10003;</div>
+    <div class="txt"><b id="done-title">build complete</b><span id="done-sub"></span></div>
+    <button id="done-play">&#9654; play</button>
+    <button id="done-x" title="dismiss">&#10005;</button>
+  </div>
   <canvas id="minimap" width="150" height="98"></canvas>
 </div>
 <div id="side">
@@ -686,6 +722,7 @@ function apply(ev, replaying) {
       break;
     case "workflow_ended":
       if (workflow) { workflow.done = true; workflow.outcome = ev.data.outcome; }
+      if (!replaying) showDone(ev.data.outcome);
       break;
     case "index_updated":
       stats.symbols = Math.max(0, stats.symbols + (ev.data.symbols_delta || 0));
@@ -831,6 +868,49 @@ fetch("/roles").then((r) => r.json()).then((rows) => {
     .map((r) => `<option value="${esc(r.id)}">${esc(r.title)}</option>`)
     .join("");
 });
+
+const doneBox = document.getElementById("done");
+const donePlay = document.getElementById("done-play");
+
+function showDone(outcome) {
+  const ok = outcome === "completed";
+  doneBox.classList.toggle("bad", !ok);
+  doneBox.querySelector(".badge").innerHTML = ok ? "&#10003;" : "&#10005;";
+  document.getElementById("done-title").textContent = ok ? "build complete" : "build " + (outcome || "ended");
+  document.getElementById("done-sub").textContent =
+    (workflow ? workflow.title : "") + (projectSel.value ? "" : " - pick a project to play");
+  donePlay.disabled = !projectSel.value;
+  donePlay.innerHTML = "&#9654; play";
+  doneBox.hidden = false;
+}
+
+donePlay.onclick = async () => {
+  if (!projectSel.value) return;
+  donePlay.disabled = true;
+  donePlay.textContent = "starting";
+  try {
+    const res = await fetch("/play", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ project: projectSel.value }),
+    });
+    const msg = await res.text();
+    document.getElementById("done-sub").textContent = msg;
+    if (res.ok) {
+      donePlay.innerHTML = "&#9654; running";
+      setTimeout(() => { donePlay.disabled = false; donePlay.innerHTML = "&#9654; play"; }, 4000);
+    } else {
+      donePlay.disabled = false;
+      donePlay.innerHTML = "&#9654; play";
+    }
+  } catch (err) {
+    document.getElementById("done-sub").textContent = "the daemon is not reachable";
+    donePlay.disabled = false;
+    donePlay.innerHTML = "&#9654; play";
+  }
+};
+
+document.getElementById("done-x").onclick = () => { doneBox.hidden = true; };
 
 const askBox = document.getElementById("ask");
 const askBody = document.getElementById("ask-body");

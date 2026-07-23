@@ -50,6 +50,11 @@ pub struct BuildRequest {
     pub ask_above: Option<u64>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct PlayRequest {
+    pub project: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum StudioCommand {
     Task(TaskRequest),
@@ -164,6 +169,7 @@ pub fn router(state: AppState) -> Router {
         .route("/workflows", get(workflows))
         .route("/workflow", post(start_workflow))
         .route("/build", post(start_build))
+        .route("/play", post(play))
         .layer(axum::middleware::from_fn(guard_origin))
         .with_state(state)
 }
@@ -362,6 +368,56 @@ async fn projects(State(state): State<AppState>) -> Result<Response, StatusCode>
         })
         .collect();
     Ok(axum::Json(json).into_response())
+}
+
+fn windowed_binary(bin: std::path::PathBuf) -> std::path::PathBuf {
+    let name = bin.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let stripped = name.replace("_console", "");
+    if stripped != name {
+        let sibling = bin.with_file_name(stripped);
+        if sibling.exists() {
+            return sibling;
+        }
+    }
+    bin
+}
+
+async fn play(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<PlayRequest>,
+) -> Response {
+    let rows = match state.store.projects() {
+        Ok(rows) => rows,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let Some(p) = rows.into_iter().find(|p| p.id == req.project) else {
+        return (StatusCode::NOT_FOUND, "no such project".to_string()).into_response();
+    };
+    let profiles = studio_engine::EngineProfile::builtin();
+    let Some(profile) = profiles.iter().find(|e| e.id == p.engine) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("no engine profile for {}", p.engine),
+        )
+            .into_response();
+    };
+    let bin = match studio_engine::resolve_binary(profile) {
+        Ok(b) => windowed_binary(b),
+        Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
+    };
+    match std::process::Command::new(&bin)
+        .arg("--path")
+        .arg(&p.root)
+        .current_dir(&p.root)
+        .spawn()
+    {
+        Ok(_) => (StatusCode::OK, format!("{} is starting", p.name)).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            format!("could not start {}: {e}", bin.display()),
+        )
+            .into_response(),
+    }
 }
 
 async fn create_project(
