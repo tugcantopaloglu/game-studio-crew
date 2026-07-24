@@ -1,0 +1,54 @@
+schema_version = 1
+id = "web"
+display_name = "Pure JavaScript (three.js)"
+min_editor_version = "18"
+
+[detect]
+markers = ["index.html"]
+precedence = 2
+
+[tooling]
+resolver = "path"
+binary_env = "NODE_BIN"
+binary_names = ["node"]
+
+[commands]
+compile   = "{engine} {project}/tools/studio_ci.mjs {project}"
+test_fast = "{engine} --test {project}/test"
+test_full = "{engine} --test {project}/test"
+import    = "{engine} {project}/tools/studio_ci.mjs {project}"
+export    = "{engine} {project}/tools/studio_ci.mjs {project}"
+runtime   = "{engine} {project}/tools/runtime_probe.mjs {project}"
+
+[prose]
+profile = """This project is pure JavaScript running in the browser, with three.js as the
+only rendering library. There is no bundler and no npm install step:
+index.html loads src/main.js as an ES module via an import map, and
+third-party code lives under vendor/ as plain files. Never add a build step
+or a package manager dependency.
+
+Three.js is the scene graph. Compose objects as named THREE.Group
+hierarchies, keep per-frame allocation at zero (reuse vectors, materials and
+geometries), and dispose of what you remove.
+
+For any 3D model that comes from a reference image, invoke the img2threejs
+skill (version 1.3 or newer, installed at .claude/skills/img2threejs)
+instead of hand-sculpting geometry: follow its staged pipeline (validate,
+assess, spec, build pass-by-pass, verify) and keep each generated factory in
+src/models/ as its own module.
+
+All sound is procedural: import vendor/sfx.js and define every game sound in
+src/audio.js as a named preset or parameter set (play/arp). Never add binary
+audio assets. Trigger sounds only after the first user gesture.
+
+To see the running game, `node tools/screenshot.mjs . .studio-out/shots/latest.png`
+writes a 1280x720 capture; read the image and compare it against
+design/spec.md before calling visual work done."""
+
+[prose.capabilities]
+model = """This task builds or edits a 3D model. Use the img2threejs skill (>=1.3) when
+a reference image exists; its quality contract and detail inventory beat
+freehand primitives every time."""
+shaders = """This task touches shaders. In three.js prefer onBeforeCompile or
+ShaderMaterial with GLSL; keep uniforms documented at the top of the
+module."""

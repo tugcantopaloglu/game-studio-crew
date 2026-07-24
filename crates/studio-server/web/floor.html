@@ -45,7 +45,7 @@
   .sec { font-size: 10px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase;
     color: var(--faint); }
 
-  #side { border-left: 1px solid var(--line-2); min-height: 0;
+  #side { border-left: 1px solid var(--line-2); min-height: 0; overflow-y: auto;
     background: linear-gradient(180deg, var(--panel-2), var(--panel) 140px);
     display: flex; flex-direction: column; }
   header { padding: 14px 16px 12px; border-bottom: 1px solid var(--line);
@@ -75,7 +75,7 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   #feed-head { padding: 10px 16px 6px; }
-  #feed { overflow-y: auto; padding: 0 6px 6px; min-height: 60px; flex: 1; }
+  #feed { overflow-y: auto; padding: 0 6px 6px; min-height: 120px; flex: 1; }
   .ev { padding: 2.5px 10px; margin: 0 0 1px; border-radius: 6px;
     display: grid; grid-template-columns: 34px 1fr; gap: 9px; align-items: baseline;
     font-family: var(--mono); font-size: 11.5px; }
@@ -212,6 +212,32 @@
     box-shadow: 0 2px 12px rgba(74,217,145,.3); }
   #done-play:disabled { opacity: .5; cursor: default; }
   #done-x { padding: 7px 10px !important; color: var(--dim) !important; }
+  #done-fix { display: none; border-color: rgba(224,188,85,.45) !important; color: var(--warn) !important; }
+  #done-revert { display: none; border-color: rgba(226,99,109,.4) !important; color: var(--error) !important; }
+
+  #shot { position: absolute; right: 14px; bottom: 132px; width: 216px; display: none;
+    padding: 6px 6px 4px; z-index: 4; cursor: pointer; }
+  #shot img { width: 100%; border-radius: 8px; display: block; }
+  #shot .cap { font-size: 9.5px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--faint); padding: 4px 3px 1px; }
+
+  #detail .act { margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--line); }
+  #detail .act .lbl2 { font-size: 9.5px; font-weight: 700; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--faint); margin-bottom: 4px; }
+  #detail .act .ln { font: 11px var(--mono); color: var(--dim); display: flex; gap: 8px;
+    padding: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #detail .act .ln .sq { color: var(--faint); font-variant-numeric: tabular-nums; min-width: 30px; text-align: right; }
+  #detail .act .ln.err { color: var(--error); }
+
+  @media (max-width: 720px) {
+    body { grid-template-columns: 1fr; grid-template-rows: 44vh minmax(0, 1fr); }
+    #side { border-left: none; border-top: 1px solid var(--line-2); }
+    #track { right: 14px; }
+    #scrub { right: 14px; }
+    #scrub input { width: auto; flex: 1; min-width: 70px; }
+    #minimap, #shot { display: none !important; }
+    #done { max-width: calc(100% - 28px); flex-wrap: wrap; }
+  }
 </style>
 </head>
 <body>
@@ -223,8 +249,11 @@
     <div class="badge">&#10003;</div>
     <div class="txt"><b id="done-title">build complete</b><span id="done-sub"></span></div>
     <button id="done-play">&#9654; play</button>
+    <button id="done-fix">fix defects</button>
+    <button id="done-revert">revert run</button>
     <button id="done-x" title="dismiss">&#10005;</button>
   </div>
+  <div id="shot" class="overlay" title="open full size"><img alt=""><div class="cap">latest shot</div></div>
   <canvas id="minimap" width="150" height="98"></canvas>
 </div>
 <div id="side">
@@ -252,8 +281,11 @@
       <div class="row">
         <select id="np-engine">
           <option value="godot">godot</option>
+          <option value="web">pure js (three.js)</option>
+          <option value="python">python</option>
           <option value="unity">unity</option>
           <option value="ue5">ue5</option>
+          <option value="auto">adopt: auto detect</option>
         </select>
         <label id="np-git-wrap"><input id="np-git" type="checkbox" checked> git</label>
       </div>
@@ -373,8 +405,13 @@ function screenData() {
 }
 
 function deskState(role) {
-  if (!state.has(role)) state.set(role, { ring: "idle", summary: "", tool: "", tokens: 0 });
+  if (!state.has(role)) state.set(role, { ring: "idle", summary: "", tool: "", tokens: 0, log: [] });
   return state.get(role);
+}
+
+function logActivity(st, seq, text, err) {
+  st.log.push({ seq, text, err: !!err });
+  if (st.log.length > 9) st.log.shift();
 }
 
 function updateCamera() {
@@ -488,6 +525,13 @@ function showDetail(role) {
     `<div class="row"><span class="k">tokens</span><span>${esc(st.tokens.toLocaleString())}</span></div>` +
     (st.tool ? `<div class="row"><span class="k">tool</span><span>${esc(st.tool)}</span></div>` : "") +
     (st.summary ? `<div class="sum">${esc(st.summary)}</div>` : `<div class="sum k">no capsule yet</div>`) +
+    (st.log.length
+      ? `<div class="act"><div class="lbl2">activity</div>` +
+        st.log
+          .map((l) => `<div class="ln${l.err ? " err" : ""}"><span class="sq">${esc(l.seq)}</span><span>${esc(l.text)}</span></div>`)
+          .join("") +
+        `</div>`
+      : "") +
     `<button id="unfollow">${following === role ? "stop following" : "follow"}</button>`;
   detail.style.display = "block";
   document.getElementById("unfollow").onclick = () => {
@@ -644,7 +688,7 @@ const roleOf = (actor) => (actor || "").split("#")[0];
 
 function resetState() {
   for (const [role, a] of avatars) {
-    state.set(role, { ring: "idle", summary: "", tool: "", tokens: 0 });
+    state.set(role, { ring: "idle", summary: "", tool: "", tokens: 0, log: [] });
     a.ringMat.color.setHex(RING.idle);
     if (a.meetingSeat) leaveTable(a);
   }
@@ -672,7 +716,9 @@ function apply(ev, replaying) {
 
   switch (ev.type) {
     case "run_started": stats.run = ev.run; break;
-    case "worker_spawned": if (known) { setRing(role, "running"); st.summary = ""; } break;
+    case "worker_spawned":
+      if (known) { setRing(role, "running"); st.summary = ""; logActivity(st, ev.seq, "spawned"); }
+      break;
     case "worker_state_changed":
       if (known) {
         const to = ev.data.to;
@@ -683,7 +729,12 @@ function apply(ev, replaying) {
       }
       break;
     case "worker_exited": if (known) setRing(role, ev.data.outcome === "completed" ? "idle" : "error"); break;
-    case "tool_call": if (st) st.tool = ev.data.tool || ""; break;
+    case "tool_call":
+      if (st) { st.tool = ev.data.tool || ""; logActivity(st, ev.seq, "→ " + (ev.data.tool || "tool")); }
+      break;
+    case "tool_result":
+      if (st) logActivity(st, ev.seq, (ev.data.ok ? "✓ " : "✗ ") + (ev.data.bytes || 0) + "b", !ev.data.ok);
+      break;
     case "meeting_started": {
       const ids = (ev.data.participants || []).filter((r) => avatars.has(r));
       meetings.set(ev.data.meeting_id, ids);
@@ -705,11 +756,17 @@ function apply(ev, replaying) {
       break;
     }
     case "escalated": if (known) setRing(role, "blocked"); break;
-    case "capsule_submitted": if (st) st.summary = ev.data.summary || st.summary; break;
+    case "capsule_submitted":
+      if (st) { st.summary = ev.data.summary || st.summary; logActivity(st, ev.seq, "capsule submitted"); }
+      break;
     case "verify_result": if (known) setRing(role, ev.data.verdict === "pass" ? "running" : "error"); break;
     case "workflow_started":
       workflow = { id: ev.data.workflow, title: ev.data.title || ev.data.workflow,
-                   nodes: ev.data.nodes || [], entered: [], skipped: [], gates: {}, done: false };
+                   nodes: ev.data.nodes || [], entered: [], skipped: [], gates: {}, done: false,
+                   baseSha: ev.data.base_sha || null, commits: 0 };
+      break;
+    case "commit_recorded":
+      if (workflow && !workflow.done) workflow.commits++;
       break;
     case "node_entered":
       if (workflow) {
@@ -749,6 +806,7 @@ function apply(ev, replaying) {
   if (!replaying) {
     renderStats();
     renderTrack();
+    if (selected && selected === role) showDetail(selected);
   }
   screensDirty = true;
 }
@@ -852,7 +910,7 @@ function applyMode() {
   who.multiple = composeMode === "meeting";
   who.size = composeMode === "meeting" ? 5 : 1;
   briefBox.placeholder =
-    composeMode === "build" ? "describe the game; the studio decides who does what"
+    composeMode === "build" ? "describe the game or the change; the crew reads the project first"
     : composeMode === "task" ? "what should they do?"
     : "what is the meeting about?";
 }
@@ -872,17 +930,94 @@ fetch("/roles").then((r) => r.json()).then((rows) => {
 const doneBox = document.getElementById("done");
 const donePlay = document.getElementById("done-play");
 
+const doneFix = document.getElementById("done-fix");
+const doneRevert = document.getElementById("done-revert");
+
+doneRevert.onclick = async () => {
+  if (!projectSel.value || !workflow || !workflow.baseSha) return;
+  const n = workflow.commits;
+  if (!confirm("Throw away " + n + " commit" + (n > 1 ? "s" : "") + " and reset the project to " + workflow.baseSha + "?")) return;
+  doneRevert.disabled = true;
+  try {
+    const res = await fetch("/revert", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ project: projectSel.value, sha: workflow.baseSha }),
+    });
+    document.getElementById("done-sub").textContent = await res.text();
+    if (res.ok) {
+      workflow.commits = 0;
+      doneRevert.style.display = "none";
+    }
+  } catch (err) {
+    document.getElementById("done-sub").textContent = "the daemon is not reachable";
+  }
+  doneRevert.disabled = false;
+};
+
 function showDone(outcome) {
   const ok = outcome === "completed";
   doneBox.classList.toggle("bad", !ok);
   doneBox.querySelector(".badge").innerHTML = ok ? "&#10003;" : "&#10005;";
   document.getElementById("done-title").textContent = ok ? "build complete" : "build " + (outcome || "ended");
+  const commits = workflow && workflow.commits ? " · " + workflow.commits + " commit" + (workflow.commits > 1 ? "s" : "") : "";
   document.getElementById("done-sub").textContent =
-    (workflow ? workflow.title : "") + (projectSel.value ? "" : " - pick a project to play");
+    (workflow ? workflow.title : "") + commits + (projectSel.value ? "" : " - pick a project to play");
   donePlay.disabled = !projectSel.value;
   donePlay.innerHTML = "&#9654; play";
+  doneFix.style.display = "none";
+  doneRevert.style.display = workflow && workflow.baseSha && workflow.commits ? "" : "none";
   doneBox.hidden = false;
+
+  if (!projectSel.value) return;
+  fetch("/qa?project=" + encodeURIComponent(projectSel.value))
+    .then((r) => r.json())
+    .then((qa) => {
+      if (!qa.exists || !qa.defects) return;
+      doneFix.textContent = "fix " + qa.defects + " defect" + (qa.defects > 1 ? "s" : "");
+      doneFix.style.display = "";
+    })
+    .catch(() => {});
 }
+
+doneFix.onclick = async () => {
+  if (!projectSel.value) return;
+  doneFix.disabled = true;
+  doneFix.textContent = "dispatching";
+  try {
+    const res = await fetch("/build", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        prompt:
+          "Read qa/report.md and fix every open defect it lists. Reproduce each one from the report, " +
+          "make the smallest change that fixes it, then update qa/report.md marking each defect fixed " +
+          "with a one-line note on the cause.",
+        project: projectSel.value,
+        ask_above: null,
+      }),
+    });
+    document.getElementById("done-sub").textContent = res.ok
+      ? "the director is planning the fixes"
+      : await res.text();
+  } catch (err) {
+    document.getElementById("done-sub").textContent = "the daemon is not reachable";
+  }
+  doneFix.disabled = false;
+  doneFix.style.display = "none";
+};
+
+const shotBox = document.getElementById("shot");
+const shotImg = shotBox.querySelector("img");
+shotImg.onload = () => { shotBox.style.display = "block"; };
+shotImg.onerror = () => { shotBox.style.display = "none"; };
+shotBox.onclick = () => {
+  if (projectSel.value) open("/shot?project=" + encodeURIComponent(projectSel.value), "_blank");
+};
+setInterval(() => {
+  if (!projectSel.value) { shotBox.style.display = "none"; return; }
+  shotImg.src = "/shot?project=" + encodeURIComponent(projectSel.value) + "&t=" + Date.now();
+}, 5000);
 
 donePlay.onclick = async () => {
   if (!projectSel.value) return;

@@ -71,8 +71,43 @@ fn run_build(em: &Emitter, req: BuildRequest, seq: &mut usize) -> Result<()> {
     let director = role("studio_director").context("the director is missing from the registry")?;
     let schema = studio_workflow::plan_schema().to_string();
 
+    let engine_line = em
+        .project
+        .as_deref()
+        .and_then(|root| {
+            let profiles = studio_engine::EngineProfile::builtin();
+            studio_engine::detect(root, &profiles)
+                .first()
+                .and_then(|d| profiles.iter().find(|p| p.id == d.id))
+                .map(|p| format!("The project runs on {}. ", p.display_name))
+        })
+        .unwrap_or_default();
+
+    let survey_block = em
+        .project
+        .as_deref()
+        .and_then(crate::survey::survey)
+        .map(|s| {
+            format!(
+                "\n\nThe project already has work in it. Survey:\n{s}\n\
+                 This is an existing game: plan changes against the files above. Extend \
+                 and modify what is there instead of rebuilding it, name the real files \
+                 each task touches, and never plan a task that recreates something the \
+                 survey already shows working.\n"
+            )
+        })
+        .unwrap_or_default();
+
     let brief = format!(
-        "A request has come in: {}\n\n         Decompose it into studio tasks. Give each task the role that should do it, \n         a brief detailed enough that the role needs no further decisions, and the ids \n         of the tasks whose output it needs. Keep the graph as small as the work allows. \n         Do not invent roles.",
+        "A request has come in: {}\n{survey_block}\n\
+         {engine_line}Decompose it into studio tasks. Give each task the role that should do it, \
+         a brief detailed enough that the role needs no further decisions, and the ids \
+         of the tasks whose output it needs. The floor runs independent tasks in \
+         parallel, so parallelize aggressively: only add depends_on when a task truly \
+         reads another task's files, split large implementation work into several \
+         non-overlapping tasks (the same role may appear more than once), and give \
+         parallel tasks disjoint files so they never edit the same path. Keep the \
+         graph as small as the work allows. Do not invent roles.",
         req.prompt.trim()
     );
 
@@ -95,29 +130,32 @@ fn run_build(em: &Emitter, req: BuildRequest, seq: &mut usize) -> Result<()> {
         .to_workflow()
         .map_err(|e| anyhow::anyhow!("plan did not convert to a workflow: {e}"))?;
 
-    if let Some(gate) = compile_gate(em.project.as_deref(), &wf) {
-        println!("  gate: compile after {}", gate.after);
-        wf.gates.push(gate);
+    for scope in [studio_engine::VerifyScope::Compile, studio_engine::VerifyScope::Runtime] {
+        if let Some(gate) = verify_gate(em.project.as_deref(), &wf, scope) {
+            println!("  gate: {} after {}", scope.key(), gate.after);
+            wf.gates.push(gate);
+        }
     }
 
     crate::wf::run_planned(em, &wf, &req.prompt, em.project.clone(), seq, Some(plan), req.ask_above)?;
     Ok(())
 }
 
-fn compile_gate(
+fn verify_gate(
     project: Option<&std::path::Path>,
     wf: &studio_workflow::Workflow,
+    scope: studio_engine::VerifyScope,
 ) -> Option<studio_workflow::Gate> {
     let root = project?;
     let profiles = studio_engine::EngineProfile::builtin();
     let detected = studio_engine::detect(root, &profiles);
-    if detected.first()?.id != "godot" {
+    let first = detected.first()?;
+    let profile = profiles.iter().find(|p| p.id == first.id)?;
+    if profile.command(scope).is_err() {
         return None;
     }
-
-    let godot = profiles.iter().find(|p| p.id == "godot")?;
-    if let Err(e) = studio_engine::resolve_binary(godot) {
-        println!("  gate: skipping compile verification ({e})");
+    if let Err(e) = studio_engine::resolve_binary(profile) {
+        println!("  gate: skipping {} verification ({e})", scope.key());
         return None;
     }
 
@@ -138,7 +176,7 @@ fn compile_gate(
     Some(studio_workflow::Gate {
         after,
         kind: studio_workflow::GateKind::Verify,
-        scope: Some(studio_engine::VerifyScope::Compile.key().to_string()),
+        scope: Some(scope.key().to_string()),
         on_fail: studio_workflow::OnFail::Repair,
     })
 }

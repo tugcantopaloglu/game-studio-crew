@@ -92,8 +92,8 @@ impl ToolClass {
             ToolClass::Coordination => &[],
             ToolClass::Designer => &["Read", "Grep", "Glob", "Edit", "Write"],
             ToolClass::Engineer => &["Read", "Grep", "Glob", "Edit", "Write"],
-            ToolClass::ArtAudio => &["Read", "Grep", "Glob", "Edit", "Write"],
-            ToolClass::Qa => &["Read", "Grep", "Glob", "Edit", "Write"],
+            ToolClass::ArtAudio => &["Read", "Grep", "Glob", "Edit", "Write", "Bash", "Skill"],
+            ToolClass::Qa => &["Read", "Grep", "Glob", "Edit", "Write", "Bash"],
         }
     }
 }
@@ -392,7 +392,7 @@ mod tests {
             .collect();
         assert_eq!(
             allowlists.len(),
-            2,
+            4,
             "the allowlist is part of the cache key; distinct lists mint distinct prefixes"
         );
     }

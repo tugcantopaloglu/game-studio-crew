@@ -18,6 +18,7 @@ test_fast = "{engine} --headless --path {project} -s addons/gut/gut_cmdln.gd -gd
 test_full = "{engine} --headless --path {project} -s addons/gut/gut_cmdln.gd -gdir=res://test/integration -gexit -gjunit_xml_file={out}/gut-integration.xml"
 import    = "{engine} --headless --path {project} --import --quit"
 export    = "{engine} --headless --path {project} --export-release {preset} {out}/build/game"
+runtime   = "{engine} --headless --path {project} --quit-after 300"
 
 [reports]
 test_fast = { format = "junit", path = "{out}/gut-unit.xml" }
@@ -36,6 +37,13 @@ The project runs fully headless, so every verification is reproducible and
 nothing holds an editor lock."""
 
 [prose.capabilities]
+model = """This task builds a 3D model. When a reference image exists, use the
+img2threejs skill (>=1.3, at .claude/skills/img2threejs) to build the model as
+a procedural three.js factory, then export it for Godot with
+`node tools/model_export.mjs <factory.mjs> assets/models/<name>.glb`.
+Godot imports .glb natively; instance the imported scene, do not hand-author
+mesh resources. Keep factories texture-free: solid albedo plus PBR scalars
+survive the export, canvas textures do not."""
 netcode = """This task touches networking. Godot's high-level multiplayer API uses
 MultiplayerAPI and @rpc annotations. State authority is explicit: check
 is_multiplayer_authority() before mutating replicated state."""

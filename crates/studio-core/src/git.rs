@@ -64,6 +64,22 @@ pub fn has_changes(root: &Path) -> Result<bool> {
     Ok(!git(root, &["status", "--porcelain"])?.is_empty())
 }
 
+pub fn head_sha(root: &Path) -> Option<String> {
+    if !is_repo(root) {
+        return None;
+    }
+    git(root, &["rev-parse", "--short", "HEAD"]).ok()
+}
+
+pub fn reset_hard(root: &Path, sha: &str) -> Result<()> {
+    if !sha.chars().all(|c| c.is_ascii_hexdigit()) || sha.len() < 6 || sha.len() > 40 {
+        return Err(CoreError::Git(format!("refusing to reset to '{sha}'; not a commit sha")));
+    }
+    git(root, &["reset", "--hard", sha])?;
+    git(root, &["clean", "-fd", "--exclude=.claude", "--exclude=.studio-out"])?;
+    Ok(())
+}
+
 pub fn commit(root: &Path, subject: &str) -> Result<Option<String>> {
     if !is_repo(root) || !has_changes(root)? {
         return Ok(None);

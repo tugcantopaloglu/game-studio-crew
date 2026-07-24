@@ -127,6 +127,7 @@ impl ProfileDriver {
             VerifyScope::TestFast | VerifyScope::TestFull => FailureKind::Test,
             VerifyScope::Import => FailureKind::Import,
             VerifyScope::Export => FailureKind::Export,
+            VerifyScope::Runtime => FailureKind::Crash,
         }
     }
 

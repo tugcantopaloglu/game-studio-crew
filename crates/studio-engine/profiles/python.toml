@@ -1,0 +1,36 @@
+schema_version = 1
+id = "python"
+display_name = "Pure Python"
+min_editor_version = "3.10"
+
+[detect]
+markers = ["main.py"]
+precedence = 1
+
+[tooling]
+resolver = "path"
+binary_env = "PYTHON_BIN"
+binary_names = ["python", "python3", "py"]
+
+[commands]
+compile   = "{engine} -m compileall -q {project}"
+test_fast = "{engine} -m unittest discover -s {project}/tests -q"
+test_full = "{engine} -m unittest discover -s {project}/tests -q"
+import    = "{engine} -m compileall -q {project}"
+export    = "{engine} -m compileall -q {project}"
+runtime   = "{engine} {project}/tools/runtime_probe.py {project}"
+
+[prose]
+profile = """This project is pure Python 3.10+. The entry point is main.py at the project
+root and the game runs with nothing but the standard library unless pygame
+is already importable; check before you rely on it, and fall back to tkinter
+for windowing when it is not. Never add other dependencies unless the brief
+says so.
+
+Keep modules small and flat under src/, import them from main.py, and keep
+all tunable constants in one settings module. Every file must survive
+python -m compileall; syntax errors block the whole crew at the gate."""
+
+[prose.capabilities]
+netcode = """This task touches networking. Use asyncio with the standard library only;
+document the wire format next to the code that speaks it."""

@@ -55,6 +55,12 @@ pub struct PlayRequest {
     pub project: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct RevertRequest {
+    pub project: String,
+    pub sha: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum StudioCommand {
     Task(TaskRequest),
@@ -170,6 +176,9 @@ pub fn router(state: AppState) -> Router {
         .route("/workflow", post(start_workflow))
         .route("/build", post(start_build))
         .route("/play", post(play))
+        .route("/qa", get(qa_report))
+        .route("/shot", get(latest_shot))
+        .route("/revert", post(revert))
         .layer(axum::middleware::from_fn(guard_origin))
         .with_state(state)
 }
@@ -370,6 +379,81 @@ async fn projects(State(state): State<AppState>) -> Result<Response, StatusCode>
     Ok(axum::Json(json).into_response())
 }
 
+fn project_root(state: &AppState, id: &str) -> Option<std::path::PathBuf> {
+    state
+        .store
+        .projects()
+        .ok()?
+        .into_iter()
+        .find(|p| p.id == id)
+        .map(|p| std::path::PathBuf::from(p.root))
+}
+
+async fn qa_report(
+    State(state): State<AppState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(root) = q.get("project").and_then(|id| project_root(&state, id)) else {
+        return (StatusCode::NOT_FOUND, "no such project".to_string()).into_response();
+    };
+    let path = root.join("qa").join("report.md");
+    match std::fs::read_to_string(&path) {
+        Ok(body) => {
+            let head: String = body.lines().take(30).collect::<Vec<_>>().join("\n");
+            let defects = body.matches("QA-").count();
+            axum::Json(serde_json::json!({
+                "exists": true,
+                "defects": defects,
+                "head": head.chars().take(1200).collect::<String>(),
+            }))
+            .into_response()
+        }
+        Err(_) => axum::Json(serde_json::json!({"exists": false, "defects": 0, "head": ""}))
+            .into_response(),
+    }
+}
+
+async fn latest_shot(
+    State(state): State<AppState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(root) = q.get("project").and_then(|id| project_root(&state, id)) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let shot = root.join(".studio-out").join("shots").join("latest.png");
+    match std::fs::read(&shot) {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn revert(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<RevertRequest>,
+) -> Response {
+    let Some(root) = project_root(&state, &req.project) else {
+        return (StatusCode::NOT_FOUND, "no such project".to_string()).into_response();
+    };
+    if !studio_core::git::is_repo(&root) {
+        return (
+            StatusCode::CONFLICT,
+            "this project is not a git repository; nothing to revert to".to_string(),
+        )
+            .into_response();
+    }
+    match studio_core::git::reset_hard(&root, &req.sha) {
+        Ok(()) => (StatusCode::OK, format!("reverted to {}", req.sha)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
 fn windowed_binary(bin: std::path::PathBuf) -> std::path::PathBuf {
     let name = bin.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let stripped = name.replace("_console", "");
@@ -405,12 +489,33 @@ async fn play(
         Ok(b) => windowed_binary(b),
         Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
     };
-    match std::process::Command::new(&bin)
-        .arg("--path")
-        .arg(&p.root)
-        .current_dir(&p.root)
-        .spawn()
-    {
+
+    let launched = match p.engine.as_str() {
+        "web" => std::process::Command::new(&bin)
+            .arg("tools/serve.mjs")
+            .current_dir(&p.root)
+            .spawn()
+            .and_then(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                std::process::Command::new("cmd")
+                    .args(["/C", "start", "", "http://127.0.0.1:8765/"])
+                    .current_dir(&p.root)
+                    .spawn()
+            }),
+        "python" => std::process::Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(&bin)
+            .arg("main.py")
+            .current_dir(&p.root)
+            .spawn(),
+        _ => std::process::Command::new(&bin)
+            .arg("--path")
+            .arg(&p.root)
+            .current_dir(&p.root)
+            .spawn(),
+    };
+
+    match launched {
         Ok(_) => (StatusCode::OK, format!("{} is starting", p.name)).into_response(),
         Err(e) => (
             StatusCode::BAD_GATEWAY,
@@ -451,7 +556,24 @@ async fn create_project(
     }
 
     let canonical = root.canonicalize().map(strip_verbatim).unwrap_or(root);
-    let engine = req.engine.unwrap_or_else(|| "godot".into());
+    let mut engine = req.engine.unwrap_or_else(|| "godot".into());
+
+    if engine == "auto" {
+        let profiles = studio_engine::EngineProfile::builtin();
+        match studio_engine::detect(&canonical, &profiles).first() {
+            Some(d) => engine = d.id.clone(),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "no engine detected at {}; pick one explicitly to scaffold a fresh project",
+                        canonical.display()
+                    ),
+                )
+                    .into_response()
+            }
+        }
+    }
 
     if let Err(e) = studio_engine::scaffold(&engine, &canonical, &name) {
         return (

@@ -1,7 +1,9 @@
 mod charters;
 mod m3;
 mod m4;
+mod skills;
 mod studio;
+mod survey;
 mod wf;
 mod tools;
 

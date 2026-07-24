@@ -1,7 +1,10 @@
 pub mod plan;
 pub use plan::{plan_schema, Plan, PlanError, PlanTask, MAX_TASKS};
 pub mod exec;
-pub use exec::{execute, Admission, GateOutcome, NodeOutcome, RunOutcome, RunReport, WorkflowHost, MAX_REPAIR_ROUNDS};
+pub use exec::{
+    execute, execute_parallel, Admission, GateOutcome, NodeOutcome, ParallelWorkflowHost,
+    RunOutcome, RunReport, WorkflowHost, MAX_REPAIR_ROUNDS,
+};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};

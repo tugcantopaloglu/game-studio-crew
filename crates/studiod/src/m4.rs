@@ -101,7 +101,7 @@ pub fn run_worker_capturing(
     index: usize,
     json_schema: Option<String>,
 ) -> Result<String> {
-    run_worker_inner(em, role, brief, index, json_schema, false).map(|m| m.text)
+    run_worker_inner(em, role, brief, index, json_schema, false, true).map(|m| m.text)
 }
 
 pub fn run_worker_metered(
@@ -111,7 +111,59 @@ pub fn run_worker_metered(
     index: usize,
     acting: bool,
 ) -> Result<Metered> {
-    run_worker_inner(em, role, brief, index, None, acting)
+    run_worker_inner(em, role, brief, index, None, acting, true)
+}
+
+pub fn run_worker_metered_uncommitted(
+    em: &Emitter,
+    role: &Role,
+    brief: &str,
+    index: usize,
+    acting: bool,
+) -> Result<Metered> {
+    run_worker_inner(em, role, brief, index, None, acting, false)
+}
+
+pub fn commit_wave(em: &Emitter, entries: &[(&str, String)]) {
+    let Some(root) = em.project.as_deref() else {
+        return;
+    };
+    if entries.is_empty() || !studio_core::git::is_repo(root) {
+        return;
+    }
+
+    let subject = if entries.len() == 1 {
+        match studio_agents::role(entries[0].0) {
+            Some(r) => studio_core::git::subject(r.id, &entries[0].1),
+            None => studio_core::git::subject(entries[0].0, &entries[0].1),
+        }
+    } else {
+        let mut roles: Vec<&str> = entries.iter().map(|(r, _)| *r).collect();
+        roles.dedup();
+        format!("crew: {} finish parallel work", roles.join(" + "))
+    };
+
+    let sha = match studio_core::git::commit(root, &subject) {
+        Ok(Some(sha)) => sha,
+        Ok(None) => return,
+        Err(e) => {
+            println!("  commit skipped: {e}");
+            return;
+        }
+    };
+
+    println!("  commit {sha}  {subject}");
+    let _ = em.emit(
+        "daemon",
+        EventType::CommitRecorded,
+        Scene::daemon(),
+        serde_json::json!({
+            "project": root.to_string_lossy(),
+            "role": entries.iter().map(|(r, _)| *r).collect::<Vec<_>>().join("+"),
+            "sha": sha,
+            "subject": subject,
+        }),
+    );
 }
 
 pub struct Metered {
@@ -165,6 +217,7 @@ fn run_worker_inner(
     index: usize,
     json_schema: Option<String>,
     acting: bool,
+    commit: bool,
 ) -> Result<Metered> {
     let actor = format!("{}#{}", role.id, index);
     let task_id = crate::id("task");
@@ -331,7 +384,9 @@ fn run_worker_inner(
         );
     }
 
-    commit_worker_output(em, role, brief, &actor)?;
+    if commit {
+        commit_worker_output(em, role, brief, &actor)?;
+    }
 
     let text = match &report.state.result_message {
         Some(m) if !m.trim().is_empty() => m.clone(),

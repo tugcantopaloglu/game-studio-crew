@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 pub const GODOT_PROFILE: &str = include_str!("../profiles/godot.toml");
 pub const UNITY_PROFILE: &str = include_str!("../profiles/unity.toml");
 pub const UE5_PROFILE: &str = include_str!("../profiles/ue5.toml");
+pub const WEB_PROFILE: &str = include_str!("../profiles/web.toml");
+pub const PYTHON_PROFILE: &str = include_str!("../profiles/python.toml");
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -37,6 +39,7 @@ pub enum VerifyScope {
     TestFull,
     Import,
     Export,
+    Runtime,
 }
 
 impl VerifyScope {
@@ -47,15 +50,17 @@ impl VerifyScope {
             VerifyScope::TestFull => "test_full",
             VerifyScope::Import => "import",
             VerifyScope::Export => "export",
+            VerifyScope::Runtime => "runtime",
         }
     }
 
-    pub const ALL: [VerifyScope; 5] = [
+    pub const ALL: [VerifyScope; 6] = [
         VerifyScope::Compile,
         VerifyScope::TestFast,
         VerifyScope::TestFull,
         VerifyScope::Import,
         VerifyScope::Export,
+        VerifyScope::Runtime,
     ];
 }
 
@@ -111,7 +116,7 @@ impl EngineProfile {
     }
 
     pub fn builtin() -> Vec<EngineProfile> {
-        [GODOT_PROFILE, UNITY_PROFILE, UE5_PROFILE]
+        [GODOT_PROFILE, UNITY_PROFILE, UE5_PROFILE, WEB_PROFILE, PYTHON_PROFILE]
             .iter()
             .map(|s| EngineProfile::parse(s).expect("builtin profile must parse"))
             .collect()
@@ -288,23 +293,41 @@ mod tests {
     #[test]
     fn every_builtin_profile_parses() {
         let profiles = EngineProfile::builtin();
-        assert_eq!(profiles.len(), 3);
+        assert_eq!(profiles.len(), 5);
         let ids: Vec<&str> = profiles.iter().map(|p| p.id.as_str()).collect();
         assert!(ids.contains(&"godot"));
         assert!(ids.contains(&"unity"));
         assert!(ids.contains(&"ue5"));
+        assert!(ids.contains(&"web"));
+        assert!(ids.contains(&"python"));
     }
 
     #[test]
     fn every_profile_fills_all_five_commands() {
         for p in EngineProfile::builtin() {
             for scope in VerifyScope::ALL {
+                if scope == VerifyScope::Runtime {
+                    continue;
+                }
                 assert!(
                     p.command(scope).is_ok(),
                     "profile {} is missing {}",
                     p.id,
                     scope.key()
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn probed_engines_carry_a_runtime_command() {
+        for p in EngineProfile::builtin() {
+            let has_runtime = p.command(VerifyScope::Runtime).is_ok();
+            match p.id.as_str() {
+                "godot" | "web" | "python" => {
+                    assert!(has_runtime, "{} must probe the running game", p.id)
+                }
+                _ => assert!(!has_runtime, "{} has no verified runtime probe yet", p.id),
             }
         }
     }
@@ -459,8 +482,106 @@ mod tests {
 pub fn scaffold(engine: &str, root: &Path, name: &str) -> Result<Vec<PathBuf>> {
     match engine {
         "godot" => scaffold_godot(root, name),
+        "web" => scaffold_web(root, name),
+        "python" => scaffold_python(root, name),
         _ => Ok(Vec::new()),
     }
+}
+
+pub const WEB_VENDOR_THREE: &str = include_str!("../helpers/three.module.js");
+pub const WEB_SERVE_HELPER: &str = include_str!("../helpers/serve.mjs");
+
+fn scaffold_web(root: &Path, name: &str) -> Result<Vec<PathBuf>> {
+    if root.join("index.html").exists() {
+        return Ok(Vec::new());
+    }
+
+    let escaped = name.replace('<', "").replace('>', "").replace('&', "");
+    let index = format!(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>{escaped}</title>\n\
+         <style>html,body{{margin:0;height:100%;overflow:hidden;background:#000}}canvas{{display:block}}</style>\n\
+         <script type=\"importmap\">{{\"imports\":{{\"three\":\"./vendor/three.module.js\"}}}}</script>\n\
+         </head>\n<body>\n<script type=\"module\" src=\"./src/main.js\"></script>\n</body>\n</html>\n"
+    );
+
+    let main = "import * as THREE from \"three\";\n\n\
+        const renderer = new THREE.WebGLRenderer({ antialias: true });\n\
+        renderer.setSize(innerWidth, innerHeight);\n\
+        document.body.appendChild(renderer.domElement);\n\n\
+        const scene = new THREE.Scene();\n\
+        const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 100);\n\
+        camera.position.set(0, 1.2, 4);\n\n\
+        scene.add(new THREE.HemisphereLight(0xffffff, 0x223344, 1.2));\n\
+        const cube = new THREE.Mesh(\n\
+          new THREE.BoxGeometry(1, 1, 1),\n\
+          new THREE.MeshStandardMaterial({ color: 0x4ad991 })\n\
+        );\n\
+        scene.add(cube);\n\n\
+        addEventListener(\"resize\", () => {\n\
+          renderer.setSize(innerWidth, innerHeight);\n\
+          camera.aspect = innerWidth / innerHeight;\n\
+          camera.updateProjectionMatrix();\n\
+        });\n\n\
+        renderer.setAnimationLoop((t) => {\n\
+          cube.rotation.set(t / 1400, t / 900, 0);\n\
+          renderer.render(scene, camera);\n\
+        });\n";
+
+    let package = format!(
+        "{{\n  \"name\": \"{}\",\n  \"private\": true,\n  \"type\": \"module\"\n}}\n",
+        escaped.to_lowercase().replace(' ', "-").replace('"', "")
+    );
+
+    std::fs::create_dir_all(root.join("src"))?;
+    std::fs::create_dir_all(root.join("src/models"))?;
+    std::fs::create_dir_all(root.join("vendor"))?;
+    std::fs::create_dir_all(root.join("tools"))?;
+    std::fs::write(root.join("index.html"), index)?;
+    std::fs::write(root.join("src/main.js"), main)?;
+    std::fs::write(root.join("package.json"), package)?;
+    std::fs::write(root.join("vendor/three.module.js"), WEB_VENDOR_THREE)?;
+    std::fs::write(root.join("vendor/sfx.js"), WEB_SFX_LIB)?;
+    std::fs::write(root.join("tools/serve.mjs"), WEB_SERVE_HELPER)?;
+    std::fs::write(root.join("tools/studio_ci.mjs"), WEB_CI_HELPER)?;
+    std::fs::write(root.join("tools/runtime_probe.mjs"), WEB_RUNTIME_PROBE)?;
+    std::fs::write(root.join("tools/screenshot.mjs"), WEB_SCREENSHOT_HELPER)?;
+    std::fs::write(root.join(".gitignore"), ".studio-out/\nnode_modules/\n")?;
+
+    Ok(vec![
+        root.join("index.html"),
+        root.join("src/main.js"),
+        root.join("package.json"),
+        root.join("vendor/three.module.js"),
+        root.join("tools/serve.mjs"),
+    ])
+}
+
+fn scaffold_python(root: &Path, name: &str) -> Result<Vec<PathBuf>> {
+    if root.join("main.py").exists() {
+        return Ok(Vec::new());
+    }
+
+    let escaped = name.replace('"', "");
+    let main = format!(
+        "import tkinter as tk\n\n\n\
+         def main() -> None:\n\
+         \x20   root = tk.Tk()\n\
+         \x20   root.title(\"{escaped}\")\n\
+         \x20   root.geometry(\"640x400\")\n\
+         \x20   tk.Label(root, text=\"{escaped}\", font=(\"Segoe UI\", 24)).pack(expand=True)\n\
+         \x20   root.mainloop()\n\n\n\
+         if __name__ == \"__main__\":\n\
+         \x20   main()\n"
+    );
+
+    std::fs::create_dir_all(root.join("src"))?;
+    std::fs::create_dir_all(root.join("tests"))?;
+    std::fs::write(root.join("main.py"), main)?;
+    std::fs::write(root.join(".gitignore"), "__pycache__/\n.studio-out/\n")?;
+
+    Ok(vec![root.join("main.py")])
 }
 
 fn scaffold_godot(root: &Path, name: &str) -> Result<Vec<PathBuf>> {
@@ -493,6 +614,24 @@ fn scaffold_godot(root: &Path, name: &str) -> Result<Vec<PathBuf>> {
 }
 
 pub const GODOT_CI_HELPER: &str = include_str!("../helpers/studio_ci.gd");
+pub const WEB_CI_HELPER: &str = include_str!("../helpers/studio_ci.mjs");
+pub const GLTF_EXPORTER_HELPER: &str = include_str!("../helpers/GLTFExporter.js");
+pub const MODEL_EXPORT_HELPER: &str = include_str!("../helpers/model_export.mjs");
+pub const WEB_RUNTIME_PROBE: &str = include_str!("../helpers/runtime_probe.mjs");
+pub const PYTHON_RUNTIME_PROBE: &str = include_str!("../helpers/runtime_probe.py");
+pub const WEB_SCREENSHOT_HELPER: &str = include_str!("../helpers/screenshot.mjs");
+pub const WEB_SFX_LIB: &str = include_str!("../helpers/sfx.js");
+
+fn write_if_changed(path: &Path, content: &str) -> Result<bool> {
+    let needs_write = match std::fs::read_to_string(path) {
+        Ok(existing) => existing != content,
+        Err(_) => true,
+    };
+    if needs_write {
+        std::fs::write(path, content)?;
+    }
+    Ok(needs_write)
+}
 
 pub fn install_helpers(profile: &EngineProfile, project: &Path) -> Result<Vec<PathBuf>> {
     let mut installed = Vec::new();
@@ -500,14 +639,47 @@ pub fn install_helpers(profile: &EngineProfile, project: &Path) -> Result<Vec<Pa
         let dir = project.join("addons").join("studio");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("studio_ci.gd");
-        let needs_write = match std::fs::read_to_string(&path) {
-            Ok(existing) => existing != GODOT_CI_HELPER,
-            Err(_) => true,
-        };
-        if needs_write {
-            std::fs::write(&path, GODOT_CI_HELPER)?;
-        }
+        write_if_changed(&path, GODOT_CI_HELPER)?;
         installed.push(path);
+    }
+    if profile.id == "web" {
+        let dir = project.join("tools");
+        std::fs::create_dir_all(&dir)?;
+        for (name, content) in [
+            ("studio_ci.mjs", WEB_CI_HELPER),
+            ("serve.mjs", WEB_SERVE_HELPER),
+            ("runtime_probe.mjs", WEB_RUNTIME_PROBE),
+            ("screenshot.mjs", WEB_SCREENSHOT_HELPER),
+        ] {
+            let path = dir.join(name);
+            write_if_changed(&path, content)?;
+            installed.push(path);
+        }
+        let vendor = project.join("vendor");
+        std::fs::create_dir_all(&vendor)?;
+        let sfx = vendor.join("sfx.js");
+        write_if_changed(&sfx, WEB_SFX_LIB)?;
+        installed.push(sfx);
+    }
+    if profile.id == "python" {
+        let dir = project.join("tools");
+        std::fs::create_dir_all(&dir)?;
+        let probe = dir.join("runtime_probe.py");
+        write_if_changed(&probe, PYTHON_RUNTIME_PROBE)?;
+        installed.push(probe);
+    }
+    if matches!(profile.id.as_str(), "godot" | "unity" | "ue5" | "web") {
+        let vendor = project.join("tools").join("vendor");
+        std::fs::create_dir_all(&vendor)?;
+        let export = project.join("tools").join("model_export.mjs");
+        write_if_changed(&export, MODEL_EXPORT_HELPER)?;
+        installed.push(export);
+        let three = vendor.join("three.module.js");
+        write_if_changed(&three, WEB_VENDOR_THREE)?;
+        installed.push(three);
+        let exporter = vendor.join("GLTFExporter.js");
+        write_if_changed(&exporter, GLTF_EXPORTER_HELPER)?;
+        installed.push(exporter);
     }
     Ok(installed)
 }
@@ -517,17 +689,23 @@ mod bootstrap_tests {
     use super::*;
 
     #[test]
-    fn installing_the_godot_helper_is_idempotent() {
+    fn installing_the_godot_helpers_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let godot = EngineProfile::parse(GODOT_PROFILE).unwrap();
 
         let first = install_helpers(&godot, dir.path()).unwrap();
-        assert_eq!(first.len(), 1);
-        assert!(first[0].exists());
+        assert_eq!(first.len(), 4, "ci helper plus the three model-bridge files");
+        assert!(first.iter().all(|p| p.exists()));
 
-        let before = std::fs::metadata(&first[0]).unwrap().modified().unwrap();
+        let before: Vec<_> = first
+            .iter()
+            .map(|p| std::fs::metadata(p).unwrap().modified().unwrap())
+            .collect();
         let second = install_helpers(&godot, dir.path()).unwrap();
-        let after = std::fs::metadata(&second[0]).unwrap().modified().unwrap();
+        let after: Vec<_> = second
+            .iter()
+            .map(|p| std::fs::metadata(p).unwrap().modified().unwrap())
+            .collect();
         assert_eq!(before, after, "an unchanged helper must not be rewritten");
     }
 
@@ -553,10 +731,28 @@ mod bootstrap_tests {
     }
 
     #[test]
-    fn engines_without_a_code_helper_install_nothing() {
+    fn python_installs_exactly_the_runtime_probe() {
         let dir = tempfile::tempdir().unwrap();
-        let ue5 = EngineProfile::parse(UE5_PROFILE).unwrap();
-        assert!(install_helpers(&ue5, dir.path()).unwrap().is_empty());
+        let python = EngineProfile::parse(PYTHON_PROFILE).unwrap();
+        let installed = install_helpers(&python, dir.path()).unwrap();
+        assert_eq!(installed.len(), 1);
+        assert!(installed[0].ends_with("runtime_probe.py"));
+    }
+
+    #[test]
+    fn every_gltf_capable_engine_gets_the_model_bridge() {
+        for src in [GODOT_PROFILE, UNITY_PROFILE, UE5_PROFILE, WEB_PROFILE] {
+            let dir = tempfile::tempdir().unwrap();
+            let profile = EngineProfile::parse(src).unwrap();
+            let installed = install_helpers(&profile, dir.path()).unwrap();
+            assert!(
+                installed.iter().any(|p| p.ends_with("model_export.mjs")),
+                "{} is missing the img2threejs export bridge",
+                profile.id
+            );
+            assert!(dir.path().join("tools/vendor/GLTFExporter.js").exists());
+            assert!(dir.path().join("tools/vendor/three.module.js").exists());
+        }
     }
 }
 
