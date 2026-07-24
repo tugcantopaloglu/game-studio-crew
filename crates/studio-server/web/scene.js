@@ -322,12 +322,6 @@ function buildShell(parent, floor, cx, cz) {
   }
 }
 
-function podFacing(desk, room) {
-  if (!room) return 0;
-  const col = Math.round((desk.x - room.x - 1) / 3);
-  return col % 2 === 0 ? 0 : Math.PI;
-}
-
 function doorSideFor(room, cx, cz) {
   const dx = room.x + room.w / 2 - cx;
   const dz = room.y + room.h / 2 - cz;
@@ -364,47 +358,61 @@ function checkerFloor(parent, room, cx, cz, tint) {
   parent.add(mesh);
 }
 
+function poi(x, z, tx, tz, emoji) {
+  return { x, z, face: Math.atan2(tx - x, tz - z), emoji };
+}
+
 function roomProps(parent, room, cx, cz, tint) {
   const rx = room.x - cx, rz = room.y - cz;
   const back = rz + 0.62;
   const far = rx + room.w - 0.9;
+  const pois = [];
 
   parent.add(place(buildPlant(), rx + 0.75, 0.2, rz + room.h - 0.8).group);
   parent.add(place(buildPlant(), far, 0.2, rz + room.h - 0.8).group);
   parent.add(place(buildWaterCooler(), rx + 0.7, 0.2, back).group);
+  pois.push(poi(rx + 0.7, back + 0.6, rx + 0.7, back, "\u{1F4A7}"));
 
   switch (room.department) {
     case "leadership":
       parent.add(place(buildSofa(tint), rx + room.w * 0.5, 0.2, rz + room.h - 1.4, Math.PI).group);
+      pois.push(poi(rx + room.w * 0.5, rz + room.h - 2.2, rx + room.w * 0.5, rz + room.h - 1.4, "\u{1F60C}"));
       parent.add(place(buildMeetingTable(tint), rx + room.w * 0.62, 0.2, rz + room.h * 0.55).group);
       parent.add(place(buildCoffeeBar(), far - 1.4, 0.2, back).group);
+      pois.push(poi(far - 1.4, back + 0.65, far - 1.4, back, "☕"));
       break;
     case "production":
       parent.add(place(buildMeetingTable(tint), rx + room.w * 0.62, 0.2, rz + room.h - 1.5).group);
       parent.add(place(buildShelf(), far, 0.2, back).group);
       parent.add(place(buildCoffeeBar(), rx + 2.4, 0.2, back).group);
+      pois.push(poi(rx + 2.4, back + 0.65, rx + 2.4, back, "☕"));
       break;
     case "design":
       parent.add(place(buildWhiteboard(tint), rx + room.w * 0.32, 1.05, back).group);
+      pois.push(poi(rx + room.w * 0.32, back + 0.7, rx + room.w * 0.32, back, "\u{1F4A1}"));
       parent.add(place(buildShelf(), far, 0.2, back).group);
       parent.add(place(buildMeetingTable(tint), rx + room.w * 0.55, 0.2, rz + room.h - 1.5).group);
       break;
     case "engineering":
       parent.add(place(buildWhiteboard(tint), rx + room.w * 0.3, 1.05, back).group);
+      pois.push(poi(rx + room.w * 0.3, back + 0.7, rx + room.w * 0.3, back, "\u{1F4A1}"));
       parent.add(place(buildServerRack(), far, 0.2, back).group);
       parent.add(place(buildBoxes(), rx + 1.2, 0.2, rz + room.h - 1.2).group);
       break;
     case "art":
       parent.add(place(buildEasel(tint), rx + room.w * 0.3, 0.2, rz + room.h - 1.6).group);
+      pois.push(poi(rx + room.w * 0.3, rz + room.h - 2.3, rx + room.w * 0.3, rz + room.h - 1.6, "\u{1F3A8}"));
       parent.add(place(buildEasel(tint), rx + room.w * 0.45, 0.2, rz + room.h - 1.6, 0.3).group);
       parent.add(place(buildShelf(), far, 0.2, back).group);
       break;
     case "audio":
       parent.add(place(buildCabinet(tint), far, 0.2, back).group);
       parent.add(place(buildSofa(tint), rx + room.w * 0.5, 0.2, rz + room.h - 1.4, Math.PI).group);
+      pois.push(poi(rx + room.w * 0.5, rz + room.h - 2.2, rx + room.w * 0.5, rz + room.h - 1.4, "\u{1F3B5}"));
       break;
     case "qa":
       parent.add(place(buildTestBench(tint), rx + room.w * 0.35, 0.2, back).group);
+      pois.push(poi(rx + room.w * 0.35, back + 0.65, rx + room.w * 0.35, back, "\u{1F3AE}"));
       parent.add(place(buildTestBench(tint), rx + room.w * 0.62, 0.2, back).group);
       parent.add(place(buildBoxes(), far, 0.2, rz + room.h - 1.2).group);
       break;
@@ -412,10 +420,12 @@ function roomProps(parent, room, cx, cz, tint) {
       for (let i = 0; i < 5; i++) {
         parent.add(place(buildServerRack(), rx + 2.2 + i * 0.62, 0.2, back).group);
       }
+      pois.push(poi(rx + 2.2 + 1.24, back + 0.6, rx + 2.2 + 1.24, back, "\u{1F5A5}"));
       parent.add(place(buildServerRack(), far, 0.2, rz + room.h - 1.3).group);
       parent.add(place(buildBoxes(), rx + 1.1, 0.2, rz + room.h - 1.2).group);
       break;
   }
+  return pois;
 }
 
 function buildLobby(parent, lobby, cx, cz) {
@@ -443,10 +453,14 @@ function buildLobby(parent, lobby, cx, cz) {
   if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   parent.add(mesh);
 
+  const pois = [];
   parent.add(place(buildCoffeeBar(), mid.x - 2.4, 0.2, rz + 1.0).group);
-  parent.add(place(buildSofa(0xffc84a), mid.x + 1.2, 0.2, mid.z - 0.9, Math.PI).group);
-  parent.add(place(buildSofa(0x3ce0c8), mid.x + 1.2, 0.2, mid.z + 1.3).group);
+  pois.push(poi(mid.x - 2.4, rz + 1.65, mid.x - 2.4, rz + 1.0, "☕"));
   parent.add(place(buildMeetingTable(0xa678ff), mid.x - 2.2, 0.2, mid.z + 0.4).group);
+  parent.add(place(buildSofa(0xffc84a), mid.x - 4.1, 0.2, mid.z + 0.4, Math.PI / 2).group);
+  pois.push(poi(mid.x - 3.4, mid.z + 0.4, mid.x - 2.2, mid.z + 0.4, "\u{1F60C}"));
+  parent.add(place(buildSofa(0x3ce0c8), mid.x - 0.3, 0.2, mid.z + 0.4, -Math.PI / 2).group);
+  pois.push(poi(mid.x - 1.0, mid.z + 0.4, mid.x - 2.2, mid.z + 0.4, "\u{1F60C}"));
 
   for (const [px, pz] of [
     [rx + 0.9, rz + 0.9], [rx + lobby.w - 0.9, rz + 0.9],
@@ -468,7 +482,37 @@ function buildLobby(parent, lobby, cx, cz) {
   sign.rotation.x = -Math.PI / 2;
   parent.add(sign);
 
-  return mid;
+  return pois;
+}
+
+function buildMeetingRoom(parent, room, cx, cz) {
+  const tint = 0x6fa8d1;
+  const mx = room.x - cx + room.w / 2, mz = room.y - cz + room.h / 2;
+
+  checkerFloor(parent, room, cx, cz, tint);
+  buildWalls(parent, room, cx, cz, "-x", "-x", tint);
+  neonEdge(parent, room, cx, cz, tint);
+  parent.add(place(buildMeetingTable(tint), mx, 0.2, mz).group);
+
+  for (let i = 0; i < 6; i++) {
+    const ang = (i / 6) * Math.PI * 2 + Math.PI / 6;
+    const px = mx + Math.cos(ang) * 1.6, pz = mz + Math.sin(ang) * 1.25;
+    parent.add(place(buildChair(0x3a4152), px, 0.2, pz, Math.atan2(mx - px, mz - pz)).group);
+  }
+  parent.add(place(buildWhiteboard(tint), mx, 1.05, room.y - cz + 0.62).group);
+  parent.add(place(buildPlant(), room.x - cx + 0.8, 0.2, room.y - cz + room.h - 0.8).group);
+  parent.add(place(buildPlant(), room.x - cx + room.w - 0.9, 0.2, room.y - cz + 0.9).group);
+
+  const lamp = new THREE.PointLight(0xfff0d8, 34, 18, 1.7);
+  lamp.position.set(mx, WALL_H - 0.45, mz);
+  parent.add(lamp);
+
+  const sign = makeLabel("WAR ROOM", tint, 1.2);
+  sign.position.set(mx, 0.03, room.y - cz + room.h - 1.4);
+  sign.rotation.x = -Math.PI / 2;
+  parent.add(sign);
+
+  return doorPoint(room, cx, cz, "-x");
 }
 
 export function buildOffice(floor, scene) {
@@ -493,7 +537,8 @@ export function buildOffice(floor, scene) {
   skirt.position.y = -0.28;
   world.add(skirt);
 
-  const lobbyMid = floor.lobby ? buildLobby(world, floor.lobby, cx, cz) : null;
+  const lobbyPois = floor.lobby ? buildLobby(world, floor.lobby, cx, cz) : [];
+  const meetingDoor = floor.meeting ? buildMeetingRoom(world, floor.meeting, cx, cz) : null;
   const lobbyRect = floor.lobby
     ? {
         x0: floor.lobby.x - cx + 1.6, x1: floor.lobby.x - cx + floor.lobby.w - 1.6,
@@ -504,6 +549,7 @@ export function buildOffice(floor, scene) {
   const roomsByDept = new Map();
   const doorsByDept = new Map();
   const doorSides = new Map();
+  const poisByDept = new Map();
   for (const room of floor.rooms) {
     const side = doorSideFor(room, cx, cz);
     doorSides.set(room.department, side);
@@ -523,7 +569,7 @@ export function buildOffice(floor, scene) {
     buildWalls(rg, room, cx, cz, door, glass === door ? null : glass, tint, open);
     neonEdge(rg, room, cx, cz, tint);
     wallScreens(rg, room, cx, cz, tint, door, glass, open);
-    roomProps(rg, room, cx, cz, tint);
+    poisByDept.set(room.department, roomProps(rg, room, cx, cz, tint));
 
     const rx = room.x - cx, rz = room.y - cz;
     const lamp = new THREE.PointLight(0xfff0d8, 30, 17, 1.7);
@@ -553,21 +599,18 @@ export function buildOffice(floor, scene) {
     const g = new THREE.Group();
     g.position.set(s.x + s.w / 2 - cx, 0.2, s.y + s.h / 2 - cz);
     world.add(g);
-    g.rotation.y = podFacing(s, roomsByDept.get(s.department));
-    g.add(place(buildDesk(0x2c3240), 0, 0, 0.28).group);
-    g.add(place(buildChair(tint), 0, 0, -0.42, rand() * 0.7 - 0.35).group);
+    g.add(place(buildDesk(0x2c3240), 0, 0, 0.28, Math.PI).group);
+    g.add(place(buildChair(tint), 0, 0, -0.42).group);
   }
 
   for (const d of floor.desks) {
     const tint = FAMILY_TINT[d.visual_family] || 0x4aa8ff;
     const room = roomsByDept.get(d.department);
 
-    const facing = podFacing(d, room);
     const fixed = new THREE.Group();
     fixed.position.set(d.x + d.w / 2 - cx, 0.2, d.y + d.h / 2 - cz);
-    fixed.rotation.y = facing;
     world.add(fixed);
-    fixed.add(place(buildDesk(tint), 0, 0, 0.28).group);
+    fixed.add(place(buildDesk(tint), 0, 0, 0.28, Math.PI).group);
     fixed.add(place(buildChair(tint), 0, 0, -0.42).group);
 
     const plate = makeLabel(d.role.replace(/_/g, " "), 0xbcc5d4, 0.6);
@@ -577,9 +620,9 @@ export function buildOffice(floor, scene) {
 
     const person = new THREE.Group();
     const home = new THREE.Vector3(
-      d.x + d.w / 2 - cx + Math.sin(facing) * -0.42,
+      d.x + d.w / 2 - cx,
       0.22,
-      d.y + d.h / 2 - cz + Math.cos(facing) * -0.42
+      d.y + d.h / 2 - cz - 0.42
     );
     person.position.copy(home);
     world.add(person);
@@ -654,6 +697,9 @@ export function buildOffice(floor, scene) {
     lamp.add(spot);
     lamp.add(spot.target);
 
+    const bubble = chatBubble();
+    person.add(bubble.sprite);
+
     avatars.set(d.role, {
       person, body: body.group, hit: proxy, ringMat, alarm, lamp, bulb, cone, pool, spot,
       tier: d.tier, title: d.title, dept: d.department,
@@ -674,21 +720,37 @@ export function buildOffice(floor, scene) {
       wait: rand() * 4,
       facing: 0,
       seed: rand() * 10,
+      roomPois: poisByDept.get(d.department) || [],
+      lobbyPois,
+      bubble,
+      visit: null,
+      chatWith: null,
+      chatUntil: 0,
     });
   }
 
   buildShell(world, floor, cx, cz);
-  const table = floor.lobby
+  const table = floor.meeting
     ? new THREE.Vector3(
-        floor.lobby.x - cx + floor.lobby.w / 2 - 2.2,
+        floor.meeting.x - cx + floor.meeting.w / 2,
         0.22,
-        floor.lobby.y - cz + floor.lobby.h / 2 + 0.4
+        floor.meeting.y - cz + floor.meeting.h / 2
       )
-    : new THREE.Vector3(0, 0.22, 0);
+    : floor.lobby
+      ? new THREE.Vector3(
+          floor.lobby.x - cx + floor.lobby.w / 2 - 2.2,
+          0.22,
+          floor.lobby.y - cz + floor.lobby.h / 2 + 0.4
+        )
+      : new THREE.Vector3(0, 0.22, 0);
   const ambient = buildAmbient(world, floor, cx, cz, 5);
+  for (const a of ambient) a.lobbyPois = lobbyPois;
   buildBoard(world, table);
 
-  return { world, avatars, ambient, meetingTable: table };
+  return {
+    world, avatars, ambient, meetingTable: table,
+    meetingApproach: meetingDoor ? [meetingDoor] : [],
+  };
 }
 
 function pointIn(rect, y) {
@@ -779,6 +841,83 @@ export function hideBoard() {
   if (boardMesh) boardMesh.visible = false;
 }
 
+function chatBubble() {
+  const c = document.createElement("canvas");
+  c.width = 64; c.height = 64;
+  const ctx = c.getContext("2d");
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false })
+  );
+  sprite.scale.set(0.55, 0.55, 1);
+  sprite.position.y = 2.05;
+  sprite.visible = false;
+  return {
+    sprite,
+    set(emoji) {
+      ctx.clearRect(0, 0, 64, 64);
+      ctx.font = "44px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(emoji, 32, 36);
+      tex.needsUpdate = true;
+    },
+  };
+}
+
+function stopChat(a, now) {
+  a.chatUntil = 0;
+  a.chatWith = null;
+  a.wait = now + 2 + rand() * 5;
+  if (a.bubble) a.bubble.sprite.visible = false;
+}
+
+let nextMingle = 0;
+
+export function mingle(list, now) {
+  for (const a of list) {
+    if (a.chatUntil && (now > a.chatUntil || a.meetingSeat || a.mode !== "idle")) {
+      const b = a.chatWith;
+      stopChat(a, now);
+      if (b && b.chatWith === a) stopChat(b, now);
+    }
+  }
+  if (now < nextMingle) return;
+  nextMingle = now + 5 + rand() * 6;
+
+  const free = list.filter(
+    (a) => a.mode === "idle" && !a.meetingSeat && !a.chatWith && !a.path.length
+  );
+  const pool = [];
+  const lobbyFree = free.filter((a) => a.inLobby);
+  if (lobbyFree.length >= 2) pool.push(lobbyFree);
+  const byRoom = new Map();
+  for (const a of free) {
+    if (a.inLobby || !a.dept) continue;
+    if (!byRoom.has(a.dept)) byRoom.set(a.dept, []);
+    byRoom.get(a.dept).push(a);
+  }
+  for (const g of byRoom.values()) if (g.length >= 2) pool.push(g);
+  if (!pool.length) return;
+
+  const group = pool[(rand() * pool.length) | 0];
+  const i = (rand() * group.length) | 0;
+  let j = (rand() * group.length) | 0;
+  if (j === i) j = (i + 1) % group.length;
+  const a = group[i], b = group[j];
+
+  const mx = (a.person.position.x + b.person.position.x) / 2;
+  const mz = (a.person.position.z + b.person.position.z) / 2;
+  const until = now + 7 + rand() * 8;
+  a.chatWith = b; b.chatWith = a;
+  a.chatUntil = until; b.chatUntil = until;
+  a.wait = until; b.wait = until;
+  a.visit = null; b.visit = null;
+  a.target.set(mx - 0.3, a.person.position.y, mz);
+  b.target.set(mx + 0.3, b.person.position.y, mz);
+}
+
 function pathFrom(p, pts) {
   let best = 0, bd = Infinity;
   for (let i = 0; i < pts.length; i++) {
@@ -788,7 +927,7 @@ function pathFrom(p, pts) {
   return pts.slice(best);
 }
 
-export function seatAtTable(a, table, index, total) {
+export function seatAtTable(a, table, index, total, approach = []) {
   const angle = (index / Math.max(1, total)) * Math.PI * 2;
   a.meetingSeat = new THREE.Vector3(
     table.x + Math.cos(angle) * 1.15,
@@ -796,16 +935,24 @@ export function seatAtTable(a, table, index, total) {
     table.z + Math.sin(angle) * 0.95
   );
   a.meetingFace = Math.atan2(table.x - a.meetingSeat.x, table.z - a.meetingSeat.z);
-  a.path = pathFrom(a.person.position, [...a.route.map((v) => v.clone()), a.meetingSeat.clone()]);
+  a.path = pathFrom(a.person.position, [
+    ...a.route.map((v) => v.clone()),
+    ...approach.map((v) => v.clone()),
+    a.meetingSeat.clone(),
+  ]);
   a.target.copy(a.path[0]);
   a.inLobby = true;
 }
 
-export function leaveTable(a) {
+export function leaveTable(a, approach = []) {
   a.meetingSeat = null;
   a.meetingFace = null;
   a.inLobby = false;
-  a.path = [...a.route.map((v) => v.clone()).reverse(), a.home.clone()];
+  a.path = [
+    ...approach.map((v) => v.clone()).reverse(),
+    ...a.route.map((v) => v.clone()).reverse(),
+    a.home.clone(),
+  ];
   a.target.copy(a.path[0]);
 }
 
@@ -826,6 +973,7 @@ export function wanderStep(a, busy, dt, now) {
   } else if (busy) {
     if (a.mode !== "returning" && a.mode !== "desk") {
       a.mode = "returning";
+      a.visit = null;
       a.path = a.inLobby
         ? pathFrom(p, [...a.route.map((v) => v.clone()).reverse(), a.home.clone()])
         : [a.home.clone()];
@@ -841,7 +989,7 @@ export function wanderStep(a, busy, dt, now) {
       }
     }
   } else {
-    if (a.mode === "meeting" || a.mode === "returning") a.mode = "idle";
+    if (a.mode !== "idle") a.mode = "idle";
     if (arrived) {
       if (a.path.length) {
         a.path.shift();
@@ -853,14 +1001,23 @@ export function wanderStep(a, busy, dt, now) {
 
         if (goLobby) {
           a.inLobby = true;
+          a.visit = null;
           a.path = [...a.route.map((v) => v.clone()), pointIn(a.lobby, p.y)];
           a.target.copy(a.path[0]);
         } else if (comeBack) {
           a.inLobby = false;
+          a.visit = null;
           a.path = [...a.route.map((v) => v.clone()).reverse(), a.home.clone()];
           a.target.copy(a.path[0]);
         } else {
-          a.target.copy(pointIn(a.inLobby ? a.lobby : a.bounds, p.y));
+          const pois = a.inLobby ? a.lobbyPois : a.roomPois;
+          if (pois && pois.length && rand() < 0.4) {
+            a.visit = pois[(rand() * pois.length) | 0];
+            a.target.set(a.visit.x, p.y, a.visit.z);
+          } else {
+            a.visit = null;
+            a.target.copy(pointIn(a.inLobby ? a.lobby : a.bounds, p.y));
+          }
         }
         a.wait = now + 2 + rand() * 7;
       }
@@ -876,11 +1033,25 @@ export function wanderStep(a, busy, dt, now) {
     p.x += (dx / dist) * step;
     p.z += (dz / dist) * step;
     a.facing = Math.atan2(dx, dz);
+    if (a.bubble && a.bubble.sprite.visible) a.bubble.sprite.visible = false;
     return true;
   }
 
   if (a.meetingSeat && a.meetingFace !== null && a.meetingFace !== undefined) {
     a.facing = a.meetingFace;
+  } else if (a.chatWith && a.chatUntil) {
+    const q = a.chatWith.person.position;
+    a.facing = Math.atan2(q.x - p.x, q.z - p.z);
+    if (a.bubble && !a.bubble.sprite.visible) {
+      a.bubble.set("\u{1F4AC}");
+      a.bubble.sprite.visible = true;
+    }
+  } else if (a.visit && a.mode === "idle" && !busy) {
+    a.facing = a.visit.face;
+    if (a.bubble && !a.bubble.sprite.visible) {
+      a.bubble.set(a.visit.emoji);
+      a.bubble.sprite.visible = true;
+    }
   }
   return false;
 }
@@ -905,33 +1076,37 @@ export function makeLabel(text, color, scale = 1) {
   return new THREE.Mesh(new THREE.PlaneGeometry(h * (c.width / c.height), h), mat);
 }
 
-function gridCell(room, floor) {
-  const minX = Math.min(floor.lobby.x, ...floor.rooms.map((r) => r.x));
-  const minY = Math.min(floor.lobby.y, ...floor.rooms.map((r) => r.y));
-  return {
-    col: Math.round((room.x - minX) / room.w),
-    row: Math.round((room.y - minY) / room.h),
-  };
+function wp(x, z) {
+  return new THREE.Vector3(x, 0.22, z);
 }
 
 export function routeToLobby(room, floor, cx, cz, doorsByDept) {
-  const { col, row } = gridCell(room, floor);
   const own = doorsByDept.get(room.department);
-  if (col === 1 || row === 1) return [own.clone()];
+  if (!own) return [];
+  const half = (floor.corridor || 3) / 2;
+  const L = floor.lobby;
+  const lx0 = L.x - cx, lx1 = lx0 + L.w, lz0 = L.y - cz, lz1 = lz0 + L.h;
+  const lmx = (lx0 + lx1) / 2, lmz = (lz0 + lz1) / 2;
+  const side = doorSideFor(room, cx, cz);
+  const pts = [own.clone()];
 
-  const neighbour = floor.rooms.find((r) => {
-    const g = gridCell(r, floor);
-    return g.col === 1 && g.row === row;
-  });
-  if (!neighbour) return [own.clone()];
-
-  const via = new THREE.Vector3(
-    neighbour.x - cx + neighbour.w / 2,
-    own.y,
-    neighbour.y - cz + neighbour.h / 2
-  );
-  const nd = doorsByDept.get(neighbour.department);
-  return nd ? [own.clone(), via, nd.clone()] : [own.clone(), via];
+  if (side === "-x" || side === "+x") {
+    const vx = own.x + (side === "+x" ? half : -half);
+    pts.push(wp(vx, own.z));
+    if (Math.abs(vx - lx0) <= half + 0.01) {
+      if (Math.abs(own.z - lmz) > 0.5) pts.push(wp(vx, lmz));
+      pts.push(wp(lx0 + 0.9, lmz));
+    } else {
+      const hz = own.z < lmz ? lz0 - half : lz1 + half;
+      pts.push(wp(vx, hz), wp(lmx, hz), wp(lmx, hz < lmz ? lz0 + 0.9 : lz1 - 0.9));
+    }
+  } else {
+    const hz = own.z + (side === "+z" ? half : -half);
+    pts.push(wp(own.x, hz));
+    if (Math.abs(own.x - lmx) > 0.5) pts.push(wp(lmx, hz));
+    pts.push(wp(lmx, hz < lmz ? lz0 + 0.9 : lz1 - 0.9));
+  }
+  return pts;
 }
 
 function passThroughSides(room, cx, cz, doorsByDept, own) {
@@ -992,6 +1167,8 @@ export function buildAmbient(parent, floor, cx, cz, count = 5) {
 
     const body = place(buildCharacter(AMBIENT_PALETTES[i % AMBIENT_PALETTES.length]), 0, 0, 0);
     person.add(body.group);
+    const bubble = chatBubble();
+    person.add(bubble.sprite);
 
     out.push({
       person, body: body.group,
@@ -1000,6 +1177,8 @@ export function buildAmbient(parent, floor, cx, cz, count = 5) {
       mode: "idle", meetingSeat: null, meetingFace: null,
       door: start.clone(),
       wait: rand() * 6, facing: 0, seed: rand() * 10,
+      roomPois: [], lobbyPois: [], bubble,
+      visit: null, chatWith: null, chatUntil: 0,
     });
   }
   return out;

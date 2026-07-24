@@ -15,6 +15,9 @@ const ROOM_PAD: u32 = 1;
 
 const OUTER_MARGIN: u32 = 2;
 
+pub const CORRIDOR: u32 = 3;
+const MEETING_W: u32 = 8;
+
 pub const GRID_COLS: u32 = 3;
 pub const GRID_ROWS: u32 = 3;
 pub const LOBBY_CELL: u32 = 4;
@@ -74,10 +77,12 @@ pub struct Floor {
     pub tile: u32,
     pub width: u32,
     pub height: u32,
+    pub corridor: u32,
     pub rooms: Vec<Room>,
     pub desks: Vec<Desk>,
     pub spares: Vec<Spare>,
     pub lobby: Room,
+    pub meeting: Room,
 }
 
 impl Floor {
@@ -93,8 +98,8 @@ impl Floor {
 fn cell_rect(cell: u32) -> (u32, u32, u32, u32) {
     let col = (cell % GRID_COLS) as usize;
     let row = (cell / GRID_COLS) as usize;
-    let x = OUTER_MARGIN + COL_W[..col].iter().sum::<u32>();
-    let y = OUTER_MARGIN + ROW_H[..row].iter().sum::<u32>();
+    let x = OUTER_MARGIN + COL_W[..col].iter().sum::<u32>() + col as u32 * CORRIDOR;
+    let y = OUTER_MARGIN + ROW_H[..row].iter().sum::<u32>() + row as u32 * CORRIDOR;
     (x, y, COL_W[col], ROW_H[row])
 }
 
@@ -167,14 +172,22 @@ pub fn pack_floor(roles: &[Role]) -> Floor {
         visual_family: "lobby".to_string(),
         x: lx,
         y: ly,
-        w: lw,
+        w: lw - MEETING_W,
+        h: lh,
+    };
+    let meeting = Room {
+        department: "meeting".to_string(),
+        visual_family: "meeting".to_string(),
+        x: lx + lw - MEETING_W,
+        y: ly,
+        w: MEETING_W,
         h: lh,
     };
 
     let width = rooms.iter().map(|r| r.x + r.w).max().unwrap_or(0) + OUTER_MARGIN;
     let height = rooms.iter().map(|r| r.y + r.h).max().unwrap_or(0) + OUTER_MARGIN;
 
-    Floor { tile: TILE, width, height, rooms, desks, spares, lobby }
+    Floor { tile: TILE, width, height, corridor: CORRIDOR, rooms, desks, spares, lobby, meeting }
 }
 
 pub fn studio_floor() -> Floor {
@@ -427,12 +440,23 @@ mod lobby_tests {
         assert_eq!(f.rooms.len(), 8);
         assert_eq!(f.lobby.department, "lobby");
 
-        assert_eq!(f.lobby.x * 2 + f.lobby.w, f.width, "lobby is not horizontally centred");
-        assert_eq!(f.lobby.y * 2 + f.lobby.h, f.height, "lobby is not vertically centred");
-        assert!(f.rooms.iter().any(|r| r.y + r.h == f.lobby.y));
-        assert!(f.rooms.iter().any(|r| r.y == f.lobby.y + f.lobby.h));
-        assert!(f.rooms.iter().any(|r| r.x + r.w == f.lobby.x));
-        assert!(f.rooms.iter().any(|r| r.x == f.lobby.x + f.lobby.w));
+        let cell_w = f.lobby.w + f.meeting.w;
+        assert_eq!(f.lobby.x * 2 + cell_w, f.width, "centre cell is not horizontally centred");
+        assert_eq!(f.lobby.y * 2 + f.lobby.h, f.height, "centre cell is not vertically centred");
+        assert!(f.rooms.iter().any(|r| r.y + r.h + CORRIDOR == f.lobby.y));
+        assert!(f.rooms.iter().any(|r| r.y == f.lobby.y + f.lobby.h + CORRIDOR));
+        assert!(f.rooms.iter().any(|r| r.x + r.w + CORRIDOR == f.lobby.x));
+        assert!(f.rooms.iter().any(|r| r.x == f.lobby.x + cell_w + CORRIDOR));
+    }
+
+    #[test]
+    fn the_meeting_room_sits_beside_the_lobby() {
+        let f = studio_floor();
+        assert_eq!(f.meeting.department, "meeting");
+        assert_eq!(f.meeting.x, f.lobby.x + f.lobby.w, "meeting room must abut the lobby");
+        assert_eq!(f.meeting.y, f.lobby.y);
+        assert_eq!(f.meeting.h, f.lobby.h);
+        assert!(f.meeting.x + f.meeting.w <= f.width);
     }
 
     #[test]
@@ -448,24 +472,23 @@ mod lobby_tests {
     }
 
     #[test]
-    fn rooms_share_walls_rather_than_leaving_gaps() {
+    fn corridors_separate_every_pair_of_rooms() {
         let f = studio_floor();
-        for r in &f.rooms {
-            let touches = f
-                .rooms
-                .iter()
-                .filter(|o| o.department != r.department)
-                .any(|o| {
-                    (o.x == r.x + r.w || r.x == o.x + o.w) && o.y == r.y
-                        || (o.y == r.y + r.h || r.y == o.y + o.h) && o.x == r.x
-                });
-            let touches_lobby = (f.lobby.x == r.x + r.w || r.x == f.lobby.x + f.lobby.w)
-                || (f.lobby.y == r.y + r.h || r.y == f.lobby.y + f.lobby.h);
-            assert!(
-                touches || touches_lobby,
-                "{} is isolated; the suite should be contiguous",
-                r.department
-            );
+        let mut cells: Vec<&Room> = f.rooms.iter().collect();
+        cells.push(&f.lobby);
+        for (i, a) in cells.iter().enumerate() {
+            for b in cells.iter().skip(i + 1) {
+                let x_gap = (a.x + a.w <= b.x && b.x - (a.x + a.w) >= CORRIDOR)
+                    || (b.x + b.w <= a.x && a.x - (b.x + b.w) >= CORRIDOR);
+                let z_gap = (a.y + a.h <= b.y && b.y - (a.y + a.h) >= CORRIDOR)
+                    || (b.y + b.h <= a.y && a.y - (b.y + b.h) >= CORRIDOR);
+                assert!(
+                    x_gap || z_gap,
+                    "{} and {} touch; every pair needs a corridor between them",
+                    a.department,
+                    b.department
+                );
+            }
         }
     }
 
@@ -501,11 +524,11 @@ mod size_tests {
     }
 
     #[test]
-    fn the_lobby_is_the_largest_space_on_the_floor() {
+    fn the_centre_cell_is_the_largest_space_on_the_floor() {
         let f = studio_floor();
-        let lobby_area = f.lobby.w * f.lobby.h;
+        let cell_area = (f.lobby.w + f.meeting.w) * f.lobby.h;
         for r in &f.rooms {
-            assert!(r.w * r.h <= lobby_area, "{} is bigger than the lobby", r.department);
+            assert!(r.w * r.h <= cell_area, "{} is bigger than the lobby cell", r.department);
         }
     }
 
@@ -539,15 +562,21 @@ mod size_tests {
     }
 
     #[test]
-    fn the_grid_still_tiles_without_gaps_at_mixed_sizes() {
+    fn corridors_claim_the_space_between_cells() {
         let f = studio_floor();
         let mut cover = 0;
         for r in &f.rooms {
             cover += r.w * r.h;
         }
-        cover += f.lobby.w * f.lobby.h;
+        cover += (f.lobby.w + f.meeting.w) * f.lobby.h;
         let inner = (f.width - OUTER_MARGIN * 2) * (f.height - OUTER_MARGIN * 2);
-        assert_eq!(cover, inner, "mixed sizes must still tile the block exactly");
+        assert!(cover < inner, "with corridors the cells must not tile the whole block");
+
+        let streets = inner - cover;
+        let expected = CORRIDOR
+            * (f.height - OUTER_MARGIN * 2) * (GRID_COLS - 1)
+            + CORRIDOR * (f.width - OUTER_MARGIN * 2 - CORRIDOR * (GRID_COLS - 1)) * (GRID_ROWS - 1);
+        assert_eq!(streets, expected, "corridor area should be exactly the streets between cells");
     }
 }
 
