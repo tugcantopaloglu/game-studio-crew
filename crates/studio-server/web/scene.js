@@ -133,9 +133,9 @@ function drawScreen(x, style, tint, data) {
 
 const screens = [];
 
-function mountWall(room, cx, cz, doorSide, glassSide) {
+function mountWall(room, cx, cz, doorSide, glassSide, avoid = []) {
   const order = ["-z", "+z", "-x", "+x"];
-  const usable = order.filter((k) => k !== doorSide && k !== glassSide);
+  const usable = order.filter((k) => k !== doorSide && k !== glassSide && !avoid.includes(k));
   const key = usable[0] || "+z";
 
   const x0 = room.x - cx, z0 = room.y - cz;
@@ -154,9 +154,9 @@ function mountWall(room, cx, cz, doorSide, glassSide) {
   }
 }
 
-function wallScreens(parent, room, cx, cz, tint, doorSide, glassSide) {
+function wallScreens(parent, room, cx, cz, tint, doorSide, glassSide, avoid = []) {
   const style = SCREEN_STYLE[room.department] || "chart";
-  const m = mountWall(room, cx, cz, doorSide, glassSide);
+  const m = mountWall(room, cx, cz, doorSide, glassSide, avoid);
   const span = m.a1 - m.a0;
   const count = span > 15 ? 3 : 2;
 
@@ -213,12 +213,12 @@ function neonEdge(parent, room, cx, cz, tint) {
   const mat = new THREE.MeshBasicMaterial({ color: tint });
   const x0 = room.x - cx, z0 = room.y - cz;
   const x1 = x0 + room.w, z1 = z0 + room.h;
-  const t = 0.16, y = 0.23;
+  const t = 0.16, y = 0.23, half = t / 2;
   const segs = [
-    [(x0 + x1) / 2, z0, room.w, t],
-    [(x0 + x1) / 2, z1, room.w, t],
-    [x0, (z0 + z1) / 2, t, room.h],
-    [x1, (z0 + z1) / 2, t, room.h],
+    [(x0 + x1) / 2, z0 + half, room.w, t],
+    [(x0 + x1) / 2, z1 - half, room.w, t],
+    [x0 + half, (z0 + z1) / 2, t, room.h - t * 2],
+    [x1 - half, (z0 + z1) / 2, t, room.h - t * 2],
   ];
   for (const [px, pz, w, d] of segs) {
     const m = new THREE.Mesh(new THREE.BoxGeometry(w, 0.1, d), mat);
@@ -226,7 +226,7 @@ function neonEdge(parent, room, cx, cz, tint) {
     parent.add(m);
     const halo = new THREE.Mesh(
       new THREE.BoxGeometry(w + 0.5, 0.02, d + 0.5),
-      new THREE.MeshBasicMaterial({ color: tint, transparent: true, opacity: 0.16 })
+      new THREE.MeshBasicMaterial({ color: tint, transparent: true, opacity: 0.16, depthWrite: false })
     );
     halo.position.set(px, 0.215, pz);
     parent.add(halo);
@@ -261,15 +261,16 @@ function glassSegment(parent, x, z, w, d, tint) {
   }
 }
 
-function buildWalls(parent, room, cx, cz, doorSide, glassSide, tint) {
+function buildWalls(parent, room, cx, cz, doorSide, glassSide, tint, openThrough = []) {
   const x0 = room.x - cx, z0 = room.y - cz;
   const x1 = x0 + room.w, z1 = z0 + room.h;
   const mx = (x0 + x1) / 2, mz = (z0 + z1) / 2;
+  const half = WALL_T / 2;
   const sides = [
-    { key: "-z", x: mx, z: z0, w: room.w, d: WALL_T, axis: "x", shade: shade(0x39435a, tint, 0.16) },
-    { key: "+z", x: mx, z: z1, w: room.w, d: WALL_T, axis: "x", shade: shade(0x272e3d, tint, 0.10) },
-    { key: "-x", x: x0, z: mz, w: WALL_T, d: room.h, axis: "z", shade: shade(0x313949, tint, 0.13) },
-    { key: "+x", x: x1, z: mz, w: WALL_T, d: room.h, axis: "z", shade: shade(0x2a313f, tint, 0.10) },
+    { key: "-z", x: mx, z: z0 + half, w: room.w, d: WALL_T, axis: "x", shade: shade(0x39435a, tint, 0.16) },
+    { key: "+z", x: mx, z: z1 - half, w: room.w, d: WALL_T, axis: "x", shade: shade(0x272e3d, tint, 0.10) },
+    { key: "-x", x: x0 + half, z: mz, w: WALL_T, d: room.h - WALL_T * 2, axis: "z", shade: shade(0x313949, tint, 0.13) },
+    { key: "+x", x: x1 - half, z: mz, w: WALL_T, d: room.h - WALL_T * 2, axis: "z", shade: shade(0x2a313f, tint, 0.10) },
   ];
 
   for (const s of sides) {
@@ -278,9 +279,9 @@ function buildWalls(parent, room, cx, cz, doorSide, glassSide, tint) {
         ? glassSegment(parent, px, pz, pw, pd, tint)
         : wallSegment(parent, px, pz, pw, pd, s.shade);
 
-    if (s.key !== doorSide) { draw(s.x, s.z, s.w, s.d); continue; }
+    if (s.key !== doorSide && !openThrough.includes(s.key)) { draw(s.x, s.z, s.w, s.d); continue; }
 
-    const span = s.axis === "x" ? room.w : room.h;
+    const span = s.axis === "x" ? s.w : s.d;
     const side = (span - DOOR_W) / 2;
     if (s.axis === "x") {
       draw(s.x - (DOOR_W / 2 + side / 2), s.z, side, s.d);
@@ -502,19 +503,26 @@ export function buildOffice(floor, scene) {
 
   const roomsByDept = new Map();
   const doorsByDept = new Map();
+  const doorSides = new Map();
+  for (const room of floor.rooms) {
+    const side = doorSideFor(room, cx, cz);
+    doorSides.set(room.department, side);
+    doorsByDept.set(room.department, doorPoint(room, cx, cz, side));
+  }
+
   for (const room of floor.rooms) {
     const tint = FAMILY_TINT[room.visual_family] || 0x4aa8ff;
     const rg = new THREE.Group();
     world.add(rg);
     roomsByDept.set(room.department, room);
 
-    const door = doorSideFor(room, cx, cz);
+    const door = doorSides.get(room.department);
     const glass = lobbyFacingSide(room, floor, cx, cz);
+    const open = passThroughSides(room, cx, cz, doorsByDept, room.department);
     checkerFloor(rg, room, cx, cz, tint);
-    buildWalls(rg, room, cx, cz, door, glass === door ? null : glass, tint);
-    doorsByDept.set(room.department, doorPoint(room, cx, cz, door));
+    buildWalls(rg, room, cx, cz, door, glass === door ? null : glass, tint, open);
     neonEdge(rg, room, cx, cz, tint);
-    wallScreens(rg, room, cx, cz, tint, door, glass);
+    wallScreens(rg, room, cx, cz, tint, door, glass, open);
     roomProps(rg, room, cx, cz, tint);
 
     const rx = room.x - cx, rz = room.y - cz;
@@ -533,9 +541,9 @@ export function buildOffice(floor, scene) {
 
     const sign = makeLabel(room.department.toUpperCase(), tint, 1.3);
     if (door === "-z") {
-      sign.position.set(rx + room.w * 0.22, WALL_H - 0.42, rz + 0.02);
+      sign.position.set(rx + room.w * 0.22, WALL_H - 0.42, rz + WALL_T + 0.02);
     } else {
-      sign.position.set(rx + room.w / 2, WALL_H - 0.42, rz + 0.02);
+      sign.position.set(rx + room.w / 2, WALL_H - 0.42, rz + WALL_T + 0.02);
     }
     rg.add(sign);
   }
@@ -771,6 +779,15 @@ export function hideBoard() {
   if (boardMesh) boardMesh.visible = false;
 }
 
+function pathFrom(p, pts) {
+  let best = 0, bd = Infinity;
+  for (let i = 0; i < pts.length; i++) {
+    const d = p.distanceTo(pts[i]);
+    if (d < bd) { bd = d; best = i; }
+  }
+  return pts.slice(best);
+}
+
 export function seatAtTable(a, table, index, total) {
   const angle = (index / Math.max(1, total)) * Math.PI * 2;
   a.meetingSeat = new THREE.Vector3(
@@ -779,7 +796,7 @@ export function seatAtTable(a, table, index, total) {
     table.z + Math.sin(angle) * 0.95
   );
   a.meetingFace = Math.atan2(table.x - a.meetingSeat.x, table.z - a.meetingSeat.z);
-  a.path = [...a.route.map((v) => v.clone()), a.meetingSeat.clone()];
+  a.path = pathFrom(a.person.position, [...a.route.map((v) => v.clone()), a.meetingSeat.clone()]);
   a.target.copy(a.path[0]);
   a.inLobby = true;
 }
@@ -810,7 +827,7 @@ export function wanderStep(a, busy, dt, now) {
     if (a.mode !== "returning" && a.mode !== "desk") {
       a.mode = "returning";
       a.path = a.inLobby
-        ? [...a.route.map((v) => v.clone()).reverse(), a.home.clone()]
+        ? pathFrom(p, [...a.route.map((v) => v.clone()).reverse(), a.home.clone()])
         : [a.home.clone()];
       a.inLobby = false;
       a.target.copy(a.path[0]);
@@ -915,6 +932,20 @@ export function routeToLobby(room, floor, cx, cz, doorsByDept) {
   );
   const nd = doorsByDept.get(neighbour.department);
   return nd ? [own.clone(), via, nd.clone()] : [own.clone(), via];
+}
+
+function passThroughSides(room, cx, cz, doorsByDept, own) {
+  const x0 = room.x - cx, z0 = room.y - cz;
+  const x1 = x0 + room.w, z1 = z0 + room.h;
+  const eps = 0.01, sides = [];
+  for (const [dept, p] of doorsByDept) {
+    if (dept === own) continue;
+    if (Math.abs(p.x - x0) < eps && p.z > z0 && p.z < z1) sides.push("-x");
+    else if (Math.abs(p.x - x1) < eps && p.z > z0 && p.z < z1) sides.push("+x");
+    else if (Math.abs(p.z - z0) < eps && p.x > x0 && p.x < x1) sides.push("-z");
+    else if (Math.abs(p.z - z1) < eps && p.x > x0 && p.x < x1) sides.push("+z");
+  }
+  return sides;
 }
 
 function doorPoint(room, cx, cz, side) {
