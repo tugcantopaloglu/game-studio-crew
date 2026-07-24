@@ -25,7 +25,18 @@ pub const LOBBY_CELL: u32 = 4;
 const COL_W: [u32; 3] = [13, 19, 13];
 const ROW_H: [u32; 3] = [9, 11, 9];
 
-const CELLS: [u32; 8] = [0, 1, 2, 3, 5, 6, 7, 8];
+fn plan_for(department: Department) -> (u32, u32) {
+    match department {
+        Department::Leadership => (3, 1),
+        Department::Production => (5, 1),
+        Department::Design => (0, 0),
+        Department::Engineering => (1, 0),
+        Department::Art => (2, 0),
+        Department::Audio => (6, 0),
+        Department::Qa => (7, 0),
+        Department::Infra => (8, 0),
+    }
+}
 
 fn slots_across(span: u32) -> u32 {
     (span - ROOM_PAD * 2 + DESK_GAP) / (DESK_W + DESK_GAP)
@@ -50,6 +61,7 @@ pub struct Desk {
     pub y: u32,
     pub w: u32,
     pub h: u32,
+    pub level: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -60,6 +72,7 @@ pub struct Spare {
     pub y: u32,
     pub w: u32,
     pub h: u32,
+    pub level: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,6 +83,7 @@ pub struct Room {
     pub y: u32,
     pub w: u32,
     pub h: u32,
+    pub level: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,11 +92,14 @@ pub struct Floor {
     pub width: u32,
     pub height: u32,
     pub corridor: u32,
+    pub levels: u32,
     pub rooms: Vec<Room>,
     pub desks: Vec<Desk>,
     pub spares: Vec<Spare>,
     pub lobby: Room,
     pub meeting: Room,
+    pub extras: Vec<Room>,
+    pub elevator: Room,
 }
 
 impl Floor {
@@ -103,10 +120,6 @@ fn cell_rect(cell: u32) -> (u32, u32, u32, u32) {
     (x, y, COL_W[col], ROW_H[row])
 }
 
-fn room_rect(index: u32) -> (u32, u32, u32, u32) {
-    cell_rect(CELLS[index as usize])
-}
-
 fn desk_origin(room_x: u32, room_y: u32, room_w: u32, slot: u32) -> (u32, u32) {
     let across = slots_across(room_w);
     let col = slot % across;
@@ -122,8 +135,9 @@ pub fn pack_floor(roles: &[Role]) -> Floor {
     let mut desks = Vec::new();
     let mut spares = Vec::new();
 
-    for (index, department) in Department::ALL.iter().enumerate() {
-        let (rx, ry, rw, rh) = room_rect(index as u32);
+    for department in Department::ALL.iter() {
+        let (cell, level) = plan_for(*department);
+        let (rx, ry, rw, rh) = cell_rect(cell);
         rooms.push(Room {
             department: department.id().to_string(),
             visual_family: department.visual_family().to_string(),
@@ -131,6 +145,7 @@ pub fn pack_floor(roles: &[Role]) -> Floor {
             y: ry,
             w: rw,
             h: rh,
+            level,
         });
 
         let capacity = slots_for(rw, rh);
@@ -150,6 +165,7 @@ pub fn pack_floor(roles: &[Role]) -> Floor {
                 y: dy,
                 w: DESK_W,
                 h: DESK_H,
+                level,
             });
         }
 
@@ -162,6 +178,7 @@ pub fn pack_floor(roles: &[Role]) -> Floor {
                 y: dy,
                 w: DESK_W,
                 h: DESK_H,
+                level,
             });
         }
     }
@@ -174,6 +191,7 @@ pub fn pack_floor(roles: &[Role]) -> Floor {
         y: ly,
         w: lw - MEETING_W,
         h: lh,
+        level: 0,
     };
     let meeting = Room {
         department: "meeting".to_string(),
@@ -182,12 +200,50 @@ pub fn pack_floor(roles: &[Role]) -> Floor {
         y: ly,
         w: MEETING_W,
         h: lh,
+        level: 0,
+    };
+
+    let mut extras = Vec::new();
+    for (cell, name, level) in [(3, "break", 0), (5, "archive", 0), (LOBBY_CELL, "landing", 1)] {
+        let (ex, ey, ew, eh) = cell_rect(cell);
+        extras.push(Room {
+            department: name.to_string(),
+            visual_family: name.to_string(),
+            x: ex,
+            y: ey,
+            w: ew,
+            h: eh,
+            level,
+        });
+    }
+
+    let elevator = Room {
+        department: "elevator".to_string(),
+        visual_family: "elevator".to_string(),
+        x: lx + lobby.w - 3,
+        y: ly + 1,
+        w: 2,
+        h: 2,
+        level: 0,
     };
 
     let width = rooms.iter().map(|r| r.x + r.w).max().unwrap_or(0) + OUTER_MARGIN;
     let height = rooms.iter().map(|r| r.y + r.h).max().unwrap_or(0) + OUTER_MARGIN;
 
-    Floor { tile: TILE, width, height, corridor: CORRIDOR, rooms, desks, spares, lobby, meeting }
+    Floor {
+        tile: TILE,
+        width,
+        height,
+        corridor: CORRIDOR,
+        levels: 2,
+        rooms,
+        desks,
+        spares,
+        lobby,
+        meeting,
+        extras,
+        elevator,
+    }
 }
 
 pub fn studio_floor() -> Floor {
@@ -450,6 +506,56 @@ mod lobby_tests {
     }
 
     #[test]
+    fn leadership_and_production_live_upstairs() {
+        let f = studio_floor();
+        for r in &f.rooms {
+            let upstairs = r.department == "leadership" || r.department == "production";
+            assert_eq!(r.level, if upstairs { 1 } else { 0 }, "{} is on the wrong storey", r.department);
+        }
+        for d in &f.desks {
+            let room = f.room(&d.department).unwrap();
+            assert_eq!(d.level, room.level, "{} desk is not on its room's storey", d.role);
+        }
+        assert_eq!(f.levels, 2);
+    }
+
+    #[test]
+    fn the_elevator_stands_inside_the_lobby_below_the_landing() {
+        let f = studio_floor();
+        let e = &f.elevator;
+        assert!(
+            e.x >= f.lobby.x && e.y >= f.lobby.y
+                && e.x + e.w <= f.lobby.x + f.lobby.w
+                && e.y + e.h <= f.lobby.y + f.lobby.h,
+            "the shaft must rise out of the lobby"
+        );
+        let landing = f.extras.iter().find(|r| r.department == "landing").unwrap();
+        assert_eq!(landing.level, 1);
+        assert!(
+            e.x >= landing.x && e.y >= landing.y
+                && e.x + e.w <= landing.x + landing.w
+                && e.y + e.h <= landing.y + landing.h,
+            "the shaft must open onto the landing upstairs"
+        );
+    }
+
+    #[test]
+    fn the_ground_extras_fill_the_vacated_cells() {
+        let f = studio_floor();
+        let ground: Vec<&Room> = f.extras.iter().filter(|r| r.level == 0).collect();
+        assert_eq!(ground.len(), 2);
+        for e in ground {
+            for r in f.rooms.iter().filter(|r| r.level == 0) {
+                let disjoint = r.x + r.w <= e.x
+                    || e.x + e.w <= r.x
+                    || r.y + r.h <= e.y
+                    || e.y + e.h <= r.y;
+                assert!(disjoint, "{} overlaps the {} room", e.department, r.department);
+            }
+        }
+    }
+
+    #[test]
     fn the_meeting_room_sits_beside_the_lobby() {
         let f = studio_floor();
         assert_eq!(f.meeting.department, "meeting");
@@ -533,12 +639,12 @@ mod size_tests {
     }
 
     #[test]
-    fn a_wider_room_holds_more_desks() {
+    fn a_bigger_room_holds_more_desks() {
         let f = studio_floor();
-        let widest = f.rooms.iter().max_by_key(|r| r.w).unwrap();
-        let narrowest = f.rooms.iter().min_by_key(|r| r.w).unwrap();
+        let biggest = f.rooms.iter().max_by_key(|r| r.w * r.h).unwrap();
+        let smallest = f.rooms.iter().min_by_key(|r| r.w * r.h).unwrap();
         assert!(
-            slots_for(widest.w, widest.h) > slots_for(narrowest.w, narrowest.h),
+            slots_for(biggest.w, biggest.h) > slots_for(smallest.w, smallest.h),
             "room capacity should follow room size"
         );
     }

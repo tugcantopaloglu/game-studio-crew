@@ -183,6 +183,15 @@
     font: 600 10.5px var(--mono); letter-spacing: .08em; text-transform: uppercase;
     padding: 5px 10px; z-index: 4; }
 
+  #floors { position: absolute; left: 14px; top: 96px; z-index: 4;
+    display: flex; gap: 4px; padding: 5px; }
+  #floors button { font: 600 10.5px var(--mono); letter-spacing: .08em; text-transform: uppercase;
+    cursor: pointer; background: transparent; border: 1px solid transparent;
+    color: var(--dim); border-radius: 6px; padding: 3px 9px; }
+  #floors button:hover { color: var(--text); }
+  #floors button.on { background: rgba(74,217,145,.12);
+    border-color: rgba(74,217,145,.4); color: var(--running); }
+
   #done { position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
     display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 14px;
     z-index: 7; border-color: rgba(74,217,145,.4);
@@ -243,6 +252,7 @@
 <body>
 <div id="stage">
   <div id="tip" class="overlay"></div><div id="cam" class="overlay">isometric</div><div id="detail" class="overlay"></div>
+  <div id="floors" class="overlay" hidden><button data-level="0" class="on">1F &middot; studio</button><button data-level="1">2F &middot; loft</button></div>
   <div id="scrub" class="overlay"><span class="lbl">live</span><input id="seek" type="range" min="0" max="0" value="0"><button id="tolive">latest</button></div>
   <div id="track" class="overlay"><div class="name"></div><div class="lane"></div></div>
   <div id="done" class="overlay" hidden>
@@ -319,7 +329,7 @@
 
 <script type="module">
 import * as THREE from "/vendor/three.module.js";
-import { buildOffice, wanderStep, mingle, refreshScreens, seatAtTable, leaveTable, showBoard, hideBoard } from "/scene.js";
+import { buildOffice, wanderStep, mingle, refreshScreens, seatAtTable, leaveTable, showBoard, hideBoard, LEVEL_H } from "/scene.js";
 
 const RING = { idle: 0x2f3644, running: 0x4ad991, blocked: 0xd9c24a, meeting: 0x6fa8d1, error: 0xd95555 };
 const TERMINAL = new Set(["run_ended","meeting_ended","workflow_ended","decision_recorded","escalated","verify_result","budget_exhausted"]);
@@ -375,6 +385,26 @@ let avatars = new Map();
 let ambient = [];
 let meetingTable = null;
 let meetingApproach = [];
+let levelGroups = [];
+let viewLevel = 0;
+
+const floorsEl = document.getElementById("floors");
+floorsEl.addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  viewLevel = Number(b.dataset.level);
+  for (const btn of floorsEl.querySelectorAll("button")) btn.classList.toggle("on", btn === b);
+  applyLevel();
+});
+
+function applyLevel() {
+  levelGroups.forEach((g, i) => { g.visible = i === viewLevel; });
+  renderMinimap();
+}
+
+function levelOf(a) {
+  return Math.round(a.person.position.y / LEVEL_H);
+}
 let following = null;
 let selected = null;
 const meetings = new Map();
@@ -496,6 +526,7 @@ function pickAgent(e) {
   ray.setFromCamera(ndc, camera);
   let best = null, bestDist = Infinity;
   for (const [role, a] of avatars) {
+    if (!a.person.visible) continue;
     const hits = ray.intersectObject(a.hit, true);
     if (hits.length && hits[0].distance < bestDist) { bestDist = hits[0].distance; best = role; }
   }
@@ -560,6 +591,7 @@ function hoverTest(e) {
 
   let best = null, bestDist = Infinity;
   for (const [role, a] of avatars) {
+    if (!a.person.visible) continue;
     const hits = ray.intersectObject(a.hit, true);
     if (hits.length && hits[0].distance < bestDist) { bestDist = hits[0].distance; best = role; }
   }
@@ -596,6 +628,7 @@ function animate() {
     const stuck = st.ring === "error" || st.ring === "blocked";
     const busy = st.ring === "running" || st.ring === "meeting" || stuck;
     const walking = wanderStep(a, busy, dt, t);
+    a.person.visible = levelOf(a) === viewLevel;
 
     if (walking) {
       a.body.position.y = Math.abs(Math.sin(t * 9 + a.seed)) * 0.05;
@@ -654,6 +687,7 @@ function animate() {
 
   for (const a of ambient) {
     const walking = wanderStep(a, false, dt, t);
+    a.person.visible = levelOf(a) === viewLevel;
     if (walking) {
       a.body.position.y = Math.abs(Math.sin(t * 9 + a.seed)) * 0.05;
       a.body.rotation.z = Math.sin(t * 9 + a.seed) * 0.05;
@@ -853,15 +887,18 @@ function renderMinimap() {
   if (!miniFloor) return;
   const sx = mini.width / miniFloor.width, sy = mini.height / miniFloor.height;
   mctx.clearRect(0, 0, mini.width, mini.height);
-  const cells = miniFloor.rooms.concat([miniFloor.lobby]);
+  let cells = miniFloor.rooms.concat([miniFloor.lobby]);
   if (miniFloor.meeting) cells.push(miniFloor.meeting);
+  cells = cells.concat(miniFloor.extras || []);
   for (const r of cells) {
+    if ((r.level || 0) !== viewLevel) continue;
     mctx.fillStyle = r.department === "lobby" ? "rgba(148,163,184,.16)" : "rgba(148,163,184,.09)";
     mctx.fillRect(r.x * sx, r.y * sy, r.w * sx, r.h * sy);
     mctx.strokeStyle = "rgba(148,163,184,.22)";
     mctx.strokeRect(r.x * sx, r.y * sy, r.w * sx, r.h * sy);
   }
   for (const d of miniFloor.desks) {
+    if ((d.level || 0) !== viewLevel) continue;
     const st = deskState(d.role);
     mctx.fillStyle = "#" + (RING[st.ring] || RING.idle).toString(16).padStart(6, "0");
     mctx.fillRect(d.x * sx - 1, d.y * sy - 1, Math.max(3, d.w * sx), Math.max(3, d.h * sy));
@@ -1215,8 +1252,16 @@ fetch("/floor").then((r) => r.json()).then((f) => {
   const built = buildOffice(f, scene);
   avatars = built.avatars;
   ambient = built.ambient || [];
+  levelGroups = built.levels || [];
   meetingTable = built.meetingTable;
   meetingApproach = built.meetingApproach || [];
+  floorsEl.hidden = (f.levels || 1) < 2;
+  if (location.hash === "#2f" && (f.levels || 1) > 1) {
+    viewLevel = 1;
+    const btns = floorsEl.querySelectorAll("button");
+    btns.forEach((b) => b.classList.toggle("on", Number(b.dataset.level) === 1));
+  }
+  applyLevel();
   resize();
   refreshScreens(screenData());
   animate();
