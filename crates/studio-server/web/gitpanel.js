@@ -28,7 +28,6 @@ const CSS = `
 `;
 
 const state = {
-  host: null,
   body: null,
   project: "",
   rows: [],
@@ -48,7 +47,6 @@ const state = {
 };
 
 export function mount(root) {
-  state.host = root;
   root.classList.add("gitpanel");
   const sheet = document.createElement("style");
   sheet.textContent = CSS;
@@ -361,13 +359,13 @@ function rollbackBox() {
       el("button", {
         text: `yes, reset to ${plan.sha.slice(0, 7)}`,
         onclick: async () => {
-          const done = await act("roll back", "/git/rollback", {
+          await act("roll back", "/git/rollback", {
             project: state.project,
             sha: plan.sha,
             confirm: true,
           });
           state.plan = null;
-          if (done && done.detail) report(true, "rolled back", done.detail);
+          state.selected = "";
           load(true);
         },
       }),
@@ -495,6 +493,6 @@ async function load(reset) {
     state.loading = false;
   }
 
-  await Promise.all([names(), gh()]);
   draw();
+  Promise.all([names(), gh()]).then(draw);
 }
