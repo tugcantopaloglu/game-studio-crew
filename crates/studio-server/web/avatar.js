@@ -112,6 +112,8 @@ class Rig {
     this.thighR.add(this.shinR);
 
     this.phase = seed % 1;
+    this.tilt = [0, 0];
+    this.knee = [0, 0];
     this.yaw = 0;
     this.sit = 0;
     this.headYaw = 0;
@@ -121,10 +123,10 @@ class Rig {
     this.lean = 0;
   }
 
-  step(thigh, shin, u, blend, dt) {
+  step(i, thigh, u, blend, dt) {
     if (blend < 0.002) {
-      thigh.rotation.x = approach(thigh.rotation.x, 0, 9, dt);
-      shin.rotation.x = approach(shin.rotation.x, 0, 9, dt);
+      this.tilt[i] = approach(this.tilt[i], 0, 9, dt);
+      this.knee[i] = approach(this.knee[i], 0, 9, dt);
       thigh.position.y = approach(thigh.position.y, 0, 9, dt);
       thigh.position.z = approach(thigh.position.z, 0, 9, dt);
       return;
@@ -135,10 +137,10 @@ class Rig {
     const lift = stance ? 0 : Math.sin(Math.PI * w) * FOOT_LIFT;
     const tilt = -THIGH_LEAN * (z / (STRIDE * 0.5));
 
-    thigh.rotation.x = tilt * blend;
+    this.tilt[i] = tilt * blend;
+    this.knee[i] = stance ? 0 : Math.sin(Math.PI * w) * KNEE_BEND * blend;
     thigh.position.y = lift * blend;
     thigh.position.z = (z + LEG_LEN * Math.sin(tilt)) * blend;
-    shin.rotation.x = stance ? 0 : Math.sin(Math.PI * w) * KNEE_BEND * blend;
   }
 
   update(m, dt, t) {
@@ -154,16 +156,14 @@ class Rig {
     );
     this.group.rotation.y = this.yaw;
 
-    this.step(this.thighL, this.shinL, this.phase, walk, dt);
-    this.step(this.thighR, this.shinR, (this.phase + 0.5) % 1, walk, dt);
+    this.step(0, this.thighL, this.phase, walk, dt);
+    this.step(1, this.thighR, (this.phase + 0.5) % 1, walk, dt);
 
-    if (sit > 0.01) {
-      const bend = sit * 1.42;
-      this.thighL.rotation.x -= bend;
-      this.thighR.rotation.x -= bend;
-      this.shinL.rotation.x += bend;
-      this.shinR.rotation.x += bend;
-    }
+    const seat = sit * 1.42;
+    this.thighL.rotation.x = this.tilt[0] - seat;
+    this.thighR.rotation.x = this.tilt[1] - seat;
+    this.shinL.rotation.x = this.knee[0] + seat;
+    this.shinR.rotation.x = this.knee[1] + seat;
     this.hips.position.y = HIP_Y * VOX - sit * SEAT_DROP;
 
     this.lean = approach(this.lean, m.recline || 0, 2.2, dt);
