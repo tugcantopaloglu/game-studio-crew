@@ -403,9 +403,10 @@
 
 <script type="module">
 import * as THREE from "/vendor/three.module.js";
-import { buildOffice, wanderStep, avatarPose, refreshScreens, seatAtTable, leaveTable, showBoard, boardSays, boardDecided, hideBoard } from "/scene.js";
+import { buildOffice, wanderStep, avatarPose, refreshScreens, paintScreens, setMotion, seatAtTable, leaveTable, showBoard, boardSays, boardDecided, hideBoard } from "/scene.js";
 import { pushEvent, setProject, setStage, settings } from "/bus.js";
 import { startChatter, chatterSays } from "/chatter.js";
+import { budget, reducedMotion, sampleFrame, frameP95, frameMean, hardwareHints, shouldOfferLowSpec, noteOffered, reasonForOffer, onTier } from "/perf.js";
 
 const RING = { idle: 0x2f3644, running: 0x4ad991, blocked: 0xd9c24a, meeting: 0x6fa8d1, error: 0xd95555 };
 const TERMINAL = new Set(["run_ended","meeting_ended","workflow_ended","decision_recorded","escalated","verify_result","budget_exhausted"]);
@@ -415,10 +416,14 @@ const stage = document.getElementById("stage");
 const tip = document.getElementById("tip");
 const camLabel = document.getElementById("cam");
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+let tier = budget();
+let motionOn = !reducedMotion();
+setMotion(motionOn);
+
+const renderer = new THREE.WebGLRenderer({ antialias: tier.pixelRatio > 1 });
+renderer.setPixelRatio(Math.min(devicePixelRatio, tier.pixelRatio));
+renderer.shadowMap.enabled = tier.shadows;
+renderer.shadowMap.type = tier.softShadows ? THREE.PCFSoftShadowMap : THREE.BasicShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.35;
@@ -436,8 +441,8 @@ scene.add(new THREE.AmbientLight(0x8fa0bc, 0.25));
 scene.add(new THREE.HemisphereLight(0xb8ccf0, 0x14181f, 0.9));
 const key = new THREE.DirectionalLight(0xfff2dc, 2.0);
 key.position.set(18, 30, 14);
-key.castShadow = true;
-key.shadow.mapSize.set(4096, 4096);
+key.castShadow = tier.shadows;
+key.shadow.mapSize.set(tier.shadowMap, tier.shadowMap);
 key.shadow.camera.near = 1; key.shadow.camera.far = 110;
 const S = 30;
 key.shadow.camera.left = -S; key.shadow.camera.right = S;
@@ -471,6 +476,13 @@ let stats = { events: 0, tokens: 0, spend: 0, cacheRead: 0, cacheWrite: 0, symbo
 let screensDirty = true;
 let lastScreenPaint = 0;
 let lastMini = 0;
+let miniDirty = true;
+let statsDirty = true;
+let trackDirty = true;
+let detailDirty = false;
+const feedQueue = [];
+const MAX_HISTORY = 20000;
+let droppedBefore = 0;
 
 function screenData() {
   const crewByDept = {};
@@ -807,7 +819,7 @@ function stepBubble(dt, t) {
   bubble.visible = bubbleMat.opacity > 0.02;
   if (!bubble.visible || !thought) return;
 
-  const key = thought.phase + " " + thought.text;
+  const key = thought.phase + " " + thought.text;
   if (key !== thoughtDrawn) {
     drawBubble(thought.text, thought.phase);
     thoughtDrawn = key;
@@ -818,25 +830,42 @@ function stepBubble(dt, t) {
 }
 
 const clock = new THREE.Clock();
+
+function rigStep(a, cam) {
+  if (tier.farRigPeriod <= 0) return 0;
+  return a.person.position.distanceTo(cam) > tier.farRigDistance ? tier.farRigPeriod : 0;
+}
+
+function ringOpacity(ring, stuck, t, seed) {
+  if (!motionOn) return ring === "idle" ? 0.35 : stuck ? 0.95 : 0.8;
+  if (stuck) return 0.55 + Math.sin(t * 7 + seed) * 0.45;
+  return ring === "idle" ? 0.28 : 0.7 + Math.sin(t * 4 + seed) * 0.3;
+}
+
+function flushDom() {
+  if (feedQueue.length) drainFeed();
+  if (statsDirty) { renderStats(); statsDirty = false; }
+  if (trackDirty) { renderTrack(); trackDirty = false; }
+  if (detailDirty) { if (selected) showDetail(selected); detailDirty = false; }
+}
+
 function animate() {
   requestAnimationFrame(animate);
+  const began = performance.now();
   const dt = Math.min(clock.getDelta(), 0.05);
   const t = clock.getElapsedTime();
+  const cam = camera.position;
+
   for (const [role, a] of avatars) {
     const st = deskState(role);
     const stuck = st.ring === "error" || st.ring === "blocked";
     const busy = st.ring === "running" || st.ring === "meeting" || stuck;
     wanderStep(a, busy, dt, t);
-    a.rig.update(avatarPose(a, st.ring, t), dt, t);
+    a.rig.update(avatarPose(a, st.ring, t), dt, t, rigStep(a, cam));
 
-    if (stuck) {
-      a.ringMat.opacity = 0.55 + Math.sin(t * 7 + a.seed) * 0.45;
-    } else {
-      a.ringMat.opacity = st.ring === "idle" ? 0.28 : 0.7 + Math.sin(t * 4 + a.seed) * 0.3;
-    }
+    a.ringMat.opacity = ringOpacity(st.ring, stuck, t, a.seed);
     if (a.alarm) {
-      a.alarm.visible = stuck;
-      if (stuck) a.alarm.intensity = 2.6 + Math.sin(t * 7 + a.seed) * 2.0;
+      a.alarm.intensity = !stuck ? 0 : motionOn ? 2.6 + Math.sin(t * 7 + a.seed) * 2.0 : 3.0;
     }
 
     const lit = st.ring === "running" || st.ring === "meeting";
@@ -847,30 +876,40 @@ function animate() {
         a.bulb.material.color.setHex(tint);
         a.cone.material.color.setHex(tint);
         a.pool.material.color.setHex(tint);
-        a.spot.color.setHex(tint);
-        const pulse = stuck ? 7 : 3.4;
-        const w = 0.5 + Math.sin(t * pulse + a.seed) * 0.5;
+        const w = motionOn ? 0.5 + Math.sin(t * (stuck ? 7 : 3.4) + a.seed) * 0.5 : 0.5;
         a.bulb.material.opacity = 0.6 + w * 0.4;
         a.bulb.scale.setScalar(1 + w * 0.2);
         a.cone.material.opacity = 0.11 + w * 0.10;
         a.pool.material.opacity = 0.14 + w * 0.12;
-        a.spot.intensity = 22 + w * 22;
+        if (a.spot) {
+          a.spot.color.setHex(tint);
+          a.spot.intensity = 22 + w * 22;
+        }
+      } else if (a.spot) {
+        a.spot.intensity = 0;
       }
     }
   }
 
   for (const a of ambient) {
     wanderStep(a, false, dt, t);
-    a.rig.update(avatarPose(a, "idle", t), dt, t);
+    a.rig.update(avatarPose(a, "idle", t), dt, t, rigStep(a, cam));
   }
   stepBubble(dt, t);
-  if (t - lastMini > 0.25) { renderMinimap(); lastMini = t; }
 
-  if (screensDirty && t - lastScreenPaint > 0.4) {
+  if (miniDirty && t - lastMini > tier.minimapPeriod) {
+    renderMinimap();
+    miniDirty = false;
+    lastMini = t;
+  }
+
+  if (screensDirty && t - lastScreenPaint > tier.screenPeriod) {
     refreshScreens(screenData());
     screensDirty = false;
     lastScreenPaint = t;
   }
+  paintScreens(tier.screensPerFrame);
+  flushDom();
 
   if (following && avatars.has(following)) {
     const p = avatars.get(following).person.position;
@@ -880,6 +919,8 @@ function animate() {
   }
 
   renderer.render(scene, camera);
+  sampleFrame(performance.now() - began);
+  if (shouldOfferLowSpec(hints)) offerLowSpec();
 }
 
 function setRing(role, name) {
