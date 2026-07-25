@@ -1084,8 +1084,12 @@ mod resume_boundary_tests {
     use tower::ServiceExt;
 
     fn state_with(run: &str, events: u64) -> AppState {
-        let dir = std::env::temp_dir().join(format!("studio-resume-{run}"));
-        let _ = std::fs::remove_dir_all(&dir);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir()
+            .join(format!("studio-resume-{run}-{}-{stamp}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Arc::new(Store::open(dir.join("s.db")).unwrap());
         for i in 0..events {
