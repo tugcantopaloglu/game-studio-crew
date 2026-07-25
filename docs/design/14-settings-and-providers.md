@@ -100,7 +100,8 @@ Two honest consequences of moving a seat:
 
 - **No system-prompt flag.** Neither gemini nor copilot has a flag that *replaces* the system prompt. The frozen L0+L1+L2 prefix is the entire token thesis ([02](02-context-engine.md)); delivering it in the user turn instead would work and would quietly cost 17.4× more per spawn. That is the degradation this design refuses to do silently, so it is refused loudly instead.
 - **No readable token usage.** Budget governance ([06](06-budget-governance.md)) and the ledger ([03](03-state-store.md)) both read the numbers off the stream. Without them the studio would be spending blind and the floor would be showing numbers nobody measured.
-- **No output schema** (gemini, copilot): the studio director's plan is read back as JSON against a schema. This one is per-role, and is reported separately as `plan_blockers` so the UI can say "this CLI could take the specialists but not the director" the day the first two are solved.
+- **No tool restriction** (gemini): every spawn passes an explicit `--tools`, including the coordination seats whose list is deliberately **empty**. An empty allowlist is the strongest restriction the studio applies, not the absence of one — it is the difference between 22572 and 184 prefix tokens ([02](02-context-engine.md)) — so `restricted_tools` is asked of every seat, never inferred from whether the list has entries in it.
+- **No output schema** (gemini, copilot): the studio director's plan is read back as JSON against a schema. This one is per-role, and is reported separately as `plan_blockers` so the UI can say "this CLI could take the specialists but not the director" the day the others are solved.
 
 The arg builders for gemini and copilot are written and tested anyway. They are built from real flags, so the day one of those CLIs gains a system-prompt flag the change is one line in `capabilities()`, not a new integration.
 

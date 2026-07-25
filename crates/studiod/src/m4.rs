@@ -312,7 +312,7 @@ fn run_worker_inner(
     let seat = seat_for(role, &em.state.studio_dir);
     let needs = RoleNeeds {
         structured_output: json_schema.is_some(),
-        restricted_tools: !role.tools().is_empty(),
+        restricted_tools: true,
     };
     if let Some(reason) = seat.provider.blockers(needs).into_iter().next() {
         anyhow::bail!(
@@ -614,6 +614,19 @@ mod seat_tests {
         let seat = seat_from(&s, role_named("artist"));
         assert_eq!(seat.provider, Provider::Gemini);
         assert_eq!(seat.model_alias, "gemini-3-pro");
+    }
+
+    #[test]
+    fn a_coordination_seat_still_needs_tool_restriction_because_its_list_is_empty_on_purpose() {
+        let director = role_named("studio_director");
+        assert!(director.tools().is_empty());
+        assert!(
+            !Provider::Gemini.can_serve(RoleNeeds {
+                structured_output: false,
+                restricted_tools: true,
+            }),
+            "an empty allowlist is the strongest restriction there is, not the absence of one"
+        );
     }
 
     #[test]
