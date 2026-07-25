@@ -87,6 +87,50 @@ impl Settings {
     pub fn to_value(&self) -> Value {
         Value::Object(self.values.clone())
     }
+
+    pub fn number(&self, key: &str, fallback: f64) -> f64 {
+        self.values.get(key).and_then(Value::as_f64).unwrap_or(fallback)
+    }
+
+    fn filled(&self, key: &str) -> Option<String> {
+        let text = self.values.get(key).and_then(Value::as_str)?.trim();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text.to_string())
+        }
+    }
+
+    pub fn scoped(&self, prefix: &str, role_id: &str, tier: u8) -> Option<String> {
+        self.filled(&format!("{prefix}.role.{role_id}"))
+            .or_else(|| self.filled(&format!("{prefix}.tier{tier}")))
+            .or_else(|| self.filled(prefix))
+    }
+
+    pub fn role_choice(&self, role_id: &str, tier: u8) -> RoleChoice {
+        let provider = self
+            .scoped("provider", role_id, tier)
+            .unwrap_or_else(|| DEFAULT_PROVIDER.to_string());
+        let model = if provider == DEFAULT_PROVIDER {
+            self.scoped("models", role_id, tier)
+        } else {
+            self.scoped(&format!("models.{provider}"), role_id, tier)
+        };
+        RoleChoice {
+            model,
+            effort: self.scoped("effort", role_id, tier),
+            provider,
+        }
+    }
+}
+
+pub const DEFAULT_PROVIDER: &str = "claude";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleChoice {
+    pub provider: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 #[cfg(test)]
@@ -120,5 +164,66 @@ mod tests {
     #[test]
     fn a_json_array_is_rejected_instead_of_silently_becoming_empty() {
         assert!(matches!(Settings::parse("[1,2]"), Err(SettingsError::Shape(_))));
+    }
+
+    fn with(pairs: &[(&str, &str)]) -> Settings {
+        let mut s = Settings::new();
+        for (k, v) in pairs {
+            s.set(k, Value::String((*v).into()));
+        }
+        s
+    }
+
+    #[test]
+    fn a_studio_that_has_never_been_configured_leaves_every_choice_to_the_registry() {
+        let choice = Settings::new().role_choice("gameplay_engineer", 3);
+        assert_eq!(choice.provider, "claude");
+        assert_eq!(choice.model, None);
+        assert_eq!(choice.effort, None);
+    }
+
+    #[test]
+    fn a_tier_default_reaches_every_role_in_that_tier() {
+        let s = with(&[("models.tier3", "haiku")]);
+        assert_eq!(s.role_choice("artist", 3).model.as_deref(), Some("haiku"));
+        assert_eq!(s.role_choice("producer", 2).model, None);
+    }
+
+    #[test]
+    fn a_role_override_beats_the_tier_default_for_that_role_alone() {
+        let s = with(&[("models.tier3", "haiku"), ("models.role.qa_engineer", "opus")]);
+        assert_eq!(s.role_choice("qa_engineer", 3).model.as_deref(), Some("opus"));
+        assert_eq!(s.role_choice("artist", 3).model.as_deref(), Some("haiku"));
+    }
+
+    #[test]
+    fn clearing_an_override_back_to_blank_falls_through_to_the_tier() {
+        let s = with(&[("models.tier2", "opus"), ("models.role.producer", "   ")]);
+        assert_eq!(s.role_choice("producer", 2).model.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn a_provider_chosen_globally_applies_until_a_role_names_its_own() {
+        let s = with(&[("provider", "gemini"), ("provider.role.studio_director", "claude")]);
+        assert_eq!(s.role_choice("artist", 3).provider, "gemini");
+        assert_eq!(s.role_choice("studio_director", 1).provider, "claude");
+    }
+
+    #[test]
+    fn each_provider_carries_its_own_model_names_rather_than_sharing_one_list() {
+        let s = with(&[
+            ("models.tier3", "opus"),
+            ("provider.role.artist", "gemini"),
+            ("models.gemini.tier3", "gemini-3-pro"),
+        ]);
+        assert_eq!(s.role_choice("artist", 3).model.as_deref(), Some("gemini-3-pro"));
+        assert_eq!(s.role_choice("qa_engineer", 3).model.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn effort_follows_the_same_role_over_tier_precedence_as_the_model() {
+        let s = with(&[("effort.tier3", "low"), ("effort.role.qa_engineer", "max")]);
+        assert_eq!(s.role_choice("qa_engineer", 3).effort.as_deref(), Some("max"));
+        assert_eq!(s.role_choice("artist", 3).effort.as_deref(), Some("low"));
     }
 }

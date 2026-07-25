@@ -1,9 +1,11 @@
 pub mod plan;
-pub use plan::{plan_schema, Plan, PlanError, PlanTask, MAX_TASKS};
+pub use plan::{
+    humanise, plan_schema, Plan, PlanError, PlanStep, PlanTask, StepEdit, MAX_TASKS, SAY_LIMIT,
+};
 pub mod exec;
 pub use exec::{
     execute, execute_parallel, Admission, GateOutcome, NodeOutcome, ParallelWorkflowHost,
-    RunOutcome, RunReport, WorkflowHost, MAX_REPAIR_ROUNDS,
+    RunOutcome, RunReport, WaveVerdict, WorkflowHost, MAX_REPAIR_ROUNDS,
 };
 
 use serde::{Deserialize, Serialize};

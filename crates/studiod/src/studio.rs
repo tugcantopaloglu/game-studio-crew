@@ -4,7 +4,8 @@ use std::sync::Arc;
 use studio_agents::{nearest_common_ancestor, role};
 use studio_events::{EventType, Scene};
 use studio_server::{
-    AppState, BuildRequest, MeetingRequest, StudioCommand, TaskRequest, WorkflowRequest,
+    AppState, BuildRequest, MeetingRequest, PlanVerdict, StudioCommand, TaskRequest,
+    WorkflowRequest,
 };
 use studio_store::Store;
 
@@ -103,7 +104,10 @@ fn run_build(em: &Emitter, req: BuildRequest, seq: &mut usize) -> Result<()> {
         "A request has come in: {}\n{survey_block}\n\
          {engine_line}Decompose it into studio tasks. Give each task the role that should do it, \
          a brief detailed enough that the role needs no further decisions, and the ids \
-         of the tasks whose output it needs. The floor runs independent tasks in \
+         of the tasks whose output it needs. Give each task a 'say' line too: one sentence \
+         a producer would use telling a colleague what this step is, naming the thing in \
+         the game rather than the technique, so that 'Draw the player and the pipes it \
+         flies through' reads back instead of 'implement sprite atlas'. The floor runs independent tasks in \
          parallel, so parallelize aggressively: only add depends_on when a task truly \
          reads another task's files, split large implementation work into several \
          non-overlapping tasks (the same role may appear more than once), and give \
@@ -116,16 +120,18 @@ fn run_build(em: &Emitter, req: BuildRequest, seq: &mut usize) -> Result<()> {
     let raw = crate::m4::run_worker_capturing(em, director, &brief, *seq, Some(schema))?;
 
     let cleaned = extract_json(&raw);
-    let plan = studio_workflow::Plan::parse(&cleaned)
+    let proposed = studio_workflow::Plan::parse(&cleaned)
         .map_err(|e| anyhow::anyhow!("the director returned a plan I cannot run: {e}"))?;
 
-    println!("  plan '{}' with {} tasks:", plan.title, plan.tasks.len());
-    for t in &plan.tasks {
-        println!(
-            "    {:<6} {:<20} deps={:?}",
-            t.id, t.role, t.depends_on
-        );
+    println!("  plan '{}' with {} tasks:", proposed.title, proposed.tasks.len());
+    for t in &proposed.tasks {
+        println!("    {:<6} {:<20} {}", t.id, t.role, t.say());
     }
+
+    let plan = match propose(em, proposed, req.guided)? {
+        Some(plan) => plan,
+        None => return Ok(()),
+    };
 
     let mut wf = plan
         .to_workflow()
@@ -138,8 +144,83 @@ fn run_build(em: &Emitter, req: BuildRequest, seq: &mut usize) -> Result<()> {
         }
     }
 
-    crate::wf::run_planned(em, &wf, &req.prompt, em.project.clone(), seq, Some(plan), req.ask_above)?;
+    crate::wf::run_planned(
+        em,
+        &wf,
+        &req.prompt,
+        em.project.clone(),
+        seq,
+        Some(plan),
+        req.ask_above,
+        req.step_confirm,
+    )?;
     Ok(())
+}
+
+fn plan_data(
+    plan_id: &str,
+    plan: &studio_workflow::Plan,
+    editable: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "plan_id": plan_id,
+        "title": plan.title,
+        "steps": plan.steps(),
+        "editable": editable,
+    })
+}
+
+fn propose(
+    em: &Emitter,
+    plan: studio_workflow::Plan,
+    guided: bool,
+) -> Result<Option<studio_workflow::Plan>> {
+    let plan_id = crate::id("plan");
+
+    if !guided {
+        em.emit(
+            "daemon",
+            EventType::PlanProposed,
+            Scene::daemon(),
+            plan_data(&plan_id, &plan, false),
+        )?;
+        return Ok(Some(plan));
+    }
+
+    let rx = em.state.await_plan(&plan_id);
+    em.emit(
+        "daemon",
+        EventType::PlanProposed,
+        Scene::daemon(),
+        plan_data(&plan_id, &plan, true),
+    )?;
+    println!("  plan {plan_id} is on the floor; nothing runs until you start it");
+
+    match rx.recv() {
+        Ok(PlanVerdict::Start { steps }) if steps.is_empty() => Ok(Some(plan)),
+        Ok(PlanVerdict::Start { steps }) => {
+            let revised = plan
+                .revise(&steps)
+                .map_err(|e| anyhow::anyhow!("the plan you edited will not run: {e}"))?;
+            println!("  starting the plan you edited: {} step(s)", revised.tasks.len());
+            Ok(Some(revised))
+        }
+        Ok(PlanVerdict::Cancel) => {
+            println!("  plan {plan_id} dropped before any worker was paid for");
+            em.emit(
+                "daemon",
+                EventType::RunInterrupted,
+                Scene::daemon(),
+                serde_json::json!({
+                    "reason": "plan dropped",
+                    "note": null,
+                    "step": null,
+                }),
+            )?;
+            Ok(None)
+        }
+        Err(_) => anyhow::bail!("the floor went away while the plan waited to start"),
+    }
 }
 
 fn verify_gate(
@@ -897,6 +978,95 @@ mod index_tests {
         let events = h.index_events();
         assert_eq!(events.len(), 2);
         assert_eq!(events[1]["symbols_delta"], -1);
+    }
+}
+
+#[cfg(test)]
+mod guided_tests {
+    use super::*;
+    use studio_workflow::{Plan, PlanTask};
+
+    fn step(id: &str, role: &str, brief: &str, say: &str, deps: &[&str]) -> PlanTask {
+        PlanTask {
+            id: id.into(),
+            role: role.into(),
+            brief: brief.into(),
+            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+            say: say.into(),
+        }
+    }
+
+    fn plan() -> Plan {
+        Plan {
+            title: "Flappy".into(),
+            tasks: vec![
+                step(
+                    "t1",
+                    "artist",
+                    "Author a 16x16 sprite atlas for the avatar and obstacle columns.",
+                    "Draw the player and the pipes it flies through",
+                    &[],
+                ),
+                step(
+                    "t2",
+                    "gameplay_engineer",
+                    "Implement the flap impulse and gravity integration.",
+                    "Make the bird flap when a key is pressed",
+                    &["t1"],
+                ),
+            ],
+        }
+    }
+
+    #[test]
+    fn the_plan_reaches_the_floor_in_words_a_person_would_use() {
+        let d = plan_data("plan_1", &plan(), true);
+        assert_eq!(d["steps"][0]["say"], "Draw the player and the pipes it flies through");
+        assert_eq!(d["steps"][1]["say"], "Make the bird flap when a key is pressed");
+        assert!(
+            !d["steps"][0]["say"].as_str().unwrap().contains("atlas"),
+            "a producer does not say sprite atlas to a colleague"
+        );
+    }
+
+    #[test]
+    fn the_proposal_carries_every_key_doc_05_promises() {
+        let d = plan_data("plan_1", &plan(), true);
+        for key in ["plan_id", "title", "steps", "editable"] {
+            assert!(d.get(key).is_some(), "plan_proposed does not emit {key}");
+        }
+        assert_eq!(d["plan_id"], "plan_1");
+        assert_eq!(d["title"], "Flappy");
+    }
+
+    #[test]
+    fn a_guided_plan_is_marked_editable_and_an_old_style_build_is_not() {
+        assert_eq!(plan_data("plan_1", &plan(), true)["editable"], true);
+        assert_eq!(
+            plan_data("plan_1", &plan(), false)["editable"],
+            false,
+            "a run nobody is holding must not look like it is waiting"
+        );
+    }
+
+    #[test]
+    fn the_floor_gets_the_detailed_brief_alongside_the_plain_line() {
+        let d = plan_data("plan_1", &plan(), true);
+        assert!(d["steps"][0]["brief"].as_str().unwrap().contains("sprite atlas"));
+        assert_eq!(d["steps"][1]["depends_on"][0], "t1");
+        assert_eq!(d["steps"][1]["role"], "gameplay_engineer");
+    }
+
+    #[test]
+    fn a_guided_build_runs_against_the_place_the_human_picked() {
+        let cmd = StudioCommand::Build(BuildRequest {
+            prompt: "make flappy bird".into(),
+            project: Some("proj_flappy".into()),
+            ask_above: None,
+            guided: true,
+            step_confirm: true,
+        });
+        assert_eq!(project_of(&cmd), Some("proj_flappy"));
     }
 }
 

@@ -1,12 +1,13 @@
 import * as THREE from "/vendor/three.module.js";
 import {
-  buildCharacter, buildDesk, buildChair, buildPlant, buildCabinet,
+  buildDesk, buildChair, buildPlant, buildCabinet,
   buildWhiteboard, buildServerRack, buildEasel, buildSofa, buildTestBench,
   buildMeetingTable, buildCoffeeBar, buildWaterCooler, buildShelf, buildBoxes,
   characterBounds,
 } from "/voxel.js";
+import { buildAvatar, voxelMesh, VOX } from "/avatar.js";
 
-export const VOX = 0.085;
+export { VOX, voxelMesh };
 const PICK_MATERIAL = new THREE.MeshBasicMaterial({ visible: false });
 export const WALL_H = 2.6;
 export const WALL_T = 0.16;
@@ -23,37 +24,16 @@ const SCREEN_STYLE = {
   qa: "code", infra: "graph",
 };
 
-const cube = new THREE.BoxGeometry(1, 1, 1);
 const tileGeo = new THREE.BoxGeometry(1, 0.2, 1);
-for (const g of [cube, tileGeo]) {
-  const n = g.attributes.position.count;
-  g.setAttribute("color", new THREE.BufferAttribute(new Float32Array(n * 3).fill(1), 3));
-}
+tileGeo.setAttribute(
+  "color",
+  new THREE.BufferAttribute(new Float32Array(tileGeo.attributes.position.count * 3).fill(1), 3)
+);
 
 let rng = 1;
 function rand() {
   rng = (rng * 1664525 + 1013904223) % 4294967296;
   return rng / 4294967296;
-}
-
-export function voxelMesh(voxels, opts = {}) {
-  const mesh = new THREE.InstancedMesh(
-    cube,
-    new THREE.MeshLambertMaterial({ vertexColors: true }),
-    voxels.length
-  );
-  mesh.castShadow = opts.castShadow !== false;
-  mesh.receiveShadow = true;
-  const m = new THREE.Matrix4();
-  const c = new THREE.Color();
-  voxels.forEach((v, i) => {
-    m.makeTranslation(v.x + 0.5, v.y + 0.5, v.z + 0.5);
-    mesh.setMatrixAt(i, m);
-    mesh.setColorAt(i, c.setHex(v.c));
-  });
-  mesh.instanceMatrix.needsUpdate = true;
-  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-  return mesh;
 }
 
 function place(voxels, x, y, z, rotY = 0) {
@@ -592,8 +572,8 @@ export function buildOffice(floor, scene) {
     ring.position.y = -0.19;
     person.add(ring);
 
-    const body = place(buildCharacter(d.role), 0, 0, 0);
-    person.add(body.group);
+    const rig = buildAvatar(d.role, rand() * 10);
+    person.add(rig.group);
 
     const cb = characterBounds();
     const proxy = new THREE.Mesh(
@@ -655,9 +635,11 @@ export function buildOffice(floor, scene) {
     lamp.add(spot.target);
 
     avatars.set(d.role, {
-      person, body: body.group, hit: proxy, ringMat, alarm, lamp, bulb, cone, pool, spot,
+      person, body: rig.group, rig, hit: proxy, ringMat, alarm, lamp, bulb, cone, pool, spot,
       tier: d.tier, title: d.title, dept: d.department,
       home,
+      deskLook: new THREE.Vector3(d.x + d.w / 2 - cx, 0.92, d.y + d.h / 2 - cz),
+      homeFacing: facing,
       bounds: {
         x0: room.x - cx + 1.1, x1: room.x - cx + room.w - 1.1,
         z0: room.y - cz + 1.6, z1: room.y - cz + room.h - 1.1,
@@ -672,7 +654,8 @@ export function buildOffice(floor, scene) {
       meetingSeat: null,
       meetingFace: null,
       wait: rand() * 4,
-      facing: 0,
+      facing: facing,
+      speed: 0,
       seed: rand() * 10,
     });
   }
@@ -858,6 +841,7 @@ export function seatAtTable(a, table, index, total) {
     table.z + Math.sin(angle) * 0.95
   );
   a.meetingFace = Math.atan2(table.x - a.meetingSeat.x, table.z - a.meetingSeat.z);
+  a.meetingLook = new THREE.Vector3(table.x, table.y + 0.95, table.z);
   a.path = pathFrom(a.person.position, [...a.route.map((v) => v.clone()), a.meetingSeat.clone()]);
   a.target.copy(a.path[0]);
   a.inLobby = true;
@@ -866,6 +850,7 @@ export function seatAtTable(a, table, index, total) {
 export function leaveTable(a) {
   a.meetingSeat = null;
   a.meetingFace = null;
+  a.meetingLook = null;
   a.inLobby = false;
   a.path = [...a.route.map((v) => v.clone()).reverse(), a.home.clone()];
   a.target.copy(a.path[0]);
@@ -932,19 +917,42 @@ export function wanderStep(a, busy, dt, now) {
   const dx = a.target.x - p.x;
   const dz = a.target.z - p.z;
   const dist = Math.hypot(dx, dz);
-  if (dist > 0.06) {
-    const speed = a.mode === "returning" ? 5.4 : a.mode === "meeting" ? 2.4 : 0.85;
-    const step = Math.min(dist, speed * dt);
+  const cruise = a.mode === "returning" ? 2.9 : a.mode === "meeting" ? 1.7 : 0.9;
+  const want = dist > 0.06 ? Math.min(cruise, 0.22 + dist * 2.4) : 0;
+  const gain = want > a.speed ? 3.6 : 7.0;
+  a.speed += (want - a.speed) * Math.min(1, gain * dt);
+  if (a.speed < 0.03) a.speed = 0;
+
+  if (a.speed > 0 && dist > 0.001) {
+    const step = Math.min(dist, a.speed * dt);
     p.x += (dx / dist) * step;
     p.z += (dz / dist) * step;
-    a.facing = Math.atan2(dx, dz);
+    if (dist > 0.16) a.facing = Math.atan2(dx, dz);
     return true;
   }
 
   if (a.meetingSeat && a.meetingFace !== null && a.meetingFace !== undefined) {
     a.facing = a.meetingFace;
+  } else if (a.mode === "desk" && a.homeFacing !== undefined) {
+    a.facing = a.homeFacing;
   }
   return false;
+}
+
+export function avatarPose(a, ring, t) {
+  const still = a.speed === 0;
+  const seated = still && a.mode === "desk";
+  return {
+    speed: a.speed,
+    facing: a.facing,
+    sitting: seated,
+    working: ring === "running",
+    stuck: ring === "error" || ring === "blocked",
+    talking: (a.talkUntil || 0) > t,
+    recline: seated && Math.sin(t * 0.17 + a.seed) > 0.84 ? 1 : 0,
+    at: a.person.position,
+    lookAt: !still ? null : seated ? a.deskLook : a.meetingSeat ? a.meetingLook : null,
+  };
 }
 
 export function makeLabel(text, color, scale = 1) {
@@ -1052,16 +1060,16 @@ export function buildAmbient(parent, floor, cx, cz, count = 5) {
     person.position.copy(start);
     parent.add(person);
 
-    const body = place(buildCharacter(AMBIENT_PALETTES[i % AMBIENT_PALETTES.length]), 0, 0, 0);
-    person.add(body.group);
+    const rig = buildAvatar(AMBIENT_PALETTES[i % AMBIENT_PALETTES.length], rand() * 10);
+    person.add(rig.group);
 
     out.push({
-      person, body: body.group,
+      person, body: rig.group, rig,
       home: start.clone(), bounds: rect, lobby: rect,
       target: start.clone(), route: [], path: [], inLobby: true,
       mode: "idle", meetingSeat: null, meetingFace: null,
       door: start.clone(),
-      wait: rand() * 6, facing: 0, seed: rand() * 10,
+      wait: rand() * 6, facing: 0, speed: 0, seed: rand() * 10,
     });
   }
   return out;

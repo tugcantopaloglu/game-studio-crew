@@ -10,7 +10,7 @@ use studio_events::{EventType, Scene};
 use studio_verify::{EngineDriver, ProfileDriver, ProjectPaths, Verdict};
 use studio_workflow::{
     execute_parallel, Admission, Gate, GateKind, GateOutcome, Node, NodeOutcome,
-    ParallelWorkflowHost, RunOutcome, Workflow,
+    ParallelWorkflowHost, RunOutcome, WaveVerdict, Workflow,
 };
 
 use crate::m4::Emitter;
@@ -40,6 +40,45 @@ pub struct Host<'a> {
     pub next_ask_at: Mutex<u64>,
     pub spent_usd: Mutex<f64>,
     pub engine_hint: String,
+    pub step_confirm: bool,
+    pub notes: Mutex<Vec<String>>,
+    pub tiers_done: AtomicUsize,
+}
+
+pub fn node_brief(
+    planned: Option<&str>,
+    run_brief: &str,
+    node_id: &str,
+    upstream: &[String],
+    notes: &[String],
+    hint: &str,
+) -> String {
+    let head = match planned {
+        Some(planned) => planned.to_string(),
+        None => format!("Workflow node '{node_id}'.\n\n{run_brief}"),
+    };
+
+    let upstream = if upstream.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nUpstream capsules: {}", upstream.join(", "))
+    };
+
+    let steer = if notes.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nThe human steering this run has asked for this, and it outranks the \
+             brief above where they disagree:\n{}",
+            notes
+                .iter()
+                .map(|n| format!("- {n}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+
+    format!("{head}{upstream}{steer}{hint}")
 }
 
 impl<'a> Host<'a> {
@@ -68,7 +107,43 @@ fn acts(r: &studio_agents::Role) -> bool {
     !r.tools().is_empty()
 }
 
+pub fn tier_title(says: &[String]) -> String {
+    match says {
+        [] => "the crew has nothing to show".to_string(),
+        [only] => only.clone(),
+        [first, rest @ ..] => format!("{first} (and {} more)", rest.len()),
+    }
+}
+
+pub fn tier_summary(lines: &[(String, String)]) -> String {
+    lines
+        .iter()
+        .map(|(role, say)| format!("{role}: {say}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 impl<'a> Host<'a> {
+    fn say_for(&self, id: &str) -> String {
+        self.plan
+            .as_ref()
+            .and_then(|p| p.say_for(id))
+            .unwrap_or_else(|| id.to_string())
+    }
+
+    fn step_title(&self, completed: &[&Node]) -> String {
+        let says: Vec<String> = completed.iter().map(|n| self.say_for(&n.id)).collect();
+        tier_title(&says)
+    }
+
+    fn step_summary(&self, completed: &[&Node]) -> String {
+        let lines: Vec<(String, String)> = completed
+            .iter()
+            .map(|n| (n.role.clone(), self.say_for(&n.id)))
+            .collect();
+        tier_summary(&lines)
+    }
+
     fn spend_approved(&self, node: &Node) -> Result<(), String> {
         let step = match self.ask_above {
             Some(step) if step > 0 => step,
@@ -173,21 +248,15 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
         );
 
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-        let upstream = if inputs.is_empty() {
-            String::new()
-        } else {
-            format!("\n\nUpstream capsules: {}", inputs.join(", "))
-        };
-        let brief = match self.plan.as_ref().and_then(|p| p.brief_for(&node.id)) {
-            Some(planned) => format!("{planned}{upstream}{}", self.acting_hint(r)),
-            None => format!(
-                "Workflow node '{}'.\n\n{}{}{}",
-                node.id,
-                self.brief,
-                upstream,
-                self.acting_hint(r)
-            ),
-        };
+        let notes = self.notes.lock().unwrap().clone();
+        let brief = node_brief(
+            self.plan.as_ref().and_then(|p| p.brief_for(&node.id)),
+            &self.brief,
+            &node.id,
+            inputs,
+            &notes,
+            &self.acting_hint(r),
+        );
 
         match crate::m4::run_worker_metered_uncommitted(self.em, r, &brief, seq, acts(r)) {
             Ok(m) => {
@@ -197,6 +266,97 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
                 NodeOutcome::Completed { capsule: format!("cap_{}", node.id) }
             }
             Err(e) => NodeOutcome::Failed { reason: e.to_string() },
+        }
+    }
+
+    fn before_wave(&self, ready: &[&Node]) -> WaveVerdict {
+        let landing = ready.first().map(|n| self.say_for(&n.id));
+
+        for interrupt in self.em.state.take_interrupts() {
+            if let Some(note) = interrupt.note.filter(|n| !n.trim().is_empty()) {
+                println!("  a note landed on the next step: {note}");
+                let _ = self.em.emit(
+                    "daemon",
+                    EventType::RunInterrupted,
+                    Scene::daemon(),
+                    serde_json::json!({
+                        "reason": "note",
+                        "note": note,
+                        "step": landing,
+                    }),
+                );
+                self.notes.lock().unwrap().push(note);
+            }
+
+            if interrupt.stop {
+                println!("  you stopped the run; nothing further is spawned");
+                let _ = self.em.emit(
+                    "daemon",
+                    EventType::RunInterrupted,
+                    Scene::daemon(),
+                    serde_json::json!({
+                        "reason": "stopped",
+                        "note": null,
+                        "step": landing,
+                    }),
+                );
+                return WaveVerdict::Stop {
+                    reason: "you stopped the run from the floor".to_string(),
+                };
+            }
+        }
+
+        WaveVerdict::Continue
+    }
+
+    fn after_wave(&self, completed: &[&Node]) -> WaveVerdict {
+        self.notes.lock().unwrap().clear();
+        if !self.step_confirm {
+            self.tiers_done.fetch_add(1, Ordering::SeqCst);
+            return WaveVerdict::Continue;
+        }
+
+        let step = self.tiers_done.load(Ordering::SeqCst) + 1;
+        let approval_id = crate::id("step");
+        let rx = self.em.state.await_step(&approval_id);
+
+        let _ = self.em.emit(
+            "daemon",
+            EventType::StepApprovalNeeded,
+            Scene::daemon(),
+            serde_json::json!({
+                "approval_id": approval_id,
+                "step": step,
+                "title": self.step_title(completed),
+                "summary": self.step_summary(completed),
+                "modes": ["approve", "improve", "redo"],
+            }),
+        );
+        println!("  step {step} is done and waiting for you on the floor");
+
+        match rx.recv() {
+            Ok(verdict) if verdict.approve => {
+                self.tiers_done.fetch_add(1, Ordering::SeqCst);
+                if let Some(note) = verdict.note.filter(|n| !n.trim().is_empty()) {
+                    println!("  step {step} approved; the next step is briefed with: {note}");
+                    self.notes.lock().unwrap().push(note);
+                } else {
+                    println!("  step {step} approved");
+                }
+                WaveVerdict::Continue
+            }
+            Ok(verdict) => {
+                let note = verdict
+                    .note
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| "Do this step again and make it better.".to_string());
+                println!("  step {step} sent back: {note}");
+                self.notes.lock().unwrap().push(note);
+                WaveVerdict::Redo
+            }
+            Err(_) => WaveVerdict::Stop {
+                reason: "the floor went away while the run waited on a step".to_string(),
+            },
         }
     }
 
@@ -361,9 +521,10 @@ pub fn run_workflow(
     seq: &mut usize,
     ask_above: Option<u64>,
 ) -> Result<RunOutcome> {
-    run_planned(em, workflow, brief, project, seq, None, ask_above)
+    run_planned(em, workflow, brief, project, seq, None, ask_above, false)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_planned(
     em: &Emitter,
     workflow: &Workflow,
@@ -372,6 +533,7 @@ pub fn run_planned(
     seq: &mut usize,
     plan: Option<studio_workflow::Plan>,
     ask_above: Option<u64>,
+    step_confirm: bool,
 ) -> Result<RunOutcome> {
     let base_sha = project
         .as_deref()
@@ -472,7 +634,15 @@ pub fn run_planned(
         next_ask_at: Mutex::new(ask_above.unwrap_or(u64::MAX)),
         spent_usd: Mutex::new(0.0),
         engine_hint,
+        step_confirm,
+        notes: Mutex::new(Vec::new()),
+        tiers_done: AtomicUsize::new(0),
     };
+
+    if step_confirm {
+        println!("  step confirmation is on; the run holds after every step");
+    }
+    em.state.take_interrupts();
 
     let width = parallel_workers();
     println!("  running up to {width} workers in parallel");
@@ -494,6 +664,7 @@ pub fn run_planned(
             "gates_passed": report.gates_passed,
             "gates_failed": report.gates_failed,
             "repair_rounds": report.repair_rounds,
+            "redo_rounds": report.redo_rounds,
             "degradations": report.degradations,
         }),
     )?;
@@ -508,15 +679,110 @@ pub fn run_planned(
         report.repair_rounds
     );
 
+    if report.redo_rounds > 0 {
+        println!("    {} step(s) were sent back and run again", report.redo_rounds);
+    }
+
     match &outcome {
         RunOutcome::Blocked { node, reason }
         | RunOutcome::Escalated { node, reason }
         | RunOutcome::RoutedToInfra { node, reason }
-        | RunOutcome::Refused { node, reason } => {
+        | RunOutcome::Refused { node, reason }
+        | RunOutcome::Interrupted { node, reason } => {
             println!("    stopped at {node}: {reason}");
         }
         RunOutcome::Completed => {}
     }
 
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod guided_tests {
+    use super::{node_brief, tier_summary, tier_title};
+
+    fn says(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_step_with_no_notes_is_briefed_exactly_as_it_was_planned() {
+        let brief = node_brief(Some("Draw the bird."), "build flappy", "t1", &[], &[], "");
+        assert_eq!(brief, "Draw the bird.");
+    }
+
+    #[test]
+    fn a_step_sent_back_is_briefed_with_the_notes_that_say_why() {
+        let brief = node_brief(
+            Some("Draw the bird."),
+            "build flappy",
+            "t1",
+            &[],
+            &says(&["the bird reads as a blob at this size"]),
+            "",
+        );
+        assert!(brief.starts_with("Draw the bird."), "the plan still leads the brief");
+        assert!(brief.contains("- the bird reads as a blob at this size"));
+        assert!(
+            brief.contains("outranks the brief above"),
+            "a worker that treats the note as optional will hand back the same thing"
+        );
+    }
+
+    #[test]
+    fn several_notes_all_reach_the_crew() {
+        let brief = node_brief(
+            Some("Draw the bird."),
+            "b",
+            "t1",
+            &[],
+            &says(&["make it a paper plane", "the pipes should be green"]),
+            "",
+        );
+        assert!(brief.contains("- make it a paper plane"));
+        assert!(brief.contains("- the pipes should be green"));
+    }
+
+    #[test]
+    fn notes_sit_between_the_plan_and_the_working_directory_hint() {
+        let brief = node_brief(
+            Some("Draw the bird."),
+            "b",
+            "t1",
+            &["cap_t0".to_string()],
+            &says(&["make it a paper plane"]),
+            "\n\nYou are working in the project at /games/flappy.",
+        );
+        let note_at = brief.find("paper plane").unwrap();
+        let upstream_at = brief.find("cap_t0").unwrap();
+        let hint_at = brief.find("You are working in").unwrap();
+        assert!(upstream_at < note_at && note_at < hint_at);
+    }
+
+    #[test]
+    fn a_workflow_node_with_no_plan_still_carries_the_run_brief() {
+        let brief = node_brief(None, "build flappy", "implement", &[], &[], "");
+        assert!(brief.contains("implement"));
+        assert!(brief.contains("build flappy"));
+    }
+
+    #[test]
+    fn a_single_step_tier_is_titled_with_what_the_crew_just_did() {
+        assert_eq!(tier_title(&says(&["Draw the player"])), "Draw the player");
+    }
+
+    #[test]
+    fn a_tier_that_ran_three_things_at_once_says_so_instead_of_naming_one() {
+        let title = tier_title(&says(&["Draw the player", "Write the score", "Add the flap"]));
+        assert_eq!(title, "Draw the player (and 2 more)");
+    }
+
+    #[test]
+    fn the_step_summary_names_who_did_what() {
+        let summary = tier_summary(&[
+            ("artist".to_string(), "Draw the player".to_string()),
+            ("gameplay_engineer".to_string(), "Add the flap".to_string()),
+        ]);
+        assert_eq!(summary, "artist: Draw the player\ngameplay_engineer: Add the flap");
+    }
 }

@@ -11,6 +11,57 @@ pub struct PlanTask {
     pub brief: String,
     #[serde(default)]
     pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub say: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanStep {
+    pub id: String,
+    pub role: String,
+    pub say: String,
+    pub brief: String,
+    pub depends_on: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StepEdit {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub say: String,
+}
+
+pub const SAY_LIMIT: usize = 160;
+
+pub fn humanise(brief: &str) -> String {
+    let flat = brief.split_whitespace().collect::<Vec<_>>().join(" ");
+    let first = match flat.find(". ") {
+        Some(i) => &flat[..=i],
+        None => flat.as_str(),
+    };
+    if first.chars().count() <= SAY_LIMIT {
+        return first.to_string();
+    }
+    let cut: String = first.chars().take(SAY_LIMIT - 1).collect();
+    let head = match cut.rsplit_once(' ') {
+        Some((words, _)) => words,
+        None => cut.as_str(),
+    };
+    format!("{head}…")
+}
+
+impl PlanTask {
+    pub fn say(&self) -> String {
+        let said = self.say.trim();
+        if said.is_empty() {
+            humanise(&self.brief)
+        } else {
+            said.to_string()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -81,13 +132,17 @@ pub fn plan_schema() -> serde_json::Value {
                             "type": "string",
                             "description": "What this role must do, in enough detail that it needs no further decisions."
                         },
+                        "say": {
+                            "type": "string",
+                            "description": "One sentence a producer would say to a colleague about this task. Name the thing in the game, not the technique."
+                        },
                         "depends_on": {
                             "type": "array",
                             "items": { "type": "string" },
                             "description": "Ids of tasks whose capsules this task needs."
                         }
                     },
-                    "required": ["id", "role", "brief", "depends_on"]
+                    "required": ["id", "role", "brief", "say", "depends_on"]
                 }
             }
         },
@@ -193,6 +248,81 @@ impl Plan {
     pub fn brief_for(&self, id: &str) -> Option<&str> {
         self.tasks.iter().find(|t| t.id == id).map(|t| t.brief.as_str())
     }
+
+    pub fn say_for(&self, id: &str) -> Option<String> {
+        self.tasks.iter().find(|t| t.id == id).map(|t| t.say())
+    }
+
+    pub fn steps(&self) -> Vec<PlanStep> {
+        self.tasks
+            .iter()
+            .map(|t| PlanStep {
+                id: t.id.clone(),
+                role: t.role.clone(),
+                say: t.say(),
+                brief: t.brief.clone(),
+                depends_on: t.depends_on.clone(),
+            })
+            .collect()
+    }
+
+    pub fn revise(&self, edits: &[StepEdit]) -> Result<Plan, PlanError> {
+        if edits.is_empty() {
+            return Err(PlanError::Empty);
+        }
+
+        let mut tasks: Vec<PlanTask> = Vec::new();
+        let mut placed: Vec<String> = Vec::new();
+
+        for edit in edits {
+            let original = self.tasks.iter().find(|t| t.id == edit.id);
+            let say = edit.say.trim().to_string();
+            let id = match original {
+                Some(t) => t.id.clone(),
+                None => self.fresh_id(&placed),
+            };
+            if say.is_empty() {
+                return Err(PlanError::EmptyBrief(id));
+            }
+
+            let role = match (edit.role.trim(), original) {
+                ("", Some(t)) => t.role.clone(),
+                (chosen, _) => chosen.to_string(),
+            };
+
+            let brief = match original {
+                Some(t) if t.say() == say => t.brief.clone(),
+                _ => say.clone(),
+            };
+
+            let depends_on: Vec<String> = match original {
+                Some(t) => t
+                    .depends_on
+                    .iter()
+                    .filter(|d| placed.contains(d))
+                    .cloned()
+                    .collect(),
+                None => placed.last().cloned().into_iter().collect(),
+            };
+
+            placed.push(id.clone());
+            tasks.push(PlanTask { id, role, brief, depends_on, say });
+        }
+
+        let revised = Plan { tasks, title: self.title.clone() };
+        revised.validate()?;
+        Ok(revised)
+    }
+
+    fn fresh_id(&self, placed: &[String]) -> String {
+        let taken = |candidate: &str| {
+            self.tasks.iter().any(|t| t.id == candidate) || placed.iter().any(|p| p == candidate)
+        };
+        (1..)
+            .map(|n| format!("s{n}"))
+            .find(|candidate| !taken(candidate))
+            .expect("the id space is unbounded")
+    }
 }
 
 #[cfg(test)]
@@ -205,7 +335,24 @@ mod tests {
             role: role.into(),
             brief: format!("do {id}"),
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
+            say: String::new(),
         }
+    }
+
+    fn edit(id: &str, role: &str, say: &str) -> StepEdit {
+        StepEdit { id: id.into(), role: role.into(), say: say.into() }
+    }
+
+    fn flappy() -> Plan {
+        let mut art = task("t1", "artist", &[]);
+        art.brief = "Author a 16x16 sprite atlas for the avatar and the obstacle columns.".into();
+        art.say = "Draw the player and the pipes it flies through".into();
+
+        let mut code = task("t2", "gameplay_engineer", &["t1"]);
+        code.brief = "Implement the flap impulse and gravity integration.".into();
+        code.say = "Make the bird flap when a key is pressed".into();
+
+        Plan { tasks: vec![art, code], title: "Flappy".into() }
     }
 
     fn plan(tasks: Vec<PlanTask>) -> Plan {
@@ -350,6 +497,110 @@ mod tests {
             wf.gates.is_empty(),
             "a planned run gates on nothing until the plan says which engine it targets"
         );
+    }
+
+    #[test]
+    fn a_step_with_no_wording_of_its_own_still_reads_as_a_sentence() {
+        let mut t = task("t1", "artist", &[]);
+        t.brief = "Author a sprite atlas. Then wire it into the scene.".into();
+        assert_eq!(t.say(), "Author a sprite atlas.");
+    }
+
+    #[test]
+    fn a_very_long_brief_is_cut_at_a_word_rather_than_mid_word() {
+        let mut t = task("t1", "artist", &[]);
+        t.brief = "word ".repeat(80);
+        let said = t.say();
+        assert!(said.chars().count() <= SAY_LIMIT);
+        assert!(said.ends_with('…'));
+        assert!(!said.contains("wor…"));
+    }
+
+    #[test]
+    fn the_plan_is_offered_to_a_human_in_the_planners_own_words() {
+        let steps = flappy().steps();
+        assert_eq!(steps[0].say, "Draw the player and the pipes it flies through");
+        assert_eq!(steps[1].depends_on, vec!["t1".to_string()]);
+    }
+
+    #[test]
+    fn a_reworded_step_briefs_the_crew_with_the_humans_words() {
+        let revised = flappy()
+            .revise(&[
+                edit("t1", "artist", "Draw the bird as a paper plane"),
+                edit("t2", "gameplay_engineer", "Make the bird flap when a key is pressed"),
+            ])
+            .unwrap();
+
+        assert_eq!(revised.brief_for("t1"), Some("Draw the bird as a paper plane"));
+        assert_eq!(
+            revised.brief_for("t2"),
+            Some("Implement the flap impulse and gravity integration."),
+            "a step the human left alone keeps the detailed brief the planner wrote"
+        );
+    }
+
+    #[test]
+    fn a_deleted_step_takes_its_dependencies_with_it() {
+        let revised = flappy()
+            .revise(&[edit("t2", "gameplay_engineer", "Make the bird flap when a key is pressed")])
+            .unwrap();
+
+        assert_eq!(revised.tasks.len(), 1);
+        assert!(
+            revised.tasks[0].depends_on.is_empty(),
+            "a step cannot wait on work the human removed from the plan"
+        );
+        assert!(revised.to_workflow().is_ok());
+    }
+
+    #[test]
+    fn reordering_two_steps_flips_which_one_waits() {
+        let revised = flappy()
+            .revise(&[
+                edit("t2", "gameplay_engineer", "Make the bird flap when a key is pressed"),
+                edit("t1", "artist", "Draw the player and the pipes it flies through"),
+            ])
+            .unwrap();
+
+        let order = revised.to_workflow().unwrap().topological_order().unwrap();
+        assert_eq!(order, vec!["t2", "t1"]);
+        assert!(revised.tasks[0].depends_on.is_empty());
+    }
+
+    #[test]
+    fn a_step_the_human_adds_runs_where_they_put_it() {
+        let revised = flappy()
+            .revise(&[
+                edit("t1", "artist", "Draw the player and the pipes it flies through"),
+                edit("", "audio_designer", "Give the flap a soft thump"),
+                edit("t2", "gameplay_engineer", "Make the bird flap when a key is pressed"),
+            ])
+            .unwrap();
+
+        assert_eq!(revised.tasks.len(), 3);
+        assert_eq!(revised.tasks[1].id, "s1");
+        assert_eq!(revised.tasks[1].role, "audio_designer");
+        assert_eq!(revised.tasks[1].brief, "Give the flap a soft thump");
+        assert_eq!(revised.tasks[1].depends_on, vec!["t1".to_string()]);
+        assert!(revised.to_workflow().is_ok());
+    }
+
+    #[test]
+    fn a_human_edit_that_names_no_role_is_rejected_rather_than_run_headless() {
+        let err = flappy().revise(&[edit("", "", "Do something nice")]).unwrap_err();
+        assert!(matches!(err, PlanError::UnknownRole { .. }));
+    }
+
+    #[test]
+    fn a_plan_the_human_emptied_out_is_rejected() {
+        assert_eq!(flappy().revise(&[]).unwrap_err(), PlanError::Empty);
+    }
+
+    #[test]
+    fn a_step_blanked_by_the_human_is_rejected_rather_than_briefed_as_nothing() {
+        let err = flappy().revise(&[edit("t1", "artist", "   ")]).unwrap_err();
+        assert_eq!(err, PlanError::EmptyBrief("t1".into()));
     }
 
     #[test]

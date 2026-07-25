@@ -23,6 +23,9 @@ pub enum CliEvent {
     Text {
         text: String,
     },
+    Thinking {
+        text: String,
+    },
     RateLimit {
         raw: Value,
     },
@@ -168,6 +171,13 @@ pub fn parse_line(line: &str) -> Option<CliEvent> {
                         Some("text_delta") => Some(CliEvent::Text {
                             text: delta
                                 .get("text")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                        }),
+                        Some("thinking_delta") => Some(CliEvent::Thinking {
+                            text: delta
+                                .get("thinking")
                                 .and_then(Value::as_str)
                                 .unwrap_or_default()
                                 .to_string(),
@@ -400,6 +410,38 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_arrives_as_its_own_event_not_as_answer_text() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta",
+            "delta":{"type":"thinking_delta","thinking":"the packer is deterministic, so"}}}"#;
+        match parse_line(line).unwrap() {
+            CliEvent::Thinking { text } => assert!(text.starts_with("the packer")),
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reasoning_never_contaminates_the_turn_text() {
+        let mut st = StreamState::default();
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"weighing two options"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"the second one"}}}"#,
+        ] {
+            st.apply(&parse_line(line).unwrap());
+        }
+        assert_eq!(st.text, "the second one");
+    }
+
+    #[test]
+    fn a_signature_delta_stays_an_ignorable_other() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta",
+            "delta":{"type":"signature_delta","signature":"abc"}}}"#;
+        assert_eq!(
+            parse_line(line).unwrap(),
+            CliEvent::Other { kind: "content_block_delta".into() }
+        );
+    }
+
+    #[test]
     fn malformed_lines_do_not_panic() {
         assert!(matches!(
             parse_line("this is not json").unwrap(),
@@ -489,6 +531,7 @@ mod bridge_tests {
     #[test]
     fn stream_noise_produces_no_studio_event() {
         assert!(map_cli_event(&CliEvent::Text { text: "pong".into() }).is_none());
+        assert!(map_cli_event(&CliEvent::Thinking { text: "hmm".into() }).is_none());
         assert!(map_cli_event(&CliEvent::Other { kind: "x".into() }).is_none());
         assert!(map_cli_event(&CliEvent::Unparsed { raw: "junk".into() }).is_none());
     }

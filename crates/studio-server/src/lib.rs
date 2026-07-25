@@ -60,6 +60,10 @@ pub struct BuildRequest {
     pub project: Option<String>,
     #[serde(default)]
     pub ask_above: Option<u64>,
+    #[serde(default)]
+    pub guided: bool,
+    #[serde(default)]
+    pub step_confirm: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -89,12 +93,37 @@ pub enum StudioCommand {
 
 pub type Approvals = Arc<std::sync::Mutex<HashMap<String, std::sync::mpsc::Sender<bool>>>>;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlanVerdict {
+    Start { steps: Vec<studio_workflow::StepEdit> },
+    Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StepVerdict {
+    pub approve: bool,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Interrupt {
+    pub stop: bool,
+    pub note: Option<String>,
+}
+
+pub type PlanGates = Arc<std::sync::Mutex<HashMap<String, std::sync::mpsc::Sender<PlanVerdict>>>>;
+pub type StepGates = Arc<std::sync::Mutex<HashMap<String, std::sync::mpsc::Sender<StepVerdict>>>>;
+pub type Interrupts = Arc<std::sync::Mutex<Vec<Interrupt>>>;
+
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<Store>,
     pub live: broadcast::Sender<Envelope>,
     pub commands: Option<std::sync::mpsc::Sender<StudioCommand>>,
     pub approvals: Approvals,
+    pub plans: PlanGates,
+    pub steps: StepGates,
+    pub interrupts: Interrupts,
     pub studio_dir: Arc<std::path::PathBuf>,
 }
 
@@ -113,6 +142,9 @@ impl AppState {
             live,
             commands: None,
             approvals: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            plans: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            steps: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            interrupts: Arc::new(std::sync::Mutex::new(Vec::new())),
             studio_dir: Arc::new(default_studio_dir()),
         }
     }
@@ -135,6 +167,51 @@ impl AppState {
         match sender {
             Some(tx) => tx.send(approve).is_ok(),
             None => false,
+        }
+    }
+
+    pub fn await_plan(&self, plan_id: &str) -> std::sync::mpsc::Receiver<PlanVerdict> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Ok(mut waiting) = self.plans.lock() {
+            waiting.insert(plan_id.to_string(), tx);
+        }
+        rx
+    }
+
+    pub fn resolve_plan(&self, plan_id: &str, verdict: PlanVerdict) -> bool {
+        let sender = self.plans.lock().ok().and_then(|mut p| p.remove(plan_id));
+        match sender {
+            Some(tx) => tx.send(verdict).is_ok(),
+            None => false,
+        }
+    }
+
+    pub fn await_step(&self, approval_id: &str) -> std::sync::mpsc::Receiver<StepVerdict> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Ok(mut waiting) = self.steps.lock() {
+            waiting.insert(approval_id.to_string(), tx);
+        }
+        rx
+    }
+
+    pub fn resolve_step(&self, approval_id: &str, verdict: StepVerdict) -> bool {
+        let sender = self.steps.lock().ok().and_then(|mut p| p.remove(approval_id));
+        match sender {
+            Some(tx) => tx.send(verdict).is_ok(),
+            None => false,
+        }
+    }
+
+    pub fn interrupt(&self, interrupt: Interrupt) {
+        if let Ok(mut queued) = self.interrupts.lock() {
+            queued.push(interrupt);
+        }
+    }
+
+    pub fn take_interrupts(&self) -> Vec<Interrupt> {
+        match self.interrupts.lock() {
+            Ok(mut queued) => std::mem::take(&mut *queued),
+            Err(_) => Vec::new(),
         }
     }
 

@@ -1,9 +1,13 @@
 use anyhow::{Context, Result};
+use std::path::Path;
 use std::sync::Arc;
 use studio_agents::{Role, REGISTRY};
-use studio_context::{freeze, CharterSource};
-use studio_core::{Effort, SessionMode, Worker, WorkerLimits, WorkerSpec};
+use studio_context::{freeze, CharterSource, Model};
 use studio_core::map_cli_event;
+use studio_core::{
+    BriefDelivery, CliEvent, Effort, Provider, RoleNeeds, SessionMode, Worker, WorkerLimits,
+    WorkerSpec,
+};
 use studio_events::{EventType, Outcome, Scene, WorkerState};
 use studio_server::AppState;
 use studio_store::{LedgerEntry, RoleRow, Store, TaskRow};
@@ -213,6 +217,81 @@ pub fn charter_for(role: &Role, acting: bool) -> CharterSource {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Seat {
+    pub provider: Provider,
+    pub model: Model,
+    pub model_alias: String,
+    pub effort: Effort,
+    pub overridden: bool,
+}
+
+fn model_named(alias: &str) -> Option<Model> {
+    match alias {
+        "fable" => Some(Model::Fable),
+        "opus" => Some(Model::Opus),
+        "haiku" => Some(Model::Haiku),
+        _ => None,
+    }
+}
+
+fn effort_named(name: &str) -> Option<Effort> {
+    match name {
+        "low" => Some(Effort::Low),
+        "medium" => Some(Effort::Medium),
+        "high" => Some(Effort::High),
+        "xhigh" => Some(Effort::XHigh),
+        "max" => Some(Effort::Max),
+        _ => None,
+    }
+}
+
+fn shipped_effort(role: &Role) -> Effort {
+    match role.effort {
+        studio_agents::Effort::Low => Effort::Low,
+        studio_agents::Effort::Medium => Effort::Medium,
+        studio_agents::Effort::High => Effort::High,
+        studio_agents::Effort::XHigh => Effort::XHigh,
+        studio_agents::Effort::Max => Effort::Max,
+    }
+}
+
+pub fn seat_from(settings: &studio_settings::Settings, role: &Role) -> Seat {
+    let choice = settings.role_choice(role.id, role.tier);
+    let provider = Provider::from_id(&choice.provider).unwrap_or(Provider::Claude);
+    let chosen_model = choice.model.filter(|m| !m.is_empty());
+
+    let (model, model_alias) = match provider {
+        Provider::Claude => match chosen_model.as_deref().and_then(model_named) {
+            Some(m) => (m, m.cli_alias().to_string()),
+            None => (role.model, role.model.cli_alias().to_string()),
+        },
+        _ => (role.model, chosen_model.clone().unwrap_or_default()),
+    };
+
+    let effort = choice
+        .effort
+        .as_deref()
+        .and_then(effort_named)
+        .unwrap_or_else(|| shipped_effort(role));
+
+    Seat {
+        overridden: provider != Provider::Claude
+            || model != role.model
+            || effort != shipped_effort(role),
+        provider,
+        model,
+        model_alias,
+        effort,
+    }
+}
+
+pub fn seat_for(role: &Role, studio_dir: &Path) -> Seat {
+    let settings = studio_settings::Settings::load(&studio_settings::Settings::path_in(studio_dir))
+        .unwrap_or_default();
+    seat_from(&settings, role)
+}
+
 pub fn prefix_tokens_for(role: &Role, acting: bool) -> u64 {
     let charter = charter_for(role, acting);
     freeze(&charter, &role.tools(), role.model)
@@ -230,6 +309,19 @@ fn run_worker_inner(
     commit: bool,
 ) -> Result<Metered> {
     let actor = format!("{}#{}", role.id, index);
+    let seat = seat_for(role, &em.state.studio_dir);
+    let needs = RoleNeeds {
+        structured_output: json_schema.is_some(),
+        restricted_tools: !role.tools().is_empty(),
+    };
+    if let Some(reason) = seat.provider.blockers(needs).into_iter().next() {
+        anyhow::bail!(
+            "{} is set to run on {} and cannot: {reason}",
+            role.id,
+            seat.provider.id()
+        );
+    }
+
     let task_id = crate::id("task");
 
     em.store.insert_task(
@@ -247,7 +339,7 @@ fn run_worker_inner(
 
     let charter = charter_for(role, acting);
     let tools = role.tools();
-    let prefix = freeze(&charter, &tools, role.model)
+    let prefix = freeze(&charter, &tools, seat.model)
         .map_err(|e| anyhow::anyhow!("charter freeze failed for {}: {e}", role.id))?;
     let charter_path = crate::write_charter(&prefix)?;
 
@@ -266,7 +358,8 @@ fn run_worker_inner(
         serde_json::json!({
             "role": role.id,
             "model": prefix.model,
-            "effort": role.effort.as_str(),
+            "effort": seat.effort.as_str(),
+            "provider": seat.provider.id(),
             "prefix_hash": prefix.prefix_hash,
         }),
     )?;
@@ -282,24 +375,43 @@ fn run_worker_inner(
         system_prompt_file: charter_path.to_string_lossy().into_owned(),
         tools: tools.clone(),
         allowed_tools: if acting { tools.clone() } else { Vec::new() },
-        model: role.model,
-        effort: match role.effort {
-            studio_agents::Effort::Low => Effort::Low,
-            studio_agents::Effort::Medium => Effort::Medium,
-            studio_agents::Effort::High => Effort::High,
-            studio_agents::Effort::XHigh => Effort::XHigh,
-            studio_agents::Effort::Max => Effort::Max,
-        },
+        model: seat.model,
+        effort: seat.effort,
         session: SessionMode::New(crate::uuid_v4()),
         mcp_config: None,
         json_schema,
     };
 
-    let worker = Worker::spawn_in("claude", &spec.to_args(), brief, em.project.as_deref())
-        .with_context(|| format!("failed to spawn a worker for {}", role.id))?;
+    let mut args = spec.to_args_for(seat.provider, &seat.model_alias);
+    let stdin_brief = match seat.provider.brief_delivery() {
+        BriefDelivery::Stdin => brief,
+        BriefDelivery::PromptArgument => {
+            args.push("-p".into());
+            args.push(brief.to_string());
+            ""
+        }
+    };
+
+    let worker = Worker::spawn_in(
+        seat.provider.program(),
+        &args,
+        stdin_brief,
+        em.project.as_deref(),
+    )
+    .with_context(|| {
+        format!(
+            "failed to spawn a worker for {} on {}; is {} on PATH?",
+            role.id,
+            seat.provider.id(),
+            seat.provider.program()
+        )
+    })?;
 
     let thoughts = std::sync::Mutex::new(crate::thought::Stream::new());
     let report = worker.drive(&limits_for(acting), |ev| {
+        if let CliEvent::RateLimit { raw } = ev {
+            studio_server::settings::observe_rate_limit(raw);
+        }
         if let Some((ty, data)) = map_cli_event(ev) {
             let _ = em.emit(&actor, ty, scene.clone(), data);
         }
@@ -417,6 +529,124 @@ fn run_worker_inner(
         cache_creation: usage.cache_creation,
     });
     Ok(Metered { text, billed_tokens: billed, cost_usd: report.state.cost_usd })
+}
+
+#[cfg(test)]
+mod seat_tests {
+    use super::*;
+    use studio_settings::Settings;
+
+    fn settings(pairs: &[(&str, &str)]) -> Settings {
+        let mut s = Settings::new();
+        for (k, v) in pairs {
+            s.set(k, serde_json::Value::String((*v).into()));
+        }
+        s
+    }
+
+    fn role_named(id: &str) -> &'static Role {
+        studio_agents::role(id).unwrap()
+    }
+
+    #[test]
+    fn an_unconfigured_studio_seats_every_role_exactly_where_the_registry_ships_it() {
+        for r in &REGISTRY {
+            let seat = seat_from(&Settings::new(), r);
+            assert_eq!(seat.provider, Provider::Claude);
+            assert_eq!(seat.model, r.model);
+            assert_eq!(seat.model_alias, r.model.cli_alias());
+            assert!(!seat.overridden, "{} reads as overridden with no settings", r.id);
+        }
+    }
+
+    #[test]
+    fn a_tier_default_moves_every_seat_in_that_tier_off_the_shipped_model() {
+        let s = settings(&[("models.tier3", "haiku")]);
+        assert_eq!(seat_from(&s, role_named("artist")).model, Model::Haiku);
+        assert_eq!(seat_from(&s, role_named("producer")).model, Model::Opus);
+        assert_eq!(seat_from(&s, role_named("studio_director")).model, Model::Fable);
+    }
+
+    #[test]
+    fn one_role_can_be_moved_without_disturbing_its_neighbours() {
+        let s = settings(&[("models.role.qa_engineer", "haiku")]);
+        assert_eq!(seat_from(&s, role_named("qa_engineer")).model, Model::Haiku);
+        assert_eq!(seat_from(&s, role_named("artist")).model, Model::Opus);
+    }
+
+    #[test]
+    fn the_overridden_model_is_the_one_the_prefix_is_frozen_against() {
+        let s = settings(&[("models.role.gameplay_engineer", "haiku")]);
+        let role = role_named("gameplay_engineer");
+        let seat = seat_from(&s, role);
+
+        let charter = charter_for(role, false);
+        let shipped = freeze(&charter, &role.tools(), role.model).unwrap();
+        let chosen = freeze(&charter, &role.tools(), seat.model).unwrap();
+
+        assert_ne!(
+            shipped.prefix_hash, chosen.prefix_hash,
+            "the model is part of the cache key; freezing against the registry would mint a hash the worker never used"
+        );
+    }
+
+    #[test]
+    fn a_model_name_the_cli_does_not_take_leaves_the_seat_on_its_shipped_model() {
+        let s = settings(&[("models.role.artist", "gpt-5.4")]);
+        let seat = seat_from(&s, role_named("artist"));
+        assert_eq!(seat.model, Model::Opus);
+        assert_eq!(seat.model_alias, "opus");
+    }
+
+    #[test]
+    fn effort_can_be_raised_per_tier_and_again_per_role() {
+        let s = settings(&[("effort.tier3", "low"), ("effort.role.qa_engineer", "max")]);
+        assert_eq!(seat_from(&s, role_named("artist")).effort, Effort::Low);
+        assert_eq!(seat_from(&s, role_named("qa_engineer")).effort, Effort::Max);
+    }
+
+    #[test]
+    fn another_provider_carries_its_own_model_name_through_untouched() {
+        let s = settings(&[
+            ("provider.role.artist", "gemini"),
+            ("models.gemini.role.artist", "gemini-3-pro"),
+        ]);
+        let seat = seat_from(&s, role_named("artist"));
+        assert_eq!(seat.provider, Provider::Gemini);
+        assert_eq!(seat.model_alias, "gemini-3-pro");
+    }
+
+    #[test]
+    fn a_provider_that_cannot_hold_the_frozen_charter_is_refused_rather_than_degraded() {
+        let s = settings(&[("provider", "gemini")]);
+        let seat = seat_from(&s, role_named("gameplay_engineer"));
+        let blockers = seat.provider.blockers(RoleNeeds {
+            structured_output: false,
+            restricted_tools: true,
+        });
+        assert!(blockers.iter().any(|r| r.contains("system prompt")));
+    }
+
+    #[test]
+    fn a_seat_is_read_from_the_file_the_floor_writes_without_restarting_the_daemon() {
+        let dir = std::env::temp_dir().join("studio-seat-from-disk");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let role = role_named("tech_artist");
+        assert_eq!(seat_for(role, &dir).model, role.model);
+
+        settings(&[("models.role.tech_artist", "haiku")])
+            .save(&Settings::path_in(&dir))
+            .unwrap();
+        assert_eq!(seat_for(role, &dir).model, Model::Haiku);
+    }
+
+    #[test]
+    fn a_settings_file_that_names_no_such_provider_falls_back_to_claude() {
+        let s = settings(&[("provider", "wishful")]);
+        assert_eq!(seat_from(&s, role_named("artist")).provider, Provider::Claude);
+    }
 }
 
 #[cfg(test)]

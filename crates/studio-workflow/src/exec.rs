@@ -30,6 +30,13 @@ pub trait WorkflowHost {
     fn skip(&mut self, _node: &Node) {}
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum WaveVerdict {
+    Continue,
+    Redo,
+    Stop { reason: String },
+}
+
 pub trait ParallelWorkflowHost: Sync {
     fn admit(&self, node: &Node) -> Admission;
     fn enter(&self, node: &Node, inputs: &[String]) -> NodeOutcome;
@@ -37,6 +44,12 @@ pub trait ParallelWorkflowHost: Sync {
     fn repair(&self, node: &Node, gate: &Gate, round: u32) -> GateOutcome;
     fn skip(&self, _node: &Node) {}
     fn wave_done(&self, _completed: &[&Node]) {}
+    fn before_wave(&self, _ready: &[&Node]) -> WaveVerdict {
+        WaveVerdict::Continue
+    }
+    fn after_wave(&self, _completed: &[&Node]) -> WaveVerdict {
+        WaveVerdict::Continue
+    }
 }
 
 pub const MAX_REPAIR_ROUNDS: u32 = 3;
@@ -48,6 +61,7 @@ pub enum RunOutcome {
     Escalated { node: String, reason: String },
     RoutedToInfra { node: String, reason: String },
     Refused { node: String, reason: String },
+    Interrupted { node: String, reason: String },
 }
 
 impl RunOutcome {
@@ -62,6 +76,7 @@ impl RunOutcome {
             RunOutcome::Escalated { .. } => "escalated",
             RunOutcome::RoutedToInfra { .. } => "inconclusive",
             RunOutcome::Refused { .. } => "refused",
+            RunOutcome::Interrupted { .. } => "interrupted",
         }
     }
 }
@@ -75,6 +90,7 @@ pub struct RunReport {
     pub gates_passed: usize,
     pub gates_failed: usize,
     pub repair_rounds: u32,
+    pub redo_rounds: u32,
     pub degradations: Vec<u8>,
 }
 
@@ -176,8 +192,16 @@ pub fn execute_parallel<H: ParallelWorkflowHost>(
             break;
         }
 
+        if let WaveVerdict::Stop { reason } = host.before_wave(&ready) {
+            stop = Some(RunOutcome::Interrupted {
+                node: ready[0].id.clone(),
+                reason,
+            });
+            break;
+        }
+
         let mut wave: Vec<(&Node, Vec<String>)> = Vec::new();
-        for node in ready {
+        for node in ready.iter().copied() {
             match host.admit(node) {
                 Admission::Admit => {}
                 Admission::Degrade { step } => report.degradations.push(step),
@@ -226,7 +250,9 @@ pub fn execute_parallel<H: ParallelWorkflowHost>(
         for (node, outcome) in outcomes {
             pending.retain(|id| *id != node.id);
             settled.insert(node.id.as_str());
-            report.entered.push(node.id.clone());
+            if !report.entered.contains(&node.id) {
+                report.entered.push(node.id.clone());
+            }
             match outcome {
                 NodeOutcome::Completed { capsule } => {
                     report.capsules.insert(node.id.clone(), capsule);
@@ -247,7 +273,7 @@ pub fn execute_parallel<H: ParallelWorkflowHost>(
             host.wave_done(&completed);
         }
 
-        for node in completed {
+        for node in completed.iter().copied() {
             if stop.is_some() {
                 break;
             }
@@ -256,6 +282,32 @@ pub fn execute_parallel<H: ParallelWorkflowHost>(
                     stop = Some(outcome);
                     break;
                 }
+            }
+        }
+
+        if stop.is_some() || completed.is_empty() {
+            continue;
+        }
+
+        match host.after_wave(&completed) {
+            WaveVerdict::Continue => {}
+            WaveVerdict::Stop { reason } => {
+                stop = Some(RunOutcome::Interrupted {
+                    node: completed[0].id.clone(),
+                    reason,
+                });
+            }
+            WaveVerdict::Redo => {
+                report.redo_rounds += 1;
+                for node in completed {
+                    settled.remove(node.id.as_str());
+                    report.capsules.remove(&node.id);
+                }
+                pending = order
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|id| !settled.contains(id))
+                    .collect();
             }
         }
     }
@@ -612,6 +664,11 @@ mod tests {
             entered: Mutex<Vec<String>>,
             waves: Mutex<Vec<Vec<String>>>,
             fail_node: Option<String>,
+            stop_before: Option<String>,
+            redo_after: Option<String>,
+            redone: AtomicUsize,
+            notes: Mutex<Vec<String>>,
+            briefs: Mutex<Vec<String>>,
         }
 
         impl ParallelWorkflowHost for ParHost {
@@ -625,10 +682,34 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(25));
                 self.active.fetch_sub(1, Ordering::SeqCst);
                 self.entered.lock().unwrap().push(node.id.clone());
+                let notes = self.notes.lock().unwrap().join(" ");
+                self.briefs.lock().unwrap().push(format!("{} {notes}", node.id));
                 if self.fail_node.as_deref() == Some(node.id.as_str()) {
                     return NodeOutcome::Failed { reason: "worker crashed".into() };
                 }
                 NodeOutcome::Completed { capsule: format!("cap_{}", node.id) }
+            }
+
+            fn before_wave(&self, ready: &[&Node]) -> WaveVerdict {
+                match &self.stop_before {
+                    Some(id) if ready.iter().any(|n| &n.id == id) => {
+                        WaveVerdict::Stop { reason: "you stopped the run".into() }
+                    }
+                    _ => WaveVerdict::Continue,
+                }
+            }
+
+            fn after_wave(&self, completed: &[&Node]) -> WaveVerdict {
+                self.notes.lock().unwrap().clear();
+                let asked = self
+                    .redo_after
+                    .as_deref()
+                    .is_some_and(|id| completed.iter().any(|n| n.id == id));
+                if !asked || self.redone.fetch_add(1, Ordering::SeqCst) > 0 {
+                    return WaveVerdict::Continue;
+                }
+                self.notes.lock().unwrap().push("make the pipes green".into());
+                WaveVerdict::Redo
             }
 
             fn gate(&self, _gate: &Gate, _node: &Node) -> GateOutcome {
@@ -754,6 +835,77 @@ mod tests {
         }
 
         #[test]
+        fn an_interrupt_lands_between_waves_instead_of_being_swallowed() {
+            let wf = diamond();
+            let h = ParHost { stop_before: Some("t2".into()), ..Default::default() };
+            let r = execute_parallel(&wf, &h, &BTreeSet::new(), 4).unwrap();
+
+            match r.outcome {
+                Some(RunOutcome::Interrupted { ref reason, .. }) => {
+                    assert!(reason.contains("stopped"))
+                }
+                other => panic!("expected an interruption, got {other:?}"),
+            }
+            assert_eq!(r.entered, vec!["t1".to_string()], "t1 was already running when you hit stop");
+            let entered = h.entered.lock().unwrap();
+            for later in ["t2", "t3", "t4", "t5"] {
+                assert!(!entered.contains(&later.to_string()), "{later} started after the stop");
+            }
+        }
+
+        #[test]
+        fn an_interrupt_before_the_first_wave_spends_nothing() {
+            let wf = diamond();
+            let h = ParHost { stop_before: Some("t1".into()), ..Default::default() };
+            let r = execute_parallel(&wf, &h, &BTreeSet::new(), 4).unwrap();
+            assert!(matches!(r.outcome, Some(RunOutcome::Interrupted { .. })));
+            assert!(r.entered.is_empty(), "an interrupt that arrives first pays for no worker");
+        }
+
+        #[test]
+        fn a_rejected_step_runs_its_whole_tier_again_with_the_notes() {
+            let wf = diamond();
+            let h = ParHost { redo_after: Some("t1".into()), ..Default::default() };
+            let r = execute_parallel(&wf, &h, &BTreeSet::new(), 4).unwrap();
+
+            assert_eq!(r.outcome, Some(RunOutcome::Completed));
+            assert_eq!(r.redo_rounds, 1);
+            assert_eq!(r.entered.len(), 5, "a redo re-enters a node, it does not add one");
+
+            let entered = h.entered.lock().unwrap();
+            assert_eq!(
+                entered.iter().filter(|id| *id == "t1").count(),
+                2,
+                "the rejected tier runs a second time"
+            );
+
+            let briefs = h.briefs.lock().unwrap();
+            assert_eq!(briefs[0], "t1 ", "the first attempt had nothing to go on");
+            assert_eq!(
+                briefs[1], "t1 make the pipes green",
+                "the second attempt is briefed with what the human said was wrong"
+            );
+            assert!(
+                briefs[2..].iter().all(|b| !b.contains("make the pipes green")),
+                "notes for one tier must not leak into the next"
+            );
+        }
+
+        #[test]
+        fn a_tier_the_human_sends_back_still_blocks_everything_downstream() {
+            let wf = diamond();
+            let h = ParHost { redo_after: Some("t1".into()), ..Default::default() };
+            execute_parallel(&wf, &h, &BTreeSet::new(), 4).unwrap();
+
+            let entered = h.entered.lock().unwrap();
+            let second_t1 = entered.iter().rposition(|id| id == "t1").unwrap();
+            for later in ["t2", "t3", "t4", "t5"] {
+                let at = entered.iter().position(|id| id == later).unwrap();
+                assert!(at > second_t1, "{later} ran before the redo of t1 finished");
+            }
+        }
+
+        #[test]
         fn resuming_skips_finished_nodes_in_parallel_mode() {
             let wf = diamond();
             let done: BTreeSet<String> = ["t1".into()].into_iter().collect();
@@ -775,6 +927,10 @@ mod tests {
         assert_eq!(
             RunOutcome::RoutedToInfra { node: "n".into(), reason: "r".into() }.tag(),
             "inconclusive"
+        );
+        assert_eq!(
+            RunOutcome::Interrupted { node: "n".into(), reason: "r".into() }.tag(),
+            "interrupted"
         );
     }
 }
