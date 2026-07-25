@@ -61,6 +61,18 @@ fn first_line(text: &str) -> String {
     text.lines().next().unwrap_or("").chars().take(MAX_LINE).collect()
 }
 
+fn unsymbolized(backtrace: &str) -> bool {
+    let frames = backtrace
+        .lines()
+        .filter(|l| l.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+        .count();
+    if frames == 0 {
+        return false;
+    }
+    let nameless = backtrace.matches("<unknown>").count();
+    nameless * 2 > frames
+}
+
 fn compose(subcommand: &str, os: &str, panic: &str, backtrace: &str, tail: &[String]) -> String {
     let mut out = String::new();
     out.push_str(&format!("game studio crew {}\n", env!("CARGO_PKG_VERSION")));
@@ -70,6 +82,12 @@ fn compose(subcommand: &str, os: &str, panic: &str, backtrace: &str, tail: &[Str
     out.push_str(&format!("\npanic: {panic}\n"));
     out.push_str("\nbacktrace:\n");
     out.push_str(backtrace.trim_end());
+    if unsymbolized(backtrace) {
+        out.push_str(
+            "\n\nthe frames above have no names because studiod.pdb was not beside the binary;\n\
+             a report from a build with its debug file names the functions instead",
+        );
+    }
     out.push_str("\n\ndaemon lifecycle (last recorded lines):\n");
     if tail.is_empty() {
         out.push_str("  nothing was recorded before the panic\n");
@@ -305,6 +323,38 @@ mod tests {
                 "an absolute path survived redaction at char {i}:\n{report}"
             );
         }
+    }
+
+    #[test]
+    fn the_release_profile_keeps_the_debug_info_a_backtrace_needs() {
+        let manifest = include_str!("../../../Cargo.toml");
+        let profile = manifest
+            .split("[profile.release]")
+            .nth(1)
+            .expect("without a release profile the shipped binary symbolizes nothing");
+        let body = profile.split("\n[").next().unwrap_or("");
+        assert!(
+            body.contains("debug = \"line-tables-only\"") || body.contains("debug = 1"),
+            "no debug info means every frame in a crash report reads <unknown>: {body}"
+        );
+        assert!(
+            !body.contains("strip = \"symbols\"") && !body.contains("strip = true"),
+            "stripping symbols throws away the names the debug info just paid for: {body}"
+        );
+    }
+
+    #[test]
+    fn a_report_whose_frames_have_no_names_says_why_instead_of_leaving_a_wall_of_unknown() {
+        let nameless = "   0: <unknown>\n   1: <unknown>\n   2: <unknown>\n";
+        let report = compose("studio", "windows", "a panic", nameless, &[]);
+        assert!(report.contains("studiod.pdb was not beside the binary"), "{report}");
+    }
+
+    #[test]
+    fn a_symbolized_report_does_not_apologise_for_symbols_it_has() {
+        let named = "   0: studiod::studio::run_task\n   1: studiod::main\n";
+        let report = compose("studio", "windows", "a panic", named, &[]);
+        assert!(!report.contains("studiod.pdb was not beside"), "{report}");
     }
 
     #[test]

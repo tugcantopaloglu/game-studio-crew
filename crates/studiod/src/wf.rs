@@ -16,6 +16,7 @@ use studio_workflow::{
 use crate::m4::Emitter;
 
 pub const DEFAULT_PARALLEL_WORKERS: usize = 4;
+pub const MAX_STEP_REDOS: usize = 3;
 
 fn parallel_workers() -> usize {
     std::env::var("STUDIO_PARALLEL")
@@ -43,6 +44,11 @@ pub struct Host<'a> {
     pub step_confirm: bool,
     pub notes: Mutex<Vec<String>>,
     pub tiers_done: AtomicUsize,
+    pub redos_at_step: AtomicUsize,
+}
+
+pub fn redos_left(used: usize) -> usize {
+    MAX_STEP_REDOS.saturating_sub(used)
 }
 
 pub fn node_brief(
@@ -317,8 +323,16 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
         }
 
         let step = self.tiers_done.load(Ordering::SeqCst) + 1;
+        let used = self.redos_at_step.load(Ordering::SeqCst);
+        let left = redos_left(used);
         let approval_id = crate::id("step");
         let rx = self.em.state.await_step(&approval_id);
+
+        let modes: Vec<&str> = if left == 0 {
+            vec!["approve", "improve"]
+        } else {
+            vec!["approve", "improve", "redo"]
+        };
 
         let _ = self.em.emit(
             "daemon",
@@ -329,14 +343,20 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
                 "step": step,
                 "title": self.step_title(completed),
                 "summary": self.step_summary(completed),
-                "modes": ["approve", "improve", "redo"],
+                "modes": modes,
+                "redos_used": used,
+                "redos_left": left,
             }),
         );
         println!("  step {step} is done and waiting for you on the floor");
+        if used > 0 {
+            println!("  step {step} has been sent back {used} time(s); {left} left before the run stops");
+        }
 
         match rx.recv() {
             Ok(verdict) if verdict.approve => {
                 self.tiers_done.fetch_add(1, Ordering::SeqCst);
+                self.redos_at_step.store(0, Ordering::SeqCst);
                 if let Some(note) = verdict.note.filter(|n| !n.trim().is_empty()) {
                     println!("  step {step} approved; the next step is briefed with: {note}");
                     self.notes.lock().unwrap().push(note);
@@ -345,11 +365,24 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
                 }
                 WaveVerdict::Continue
             }
+            Ok(_) if left == 0 => {
+                println!(
+                    "  step {step} has already been run {} times and is still not right; stopping",
+                    used + 1
+                );
+                WaveVerdict::Stop {
+                    reason: format!(
+                        "step {step} was sent back {MAX_STEP_REDOS} times and is still not right; \
+                         the run stopped rather than spending more on the same step"
+                    ),
+                }
+            }
             Ok(verdict) => {
                 let note = verdict
                     .note
                     .filter(|n| !n.trim().is_empty())
                     .unwrap_or_else(|| "Do this step again and make it better.".to_string());
+                self.redos_at_step.fetch_add(1, Ordering::SeqCst);
                 println!("  step {step} sent back: {note}");
                 self.notes.lock().unwrap().push(note);
                 WaveVerdict::Redo
@@ -637,6 +670,7 @@ pub fn run_planned(
         step_confirm,
         notes: Mutex::new(Vec::new()),
         tiers_done: AtomicUsize::new(0),
+        redos_at_step: AtomicUsize::new(0),
     };
 
     if step_confirm {
@@ -713,6 +747,40 @@ pub fn run_planned(
     }
 
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod redo_cap_tests {
+    use super::{redos_left, MAX_STEP_REDOS};
+
+    #[test]
+    fn a_step_nobody_has_sent_back_offers_every_redo_the_cap_allows() {
+        assert_eq!(redos_left(0), MAX_STEP_REDOS);
+    }
+
+    #[test]
+    fn each_send_back_spends_one_of_the_allowance() {
+        assert_eq!(redos_left(1), MAX_STEP_REDOS - 1);
+        assert_eq!(redos_left(MAX_STEP_REDOS - 1), 1);
+    }
+
+    #[test]
+    fn the_allowance_runs_out_rather_than_going_negative() {
+        assert_eq!(redos_left(MAX_STEP_REDOS), 0);
+        assert_eq!(
+            redos_left(MAX_STEP_REDOS + 9),
+            0,
+            "a saturating count is what stops the run instead of wrapping into a fresh allowance"
+        );
+    }
+
+    #[test]
+    fn the_cap_leaves_room_to_improve_a_step_more_than_once_before_giving_up() {
+        assert!(
+            MAX_STEP_REDOS >= 2,
+            "one rejection is a typo, not a pattern; the cap must not stop a run on the first"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -1026,14 +1026,13 @@ mod approval_tests {
     use super::*;
     use std::sync::Arc;
 
+    static NEXT_APPROVAL_DIR: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
     fn state() -> AppState {
-        let dir = std::env::temp_dir().join(format!(
-            "studio-approve-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let nth = NEXT_APPROVAL_DIR.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir()
+            .join(format!("studio-approve-{}-{nth}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         AppState::new(Arc::new(Store::open(dir.join("s.db")).unwrap()))
     }

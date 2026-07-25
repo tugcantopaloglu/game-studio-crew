@@ -18,6 +18,10 @@ members = [
     "crates/studiod",
 ]
 
+[profile.release]
+debug = "line-tables-only"
+strip = "none"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
