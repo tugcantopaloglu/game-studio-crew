@@ -327,13 +327,33 @@ mod tests {
             let padded = m.min_cacheable_tokens();
             assert!(
                 padded > documented,
-                "{} pads to exactly its floor; the estimator counts at {CHARS_PER_TOKEN} chars a \
-                 token while English tokenizes nearer four, so an estimate that just reaches the \
-                 floor can sit under it and cache nothing at all",
+                "{} pads to exactly its floor, leaving nothing for a floor that moves under us",
                 m.cli_alias()
             );
             assert_eq!(padded, documented + documented / ESTIMATOR_MARGIN_DIVISOR);
         }
+    }
+
+    #[test]
+    fn the_estimator_undercounts_real_tokens_so_a_target_is_a_floor_not_a_ceiling() {
+        let frozen = freeze(&src(), &tools(), Model::Opus).unwrap();
+        let measured_chars_per_token = 2.52;
+
+        assert!(
+            CHARS_PER_TOKEN > measured_chars_per_token,
+            "a real opus spawn tokenized a 2333-character charter to 926 tokens, {measured_chars_per_token} \
+             chars a token, against the {CHARS_PER_TOKEN} assumed here. The estimate is therefore a \
+             conservative LOWER bound on real tokens, not an upper one: charter prose is dense, and \
+             the numbered padding lines spend a token per digit. Do not read the margin above as \
+             slack to be trimmed, and do not treat an estimate as a ceiling when sizing anything \
+             against a real limit."
+        );
+
+        let real_tokens_at_least = frozen.estimated_tokens;
+        assert!(
+            real_tokens_at_least >= Model::Opus.documented_min_cacheable_tokens(),
+            "the estimate alone already clears the floor before any margin is applied"
+        );
     }
 
     #[test]

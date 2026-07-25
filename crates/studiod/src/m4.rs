@@ -186,6 +186,10 @@ pub struct Metered {
     pub cost_usd: f64,
 }
 
+pub fn uncacheable(usage: studio_events::Usage) -> bool {
+    usage.total_input() > 0 && usage.cache_creation == 0 && usage.cache_read == 0
+}
+
 fn limits_for(acting: bool) -> WorkerLimits {
     if !acting {
         return WorkerLimits::default();
@@ -522,6 +526,29 @@ fn run_worker_inner(
         )?;
     }
 
+    if uncacheable(usage) {
+        println!(
+            "  {} cached nothing: {} estimated tokens against a {} floor for {}",
+            role.id,
+            prefix.estimated_tokens,
+            seat.model.documented_min_cacheable_tokens(),
+            seat.model.cli_alias()
+        );
+        em.emit(
+            &actor,
+            EventType::BudgetWarning,
+            scene.clone(),
+            serde_json::json!({
+                "reason": "the prefix neither wrote nor read cache; it is under the model's minimum cacheable length",
+                "role": role.id,
+                "prefix_hash": prefix.prefix_hash,
+                "estimated_tokens": prefix.estimated_tokens,
+                "documented_min_cacheable_tokens": seat.model.documented_min_cacheable_tokens(),
+                "model": seat.model.cli_alias(),
+            }),
+        )?;
+    }
+
     em.emit(
         &actor,
         EventType::CapsuleSubmitted,
@@ -774,6 +801,36 @@ mod seat_tests {
     fn a_settings_file_that_names_no_such_provider_falls_back_to_claude() {
         let s = settings(&[("provider", "wishful")]);
         assert_eq!(seat_from(&s, role_named("artist")).provider, Provider::Claude);
+    }
+}
+
+#[cfg(test)]
+mod uncacheable_tests {
+    use super::uncacheable;
+    use studio_events::Usage;
+
+    #[test]
+    fn a_spawn_that_neither_wrote_nor_read_cache_is_reported_rather_than_read_as_no_data() {
+        assert!(uncacheable(Usage { input: 900, output: 20, cache_read: 0, cache_creation: 0 }));
+    }
+
+    #[test]
+    fn a_cold_write_is_not_a_failure() {
+        assert!(!uncacheable(Usage { input: 2, output: 4, cache_read: 0, cache_creation: 926 }));
+    }
+
+    #[test]
+    fn a_warm_read_is_not_a_failure() {
+        assert!(!uncacheable(Usage { input: 2, output: 4, cache_read: 926, cache_creation: 0 }));
+    }
+
+    #[test]
+    fn a_worker_that_billed_nothing_at_all_is_a_dead_spawn_not_an_uncacheable_prefix() {
+        assert!(
+            !uncacheable(Usage::default()),
+            "a refused or crashed worker reports no usage; blaming the prefix for that would \
+             point every investigation at the wrong thing"
+        );
     }
 }
 
