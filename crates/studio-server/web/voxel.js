@@ -364,18 +364,46 @@ function propVoxels(p) {
   return v;
 }
 
+function key(x, y, z) {
+  return x + "," + y + "," + z;
+}
+
+export function shell(voxels) {
+  const filled = new Set();
+  for (const v of voxels) filled.add(key(v.x, v.y, v.z));
+  const kept = new Set();
+  const out = [];
+  for (let i = voxels.length - 1; i >= 0; i--) {
+    const v = voxels[i];
+    const k = key(v.x, v.y, v.z);
+    if (kept.has(k)) continue;
+    kept.add(k);
+    if (
+      filled.has(key(v.x + 1, v.y, v.z)) && filled.has(key(v.x - 1, v.y, v.z)) &&
+      filled.has(key(v.x, v.y + 1, v.z)) && filled.has(key(v.x, v.y - 1, v.z)) &&
+      filled.has(key(v.x, v.y, v.z + 1)) && filled.has(key(v.x, v.y, v.z - 1))
+    ) continue;
+    out.push(v);
+  }
+  return out;
+}
+
+function part(voxels, pivot) {
+  return { voxels: shell(voxels), pivot };
+}
+
 export function buildCharacterParts(roleId) {
   const p = look(roleId);
   return {
-    torso: { voxels: torsoVoxels(p), pivot: [0, HIP_Y, 0] },
-    head: { voxels: headVoxels(p), pivot: [0, NECK_Y, 0] },
-    armL: { voxels: armVoxels(p, -1), pivot: [-3, SHOULDER_Y, 0] },
-    armR: { voxels: armVoxels(p, 1), pivot: [3, SHOULDER_Y, 0] },
-    thighL: { voxels: thighVoxels(p, -1), pivot: [-1.5, HIP_Y, 0] },
-    thighR: { voxels: thighVoxels(p, 1), pivot: [1.5, HIP_Y, 0] },
-    shinL: { voxels: shinVoxels(p, -1), pivot: [-1.5, KNEE_Y, 0] },
-    shinR: { voxels: shinVoxels(p, 1), pivot: [1.5, KNEE_Y, 0] },
-    prop: { voxels: propVoxels(p), pivot: [3, SHOULDER_Y, 0] },
+    torso: part(torsoVoxels(p), [0, HIP_Y, 0]),
+    head: part(headVoxels(p), [0, NECK_Y, 0]),
+    armL: part(armVoxels(p, -1), [-3, SHOULDER_Y, 0]),
+    armR: part(armVoxels(p, 1), [3, SHOULDER_Y, 0]),
+    thighL: part(thighVoxels(p, -1), [-1.5, HIP_Y, 0]),
+    thighR: part(thighVoxels(p, 1), [1.5, HIP_Y, 0]),
+    shinL: part(shinVoxels(p, -1), [-1.5, KNEE_Y, 0]),
+    shinR: part(shinVoxels(p, 1), [1.5, KNEE_Y, 0]),
+    prop: part(propVoxels(p), [3, SHOULDER_Y, 0]),
   };
 }
 
