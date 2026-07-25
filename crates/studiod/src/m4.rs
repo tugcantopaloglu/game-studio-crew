@@ -693,6 +693,7 @@ mod seat_tests {
         for (typed, expected) in [
             ("claude-opus-5", Model::Opus),
             ("claude-fable-5", Model::Fable),
+            ("claude-sonnet-5", Model::Sonnet),
             ("claude-haiku-4-5-20251001", Model::Haiku),
         ] {
             let s = settings(&[("models.role.artist", typed)]);

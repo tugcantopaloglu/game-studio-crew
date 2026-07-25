@@ -237,6 +237,16 @@ Keeping the two numbers apart surfaced something this document should not bury: 
 
 If those published figures are right, every Opus seat — which is twelve of the thirteen roles — pads roughly 4× further than it needs to, and the studio pays that padding on every cold write. **This was not changed, and should not be changed casually:** `min_cacheable_tokens` feeds `pad_to_minimum`, which changes the frozen bytes, which changes the `prefix_hash`. Lowering Opus from 4096 would invalidate every warm prefix in the wild in exchange for a saving nobody here has measured. It is worth a probe — freeze a short charter at each candidate padding and read `cache_creation` off a real spawn — before it is worth an edit. `the_padding_the_studio_uses_is_not_mistaken_for_the_published_minimum` pins which models currently over-pad so the question cannot quietly disappear.
 
+#### Sonnet does not become the summarizer downshift target
+
+`studio_budget::model_for_step` sends the summarizer to Haiku on ladder step 2 ([06](06-budget-governance.md)). Sonnet sits between Opus and Haiku on price, so it is a plausible candidate — and it is **deliberately not used**.
+
+The step's entire purpose is to cut spend when a task is already over budget. Haiku at $1/$5 saves roughly 80% against Opus; Sonnet at $3/$15 saves roughly 40%. Choosing the middle tier would make the cost-saving step save materially less, which is the opposite of what the ladder is for. If a rollup genuinely needs more capability than Haiku, the right answer is not a more expensive downshift — it is that the task should not be downshifted at all.
+
+The quality objection is already answered elsewhere: the summarization ladder has a **zero-token template fallback that always works** ([02](02-context-engine.md)), so an unusable rollup degrades to deterministic counts and concatenated fields rather than needing a better model. And nobody here has measured Sonnet against Haiku on rollup quality — swapping on that basis would be substituting a guess for a documented, measured-cheap choice.
+
+`the_summarizer_downshifts_to_the_cheapest_tier_not_the_middle_one` records the decision and its reasoning at the point of change, so a future reader finds the argument rather than re-deriving it. If someone does measure the two, that test is where the finding belongs.
+
 #### A model the studio cannot express is still refused
 
 Unrecognised claude model names are **refused at spawn with the name in the message** rather than quietly falling back to the registry. Full names resolve by family (`claude-opus-5` → `Opus`, `claude-sonnet-…` → `Sonnet`), and anything else is refused with a message listing what does work. `a_claude_model_the_studio_cannot_express_is_flagged_rather_than_quietly_replaced` holds that line, and `every_model_the_studio_can_express_actually_resolves` checks the advertised list is not lying.
