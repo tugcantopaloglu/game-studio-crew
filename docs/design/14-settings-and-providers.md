@@ -226,7 +226,28 @@ The registry is untouched: **sonnet is available to choose, not assigned to anyt
 
 Sonnet's minimum is **documented as 1024 tokens**. The studio pads it to **4096** anyway, matching what Opus and Haiku already use. That is deliberate: padding *above* a minimum still caches, padding below it caches nothing, and a coherent padding scale is worth more than 3k tokens paid once per prefix. `documented_min_cacheable_tokens` records the published figure separately from the padding the studio applies, and `every_model_pads_at_or_above_the_minimum_its_documentation_states` asserts the invariant for every variant.
 
-Keeping the two numbers apart surfaced something this document should not bury: **the studio's padding table is well above the currently published minimums for three of the four models.**
+#### Measured: the 640 target caches, and the estimator errs the safe way
+
+The padding was subsequently derived from the published floor (`documented + documented/4`), which puts an Opus charter at 640 estimated tokens. That target was **measured against a real spawn** rather than reasoned about, because "silently never caches" is invisible by construction.
+
+A `gameplay_engineer` charter padded to the 640 target is 2333 characters and estimates at 649 tokens. Spawned twice with `--tools ""` against `--model opus`:
+
+| | `input` | `cache_creation` | `cache_read` | cost |
+|---|---|---|---|---|
+| cold | 2 | **926** | 0 | $0.0133 |
+| warm | 2 | 0 | **926** | $0.0015 |
+
+**It caches**, and the warm spawn is 8.7× cheaper. So 640 is not too tight: 926 real tokens against Opus 5's 512-token floor is 1.81× headroom.
+
+The interesting part is *why* it is safe, because it is not the reason the margin was added. The estimator assumes **3.6 characters per token**; this charter measured **2.52** (2333 chars ÷ 926 tokens). The estimator therefore reads **low, not high** — it called 649 what the tokenizer counted as 926, a 1.43× undercount. Charter text is dense: short words, heavy punctuation, newlines, and numbered padding lines whose digits cost a token apiece.
+
+That direction matters more than the specific number. The quarter margin is harmless, but it was justified as protection against the estimator over-counting a prefix to just *under* the floor, and the error runs the other way: `estimate_tokens` is already a conservative lower bound on real tokens, so every model over-delivers against its floor before the margin is applied at all. Anyone reasoning from "the estimator reads high" will get the next call wrong in the opposite direction — trimming the margin as though it were slack, or treating an estimate as an upper bound when padding something shorter.
+
+Two consequences worth carrying: **Haiku now has the slack**, not Opus — a 5120 estimated target is roughly 7300 real tokens against a 4096 floor, about 78% over, and it can be computed from the measured 1.43 ratio rather than guessed. And **the failure mode remains silent**: a charter padded below its floor produces `cache_creation: 0` *and* `cache_read: 0`, which reads as "no data" rather than "broken", so it would not surface as a cratered `cache_hit_ratio` the way a churning prefix hash does. A cold spawn that writes zero cache bytes is a detectable signal the ledger already has and nothing currently asserts.
+
+#### The over-padding this separation originally exposed
+
+Keeping the two numbers apart surfaced something this document should not bury: **the studio's padding table was well above the published minimums** (since corrected — the table below is the state that prompted it).
 
 | | studio pads to | published minimum |
 |---|---|---|
