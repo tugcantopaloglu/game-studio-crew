@@ -8,6 +8,8 @@ use serde_json::json;
 
 pub const CHARS_PER_TOKEN: f64 = 3.6;
 
+pub const ESTIMATOR_MARGIN_DIVISOR: usize = 4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Model {
@@ -30,17 +32,14 @@ impl Model {
     }
 
     pub fn min_cacheable_tokens(&self) -> usize {
-        match self {
-            Model::Fable => 2048,
-            Model::Opus | Model::Haiku => 4096,
-            Model::Sonnet => 4096,
-        }
+        let documented = self.documented_min_cacheable_tokens();
+        documented + documented / ESTIMATOR_MARGIN_DIVISOR
     }
 
     pub fn documented_min_cacheable_tokens(&self) -> usize {
         match self {
             Model::Fable => 512,
-            Model::Opus => 1024,
+            Model::Opus => 512,
             Model::Sonnet => 1024,
             Model::Haiku => 4096,
         }
@@ -313,10 +312,42 @@ mod tests {
 
         let fable = freeze(&src(), &tools(), Model::Fable).unwrap();
         assert!(fable.estimated_tokens >= Model::Fable.min_cacheable_tokens());
+
+        let sonnet = freeze(&src(), &tools(), Model::Sonnet).unwrap();
         assert!(
-            fable.estimated_tokens < opus.estimated_tokens,
-            "fable's lower minimum should need less padding"
+            opus.estimated_tokens < sonnet.estimated_tokens,
+            "opus caches from a lower floor than sonnet, so it should need less padding"
         );
+    }
+
+    #[test]
+    fn the_pad_target_clears_the_published_floor_by_the_estimator_margin() {
+        for m in Model::ALL {
+            let documented = m.documented_min_cacheable_tokens();
+            let padded = m.min_cacheable_tokens();
+            assert!(
+                padded > documented,
+                "{} pads to exactly its floor; the estimator counts at {CHARS_PER_TOKEN} chars a \
+                 token while English tokenizes nearer four, so an estimate that just reaches the \
+                 floor can sit under it and cache nothing at all",
+                m.cli_alias()
+            );
+            assert_eq!(padded, documented + documented / ESTIMATOR_MARGIN_DIVISOR);
+        }
+    }
+
+    #[test]
+    fn no_model_pads_more_than_twice_what_it_needs() {
+        for m in Model::ALL {
+            let documented = m.documented_min_cacheable_tokens();
+            assert!(
+                m.min_cacheable_tokens() < documented * 2,
+                "{} pads to {} against a floor of {documented}; padding rides inside the cached \
+                 prefix, so every warm read pays for it too",
+                m.cli_alias(),
+                m.min_cacheable_tokens()
+            );
+        }
     }
 
     #[test]
@@ -376,9 +407,10 @@ mod widening_tests {
     #[test]
     fn adding_a_model_never_moves_an_existing_models_prefix_hash() {
         let known = [
-            (Model::Fable, "fc6f52a98d43bcfa838fc87efe3bc0f1ae201ea19545b5be9b13c3eae541d706"),
-            (Model::Opus, "dd2a96259a3118e58adb7dfe10f3e46a6986b95446fc30e59d9354fd12911ddc"),
-            (Model::Haiku, "e6105787abecfddc4b4eb21176d6d158f48e8f0a9cb915b5b375820dfa19e9b5"),
+            (Model::Fable, "83d980abc74d65ff3afd1dfe71ad5fb0f806c3f50a7926c24b8ab234ce832ad7"),
+            (Model::Opus, "bed6605082a03c6ed98e5ee9000aebf2b439ffebff8564cccbc46d6cf355487f"),
+            (Model::Sonnet, "4d3612598a7038ed0b04f4da3986d17d12f104f5055e9b228c247c585d17b3a6"),
+            (Model::Haiku, "767639b7bdd2c2bdb12d09ed5d49cc5bdfce501fcca551fd83e8a6c9a61d65c2"),
         ];
         for (model, expected) in known {
             let frozen = freeze(&probe_charter(), &probe_tools(), model).unwrap();
@@ -438,7 +470,7 @@ mod widening_tests {
         assert_eq!(Model::Sonnet.documented_min_cacheable_tokens(), 1024);
         assert_eq!(
             Model::Sonnet.min_cacheable_tokens(),
-            4096,
+            1280,
             "padding above the minimum still caches; padding below it caches nothing, silently"
         );
     }
@@ -452,8 +484,8 @@ mod widening_tests {
             .collect();
         assert_eq!(
             over_padded,
-            vec!["fable", "opus", "sonnet"],
-            "these three pad further than published; changing any of them moves its prefix hash"
+            vec!["fable", "opus", "sonnet", "haiku"],
+            "every model clears its floor by the estimator margin; changing any of them moves its prefix hash"
         );
     }
 
