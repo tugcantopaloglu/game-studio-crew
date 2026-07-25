@@ -26,6 +26,7 @@ function originLabel(game) {
 function historyLine(game) {
   if (!game.exists) return "the folder this game lived in is gone";
   if (!game.git) return "not a git repo, so nothing can be reverted";
+  if (game.commits === undefined) return "a git repo";
   const commits = game.commits === 1 ? "1 commit" : game.commits + " commits";
   return commits + " · last worked " + ago(game.last_worked);
 }
@@ -54,17 +55,18 @@ function summaryBlock(game, onRead) {
     }
     box.append(
       el("div", {
-        class: s.fresh ? "k" : "warn",
+        class: s.fresh === false ? "warn" : "k",
         style: "font-size:10.5px",
-        text: s.fresh
-          ? "read " + ago(s.generated)
-          : "stale: the game has changed since this was read " + ago(s.generated),
+        text:
+          s.fresh === false
+            ? "stale: the game has changed since this was read " + ago(s.generated)
+            : "read " + ago(s.generated),
       })
     );
   }
 
   const button = el("button", {
-    text: s ? (s.fresh ? "re-read" : "read again") : "summarise",
+    text: s ? "re-read" : "summarise",
     onclick: () => onRead(button),
   });
   if (!game.exists) button.disabled = true;
@@ -250,15 +252,7 @@ export function mount(root) {
     await refresh();
   }
 
-  async function refresh() {
-    let games;
-    try {
-      games = await api("/games");
-    } catch (err) {
-      list.innerHTML = "";
-      list.append(el("div", { class: "bad", text: err.message }));
-      return;
-    }
+  function draw(games) {
     list.innerHTML = "";
     if (!games.length) {
       list.append(
@@ -269,6 +263,40 @@ export function mount(root) {
     for (const game of games) {
       list.append(card(game, (button) => read(game, button)));
     }
+  }
+
+  async function fillIn(games) {
+    let details;
+    try {
+      details = await api("/games/detail");
+    } catch (err) {
+      return;
+    }
+    const byId = new Map(details.map((d) => [d.id, d]));
+    let moved = false;
+    for (const game of games) {
+      const d = byId.get(game.id);
+      if (!d) continue;
+      game.commits = d.commits;
+      game.last_worked = d.last_worked;
+      if (d.origin) game.origin = d.origin;
+      if (game.summary && d.fresh !== null) game.summary.fresh = d.fresh;
+      moved = true;
+    }
+    if (moved) draw(games);
+  }
+
+  async function refresh() {
+    let games;
+    try {
+      games = await api("/games");
+    } catch (err) {
+      list.innerHTML = "";
+      list.append(el("div", { class: "bad", text: err.message }));
+      return;
+    }
+    draw(games);
+    if (games.length) await fillIn(games);
   }
 
   adopt.onclick = async () => {

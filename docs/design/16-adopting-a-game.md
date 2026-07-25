@@ -1,6 +1,6 @@
 # 16: Adopting a Game
 
-> **Status:** v0.1, 2026-07-25. Built and wired: the games panel lists every project the studio knows, `POST /games/adopt` registers a game the crew did not build, and `POST /games/summarize` produces a one-worker read of it that is cached in the game's own folder. **The summary is the only part of this that spends tokens**, and it spends them at most once per change to the game.
+> **Status:** v0.2, 2026-07-25. Built and wired: the games panel lists every project the studio knows, `POST /games/adopt` registers a game the crew did not build, and `POST /games/summarize` produces a one-worker read of it that is cached in the game's own folder. **The summary is the only part of this that spends tokens**, and it spends them at most once per change to the game. v0.2 split the panel's two questions across two endpoints after a latency sweep found the first one costing 109ms; see *Two endpoints, because two costs*.
 > **Consumes** engine detection ([11](11-index-and-bootstrap.md)), the project row in the state store ([03](03-state-store.md)), the role registry ([04](04-agent-graph.md)) and the `game_summarized` event ([05](05-event-protocol.md)).
 
 ## The library
@@ -11,6 +11,21 @@ Two facts on a card are derived rather than stored, because the projects table h
 
 - **When it was last worked on** is the timestamp of the last commit when the game is a repo, and the folder's own mtime when it is not. The store does track `last_used`, but `ProjectRow` does not carry it out, and a commit date is the more honest answer anyway: it says when the *game* last changed, not when someone last clicked on it.
 - **Whether the studio built it** comes from the marker adoption writes (below). For projects that predate the marker, the fallback reads the repo's root commit: the daemon writes every commit itself with a subject of `<role>: ...` or `crew: ...` ([README](../../README.md)), so a root commit in that shape means the crew built the game from nothing. Anything else means it arrived with a history the studio did not write. A folder with no marker and no git history reports **origin unknown** rather than guessing.
+
+## Two endpoints, because two costs
+
+Both derived facts above cost a `git` subprocess, and the first version of this panel paid for them inside the list. Measured on a two-repo library: **`GET /games` cost 108.93ms p50**, against 1.60ms for `/projects` and 1.68ms for `/roles` on the same harness. Three subprocess spawns per project — `rev-list --count`, `log -1`, and the root-commit read — is most of a tenth of a second on Windows, and the panel pays it every time it opens.
+
+The library and the detail are now separate questions with separate prices:
+
+- **`GET /games`** answers what the panel needs to draw a card: name, engine, path, whether `.git` exists, whether the folder still does, the origin marker, and the cached summary text. Every one of those is a stat or a single small file read. **No subprocess, and no tree walk.** It now costs **1.97ms p50**, level with the cheapest endpoints on the floor.
+- **`GET /games/detail`**, optionally narrowed with `?project=<id>`, answers what costs money to know: commit count, last-worked timestamp, history-derived origin, and whether the cached summary is still current. The panel fires it immediately after drawing, so the cards appear at once and the history fills in a beat later. Until it lands a card says "a git repo" rather than a commit count, and a summary is never labelled stale on a guess.
+
+**The detail is cached on the git HEAD pointer, read as a file rather than asked of git.** `.git/HEAD` names a ref, that ref file holds a sha, and `packed-refs` covers the case where it has been packed away — all plain reads costing microseconds. Commit count, last-commit date and root-commit origin are all functions of the HEAD commit, so while that pointer is unchanged the cached answer is exactly right, and when it moves the cache entry for that one project is recomputed. Measured: **121.9ms for the first detail call, 2.4ms for every one after; a commit into one of the two games cost 65.9ms on the next call and 2.4ms after that** — the untouched game stayed cached. Adoption clears the entry too, since the marker it writes overrides the history-derived origin.
+
+**Summary freshness is deliberately not cached**, because the working tree can change without a commit and the HEAD pointer would not notice. It is recomputed on every detail call, which costs 0.35ms on top for a game that has a summary — cheap enough that a second invalidation mechanism would be machinery bought for nothing.
+
+No background thread does any of this. The cost is paid on the request that asks for it, once per change.
 
 ## What adoption means
 

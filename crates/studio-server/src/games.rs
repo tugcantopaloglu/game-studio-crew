@@ -144,7 +144,9 @@ pub fn record_adoption(root: &Path) -> std::io::Result<()> {
     let mut card = read_card(root);
     card.origin = Some("adopted".to_string());
     card.adopted = Some(now_rfc3339());
-    write_card(root, &card)
+    let written = write_card(root, &card);
+    forget(root);
+    written
 }
 
 fn git_out(root: &Path, args: &[&str]) -> Option<String> {
@@ -188,9 +190,15 @@ fn studio_authored(subject: &str) -> bool {
     }
 }
 
+pub fn marked_origin(card: &Card) -> Option<&'static str> {
+    card.origin
+        .as_deref()
+        .map(|recorded| if recorded == "adopted" { "adopted" } else { "built" })
+}
+
 pub fn origin_of(root: &Path, card: &Card) -> &'static str {
-    if let Some(recorded) = card.origin.as_deref() {
-        return if recorded == "adopted" { "adopted" } else { "built" };
+    if let Some(marked) = marked_origin(card) {
+        return marked;
     }
     if !studio_core::git::is_repo(root) {
         return "unknown";
@@ -202,6 +210,99 @@ pub fn origin_of(root: &Path, card: &Card) -> &'static str {
             None => "unknown",
         },
         None => "unknown",
+    }
+}
+
+pub fn head_pointer(root: &Path) -> Option<String> {
+    let git = root.join(".git");
+    let head = std::fs::read_to_string(git.join("HEAD")).ok()?;
+    let head = head.trim().to_string();
+    let Some(reference) = head.strip_prefix("ref: ") else {
+        return Some(format!("detached {head}"));
+    };
+    if let Ok(sha) = std::fs::read_to_string(git.join(reference)) {
+        return Some(format!("{reference} {}", sha.trim()));
+    }
+    let packed = std::fs::read_to_string(git.join("packed-refs")).ok()?;
+    for line in packed.lines() {
+        if let Some((sha, name)) = line.split_once(' ') {
+            if name.trim() == reference {
+                return Some(format!("{reference} {sha}"));
+            }
+        }
+    }
+    Some(format!("{reference} unborn"))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct History {
+    pub commits: u64,
+    pub last_worked: Option<String>,
+    pub origin: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Detail {
+    pub history: History,
+    pub fresh: Option<bool>,
+}
+
+type HistoryCache = std::sync::Mutex<std::collections::HashMap<PathBuf, (String, History)>>;
+
+fn cache() -> &'static HistoryCache {
+    static CACHE: std::sync::OnceLock<HistoryCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn forget(root: &Path) {
+    if let Ok(mut seen) = cache().lock() {
+        seen.remove(root);
+    }
+}
+
+fn read_history(root: &Path, card: &Card) -> History {
+    let repo = studio_core::git::is_repo(root);
+    History {
+        commits: if repo { commit_count(root) } else { 0 },
+        last_worked: if repo {
+            last_commit_ts(root).or_else(|| folder_touched_ts(root))
+        } else {
+            folder_touched_ts(root)
+        },
+        origin: origin_of(root, card),
+    }
+}
+
+pub fn history_of(root: &Path, card: &Card) -> History {
+    let Some(key) = head_pointer(root) else {
+        return read_history(root, card);
+    };
+
+    if let Ok(seen) = cache().lock() {
+        if let Some((cached, history)) = seen.get(root) {
+            if *cached == key {
+                return history.clone();
+            }
+        }
+    }
+
+    let history = read_history(root, card);
+    if let Ok(mut seen) = cache().lock() {
+        seen.insert(root.to_path_buf(), (key, history.clone()));
+    }
+    history
+}
+
+pub fn detail_of(root: &Path, card: &Card) -> Detail {
+    if !root.is_dir() {
+        return Detail {
+            history: History { commits: 0, last_worked: None, origin: "unknown" },
+            fresh: None,
+        };
+    }
+    Detail {
+        history: history_of(root, card),
+        fresh: card.summary.as_ref().map(|s| s.fingerprint == fingerprint(root)),
     }
 }
 
@@ -228,6 +329,7 @@ fn engine_ids() -> Vec<String> {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/games", get(list))
+        .route("/games/detail", get(detail))
         .route("/games/engines", get(engines))
         .route("/games/adopt", post(adopt))
         .route("/games/summarize", post(summarize))
@@ -237,37 +339,38 @@ fn game_json(p: &studio_store::ProjectRow) -> serde_json::Value {
     let root = PathBuf::from(&p.root);
     let exists = root.is_dir();
     let card = if exists { read_card(&root) } else { Card::default() };
-    let repo = exists && studio_core::git::is_repo(&root);
 
     let summary = card.summary.as_ref().map(|s| {
         serde_json::json!({
             "text": s.text,
             "mechanics": s.mechanics,
             "generated": s.generated,
-            "fresh": exists && s.fingerprint == fingerprint(&root),
         })
     });
-
-    let last_worked = if repo {
-        last_commit_ts(&root).or_else(|| folder_touched_ts(&root))
-    } else if exists {
-        folder_touched_ts(&root)
-    } else {
-        None
-    };
 
     serde_json::json!({
         "id": p.id,
         "name": p.name,
         "root": p.root,
         "engine": p.engine,
-        "git": repo,
+        "git": exists && studio_core::git::is_repo(&root),
         "exists": exists,
-        "commits": if repo { commit_count(&root) } else { 0 },
-        "last_worked": last_worked,
-        "origin": if exists { origin_of(&root, &card) } else { "unknown" },
+        "origin": if exists { marked_origin(&card).unwrap_or("unknown") } else { "unknown" },
         "adopted": card.adopted,
         "summary": summary,
+    })
+}
+
+fn detail_json(p: &studio_store::ProjectRow) -> serde_json::Value {
+    let root = PathBuf::from(&p.root);
+    let card = read_card(&root);
+    let detail = detail_of(&root, &card);
+    serde_json::json!({
+        "id": p.id,
+        "commits": detail.history.commits,
+        "last_worked": detail.history.last_worked,
+        "origin": detail.history.origin,
+        "fresh": detail.fresh,
     })
 }
 
@@ -284,6 +387,29 @@ async fn list(State(state): State<AppState>) -> Response {
     };
     let games: Vec<serde_json::Value> = rows.iter().map(game_json).collect();
     axum::Json(games).into_response()
+}
+
+async fn detail(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let rows = match state.store.projects() {
+        Ok(rows) => rows,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not read the project list: {e}"),
+            )
+                .into_response()
+        }
+    };
+    let wanted = q.get("project");
+    let details: Vec<serde_json::Value> = rows
+        .iter()
+        .filter(|p| wanted.is_none_or(|id| *id == p.id))
+        .map(detail_json)
+        .collect();
+    axum::Json(details).into_response()
 }
 
 async fn engines() -> Response {
@@ -345,7 +471,7 @@ async fn adopt(State(state): State<AppState>, axum::Json(req): axum::Json<AdoptR
             Some(d) => d.id.clone(),
             None => return (StatusCode::BAD_REQUEST, nothing_detected(&canonical)).into_response(),
         }
-    } else if engine_ids().iter().any(|id| *id == asked) {
+    } else if engine_ids().contains(&asked) {
         asked
     } else {
         return (
@@ -666,6 +792,140 @@ mod tests {
         assert!(studio_authored("crew: artist + qa_engineer finish parallel work"));
         assert!(!studio_authored("Initial commit"));
         assert!(!studio_authored("chore: bump deps"));
+    }
+
+    async fn get(app: &Router, path: &str) -> (StatusCode, String) {
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri(path)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[tokio::test]
+    async fn the_list_carries_nothing_that_costs_a_git_call_and_the_detail_carries_all_of_it() {
+        let f = floor("split");
+        let game = scratch("split-game");
+        std::fs::write(game.join("main.py"), "print('hi')").unwrap();
+        post_json(
+            &f.app,
+            "/games/adopt",
+            serde_json::json!({"name": "Split", "root": game.to_string_lossy()}),
+        )
+        .await;
+        record_summary(&game, "a toy", Vec::new()).unwrap();
+
+        let (status, list) = get(&f.app, "/games").await;
+        assert_eq!(status, StatusCode::OK);
+        for costly in ["commits", "last_worked", "fresh"] {
+            assert!(
+                !list.contains(costly),
+                "the list opens the panel, so it must not carry {costly}: {list}"
+            );
+        }
+        assert!(list.contains("Split") && list.contains("a toy"));
+
+        let (status, detail) = get(&f.app, "/games/detail").await;
+        assert_eq!(status, StatusCode::OK);
+        for costly in ["commits", "last_worked", "fresh", "origin"] {
+            assert!(detail.contains(costly), "the detail is missing {costly}: {detail}");
+        }
+    }
+
+    #[tokio::test]
+    async fn detail_can_be_asked_for_one_game_rather_than_the_whole_library() {
+        let f = floor("detail-one");
+        for name in ["One", "Two"] {
+            let game = scratch(&format!("detail-{name}"));
+            std::fs::write(game.join("main.py"), "print('hi')").unwrap();
+            post_json(
+                &f.app,
+                "/games/adopt",
+                serde_json::json!({"name": name, "root": game.to_string_lossy()}),
+            )
+            .await;
+        }
+        let (_, all) = get(&f.app, "/games/detail").await;
+        assert_eq!(all.matches("\"id\"").count(), 2);
+
+        let (_, one) = get(&f.app, "/games/detail?project=proj_one").await;
+        assert_eq!(one.matches("\"id\"").count(), 1);
+        assert!(one.contains("proj_one"));
+    }
+
+    #[test]
+    fn the_head_pointer_moves_when_the_branch_moves_and_holds_still_otherwise() {
+        let game = scratch("head-pointer");
+        let refs = game.join(".git").join("refs").join("heads");
+        std::fs::create_dir_all(&refs).unwrap();
+        std::fs::write(game.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(refs.join("main"), "1111111111111111111111111111111111111111\n").unwrap();
+
+        let first = head_pointer(&game).unwrap();
+        assert_eq!(head_pointer(&game).unwrap(), first, "a repo nobody touched must key the same");
+
+        std::fs::write(refs.join("main"), "2222222222222222222222222222222222222222\n").unwrap();
+        assert_ne!(head_pointer(&game).unwrap(), first, "a new commit must invalidate the cache");
+    }
+
+    #[test]
+    fn a_packed_ref_is_still_a_head_pointer_rather_than_nothing() {
+        let game = scratch("packed-ref");
+        std::fs::create_dir_all(game.join(".git")).unwrap();
+        std::fs::write(game.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            game.join(".git/packed-refs"),
+            "# pack-refs with: peeled fully-peeled sorted\n\
+             3333333333333333333333333333333333333333 refs/heads/main\n",
+        )
+        .unwrap();
+
+        let pointer = head_pointer(&game).unwrap();
+        assert!(pointer.contains("3333333"), "{pointer}");
+    }
+
+    #[test]
+    fn a_folder_that_is_not_a_repo_at_all_has_no_pointer_to_cache_on() {
+        let game = scratch("no-repo");
+        std::fs::write(game.join("main.py"), "print('hi')").unwrap();
+        assert!(head_pointer(&game).is_none());
+    }
+
+    #[test]
+    fn a_new_commit_is_counted_rather_than_served_from_the_cache() {
+        if !studio_core::git::available() {
+            return;
+        }
+        let game = scratch("cache-invalidation");
+        std::fs::write(game.join("main.py"), "print('one')").unwrap();
+        studio_core::git::init(&game).unwrap();
+
+        let card = read_card(&game);
+        let before = history_of(&game, &card).commits;
+        assert!(before >= 1, "git init commits the opening state");
+
+        std::fs::write(game.join("main.py"), "print('two')").unwrap();
+        studio_core::git::commit(&game, "gameplay_engineer: change the greeting").unwrap();
+
+        assert_eq!(
+            history_of(&game, &card).commits,
+            before + 1,
+            "the cached history outlived the commit that changed it"
+        );
+    }
+
+    #[test]
+    fn adopting_a_game_clears_the_origin_the_cache_already_answered() {
+        let game = scratch("origin-invalidation");
+        std::fs::write(game.join("main.py"), "print('hi')").unwrap();
+        assert_eq!(history_of(&game, &read_card(&game)).origin, "unknown");
+
+        record_adoption(&game).unwrap();
+        assert_eq!(history_of(&game, &read_card(&game)).origin, "adopted");
     }
 
     #[test]
