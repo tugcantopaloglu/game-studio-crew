@@ -65,6 +65,7 @@ pub fn price_per_mtok(model: Model) -> (f64, f64) {
     match model {
         Model::Fable => (10.0, 50.0),
         Model::Opus => (5.0, 25.0),
+        Model::Sonnet => (3.0, 15.0),
         Model::Haiku => (1.0, 5.0),
     }
 }

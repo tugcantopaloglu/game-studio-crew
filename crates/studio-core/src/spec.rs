@@ -20,6 +20,24 @@ impl Effort {
         }
     }
 
+    pub const ALL: [Effort; 5] =
+        [Effort::Low, Effort::Medium, Effort::High, Effort::XHigh, Effort::Max];
+
+    pub fn named(name: &str) -> Option<Effort> {
+        Effort::ALL.into_iter().find(|e| e.as_str() == name)
+    }
+
+    pub fn clamp_to(&self, supported: &[String]) -> Option<Effort> {
+        if supported.is_empty() {
+            return Some(*self);
+        }
+        let allowed: Vec<Effort> = supported.iter().filter_map(|s| Effort::named(s)).collect();
+        if allowed.is_empty() {
+            return None;
+        }
+        allowed.into_iter().filter(|e| e <= self).max()
+    }
+
     pub fn downshift(&self, floor: Effort) -> Effort {
         let lower = match self {
             Effort::Max => Effort::XHigh,
@@ -229,7 +247,7 @@ impl Provider {
         if !caps.system_prompt_file {
             out.push(match self {
                 Provider::Gemini => "gemini has no flag that replaces the system prompt, so the frozen charter cannot be delivered and every spawn would pay full price for context the studio already froze; pick claude",
-                Provider::Codex => "codex takes its instructions from AGENTS.md and has no flag that replaces the system prompt, so the frozen charter cannot be delivered and every spawn would pay full price for context the studio already froze; pick claude",
+                Provider::Codex => "codex has no flag that replaces its system prompt: AGENTS.md is a per-project file the whole crew would share, not a per-spawn charter, and the instructions-file config override was measured to have no effect, so the frozen charter cannot be delivered; pick claude",
                 _ => "this CLI has no flag that replaces the system prompt, so the frozen charter and its cache cannot be delivered; pick claude",
             });
         }
@@ -647,7 +665,58 @@ mod tests {
         assert!(Provider::Codex
             .blockers(RoleNeeds::default())
             .iter()
-            .any(|r| r.contains("AGENTS.md")));
+            .any(|r| r.contains("per-project file") && r.contains("no effect")));
+    }
+
+    #[test]
+    fn every_provider_still_appears_in_the_supervisor_s_own_list() {
+        assert_eq!(Provider::ALL.len(), 5);
+        for id in ["claude", "codex", "gemini", "copilot", "kimi"] {
+            assert!(
+                Provider::ALL.iter().any(|p| p.id() == id),
+                "{id} fell out of Provider::ALL, so the doctor would stop reporting it"
+            );
+        }
+    }
+
+    #[test]
+    fn an_effort_a_model_does_not_offer_is_clamped_down_to_the_best_it_does() {
+        let older: Vec<String> = ["low", "medium", "high", "xhigh"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(Effort::Max.clamp_to(&older), Some(Effort::XHigh));
+        assert_eq!(Effort::High.clamp_to(&older), Some(Effort::High));
+        assert_eq!(Effort::Low.clamp_to(&older), Some(Effort::Low));
+    }
+
+    #[test]
+    fn a_model_that_offers_everything_leaves_the_chosen_effort_alone() {
+        let newest: Vec<String> = ["low", "medium", "high", "xhigh", "max", "ultra"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for e in Effort::ALL {
+            assert_eq!(e.clamp_to(&newest), Some(e));
+        }
+    }
+
+    #[test]
+    fn a_level_the_studio_has_no_concept_of_is_ignored_rather_than_passed_through() {
+        let only_ultra = vec!["ultra".to_string()];
+        assert_eq!(
+            Effort::Max.clamp_to(&only_ultra),
+            None,
+            "ultra is codex's own level; the studio must not silently send a word it cannot express"
+        );
+    }
+
+    #[test]
+    fn a_model_with_no_published_levels_is_left_to_the_studios_own_choice() {
+        assert_eq!(Effort::XHigh.clamp_to(&[]), Some(Effort::XHigh));
+    }
+
+    #[test]
+    fn a_model_whose_floor_is_above_the_ask_reports_nothing_rather_than_guessing_up() {
+        let high_only = vec!["high".to_string(), "max".to_string()];
+        assert_eq!(Effort::Low.clamp_to(&high_only), None);
     }
 
     #[test]

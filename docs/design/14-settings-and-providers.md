@@ -22,7 +22,7 @@ A missing file reads as empty rather than failing, so a fresh studio needs no se
 |---|---|---|
 | `provider` | provider id | which CLI every worker spawns as |
 | `provider.role.<role_id>` | provider id | that one seat's CLI |
-| `models.tier1` `.tier2` `.tier3` | `fable` \| `opus` \| `haiku` | the model for every seat in that tier |
+| `models.tier1` `.tier2` `.tier3` | `fable` \| `opus` \| `sonnet` \| `haiku` | the model for every seat in that tier |
 | `models.role.<role_id>` | same | that one seat's model |
 | `models.<provider>.tier<N>`, `models.<provider>.role.<id>` | free text | the model name handed to a non-claude CLI |
 | `effort.tier<N>`, `effort.role.<id>` | `low` … `max` | `--effort` for those seats |
@@ -205,14 +205,41 @@ Two things fall out of that table and both were bugs first. The token count is o
 
 Every place a model is chosen: the three tier pickers and all thirteen per-role pickers. Each is a **free-text input with the discovered list as `<datalist>` suggestions**, not a closed dropdown, so a model released next month can be typed in today; underneath each one sits the verdict for the name currently in it. The catalogue is also exported from `settings.js` as `models(providerId)` and reachable at `GET /models`, so no other panel needs a list of its own.
 
-### The `Model` enum is a real gap
+### Sonnet, and what widening the model enum actually cost
 
-`studio_context::Model` has `Fable`, `Opus` and `Haiku`. The claude CLI's own `--help` also names **`sonnet`**, so the studio cannot express a model the CLI accepts. This is a genuine gap, not a cosmetic one, and widening the enum is not free:
+`studio_context::Model` carried `Fable`, `Opus` and `Haiku` while the claude CLI's own `--help` also names **`sonnet`** — the studio could not express a model the CLI accepts. `Model::Sonnet` now exists, at $3/$15 per MTok.
 
-- The model is **part of the prefix cache key** ([02](02-context-engine.md)). That actually makes widening *safe* rather than dangerous — a new variant hashes to its own prefix and cannot collide with an existing one.
-- But each variant needs a correct `min_cacheable_tokens`. Opus is 4096 and Fable 2048, both documented rather than probed, and Sonnet's minimum is unknown here. Get it wrong and charters for that seat **silently never cache**: `cache_creation` stays 0 with no error.
+**Adding a variant cannot move an existing model's prefix hash, and the reason is worth stating precisely.** `freeze` hashes the model as `model.cli_alias()` — the *alias bytes*, `b"opus"`, not the enum discriminant and not its `Debug` form:
 
-Until it is widened, a claude model name the studio cannot express is **refused at spawn, naming the model**, rather than quietly falling back to the registry and running something the user did not ask for. Full names resolve by family, so `claude-opus-5` is `Opus`; `sonnet` is refused with a message saying which names work and what would have to change. `a_claude_model_the_studio_cannot_express_is_flagged_rather_than_quietly_replaced` holds that line.
+```rust
+hasher.update(b"\x00model\x00");
+hasher.update(model.cli_alias().as_bytes());
+```
+
+So variant *position* is not load-bearing and a new variant anywhere in the enum is safe. Had the hash been built from the discriminant, inserting `Sonnet` between `Opus` and `Haiku` would have silently re-keyed Haiku's every cached prefix. Two tests pin this rather than trusting it: `the_hash_is_built_from_the_cli_alias_not_from_the_enum_position` recomputes the digest from the alias bytes and asserts it matches, and `adding_a_model_never_moves_an_existing_models_prefix_hash` asserts the literal blake3 hashes of a fixed charter for fable, opus and haiku. A future refactor to discriminant-based hashing fails both.
+
+The registry is untouched: **sonnet is available to choose, not assigned to anything.** `widening_the_enum_moved_no_role_off_the_model_it_ships_on` asserts no role adopts it and that `studio_director` is still the only Fable seat.
+
+#### The padding number, and a discrepancy worth someone's attention
+
+`min_cacheable_tokens` is the one part of a new variant that can silently break: pad below a model's minimum cacheable prefix and its charters **never cache at all** — `cache_creation` stays 0 with no error ([02](02-context-engine.md)).
+
+Sonnet's minimum is **documented as 1024 tokens**. The studio pads it to **4096** anyway, matching what Opus and Haiku already use. That is deliberate: padding *above* a minimum still caches, padding below it caches nothing, and a coherent padding scale is worth more than 3k tokens paid once per prefix. `documented_min_cacheable_tokens` records the published figure separately from the padding the studio applies, and `every_model_pads_at_or_above_the_minimum_its_documentation_states` asserts the invariant for every variant.
+
+Keeping the two numbers apart surfaced something this document should not bury: **the studio's padding table is well above the currently published minimums for three of the four models.**
+
+| | studio pads to | published minimum |
+|---|---|---|
+| fable | 2048 | 512 |
+| opus | 4096 | 1024 |
+| sonnet | 4096 | 1024 |
+| haiku | 4096 | 4096 |
+
+If those published figures are right, every Opus seat — which is twelve of the thirteen roles — pads roughly 4× further than it needs to, and the studio pays that padding on every cold write. **This was not changed, and should not be changed casually:** `min_cacheable_tokens` feeds `pad_to_minimum`, which changes the frozen bytes, which changes the `prefix_hash`. Lowering Opus from 4096 would invalidate every warm prefix in the wild in exchange for a saving nobody here has measured. It is worth a probe — freeze a short charter at each candidate padding and read `cache_creation` off a real spawn — before it is worth an edit. `the_padding_the_studio_uses_is_not_mistaken_for_the_published_minimum` pins which models currently over-pad so the question cannot quietly disappear.
+
+#### A model the studio cannot express is still refused
+
+Unrecognised claude model names are **refused at spawn with the name in the message** rather than quietly falling back to the registry. Full names resolve by family (`claude-opus-5` → `Opus`, `claude-sonnet-…` → `Sonnet`), and anything else is refused with a message listing what does work. `a_claude_model_the_studio_cannot_express_is_flagged_rather_than_quietly_replaced` holds that line, and `every_model_the_studio_can_express_actually_resolves` checks the advertised list is not lying.
 
 ### A refused model is never a generic failure
 

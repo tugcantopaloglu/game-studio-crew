@@ -150,6 +150,9 @@ fn candidate_row(provider: Provider, c: &Candidate, log: &ProbeLog) -> Value {
             "id": s.as_str(),
             "explain": s.explain(),
         })).collect::<Vec<_>>(),
+        "efforts": c.efforts,
+        "default_effort": c.default_effort,
+        "context_window": c.context_window,
         "verdict": seen.map(|r| r.verdict).unwrap_or(Verdict::Unknown).as_str(),
         "detail": seen.and_then(|r| r.detail.clone()),
         "checked_at": seen.map(|r| r.checked_at.clone()),
@@ -157,6 +160,39 @@ fn candidate_row(provider: Provider, c: &Candidate, log: &ProbeLog) -> Value {
         "cost_usd": seen.and_then(|r| r.cost_usd),
         "tokens": seen.and_then(|r| r.tokens),
     })
+}
+
+const CATALOGUE_TIMEOUT: Duration = Duration::from_secs(30);
+static CATALOGUES: Mutex<Vec<(String, Instant, String)>> = Mutex::new(Vec::new());
+const CATALOGUE_TTL: Duration = Duration::from_secs(60);
+
+pub fn read_catalogue(provider: Provider) -> Option<String> {
+    let argv = models::catalogue_argv(provider.id())?;
+    if on_path(provider.program()).is_none() {
+        return None;
+    }
+
+    if let Ok(cached) = CATALOGUES.lock() {
+        if let Some((_, at, body)) = cached
+            .iter()
+            .find(|(id, at, _)| id == provider.id() && at.elapsed() < CATALOGUE_TTL)
+        {
+            let _ = at;
+            return Some(body.clone());
+        }
+    }
+
+    let (_, stdout, _, _) =
+        run_bounded(provider.program(), &argv, "", CATALOGUE_TIMEOUT).ok()?;
+    if stdout.trim().is_empty() {
+        return None;
+    }
+
+    if let Ok(mut cached) = CATALOGUES.lock() {
+        cached.retain(|(id, _, _)| id != provider.id());
+        cached.push((provider.id().to_string(), Instant::now(), stdout.clone()));
+    }
+    Some(stdout)
 }
 
 fn catalogue_for(state: &AppState, provider: Provider) -> Value {
@@ -167,13 +203,24 @@ fn catalogue_for(state: &AppState, provider: Provider) -> Value {
     } else {
         None
     };
-    let found = models::candidates(provider.id(), &settings, &log, codex_config.as_deref());
+    let catalogue = read_catalogue(provider);
+    let found = models::candidates(
+        provider.id(),
+        &settings,
+        &log,
+        codex_config.as_deref(),
+        catalogue.as_deref(),
+    );
 
     serde_json::json!({
         "provider": provider.id(),
         "title": provider.title(),
+        "program": provider.program(),
         "installed": on_path(provider.program()).is_some(),
         "probeable": provider.probe_args("").is_some(),
+        "has_catalogue": models::catalogue_argv(provider.id()).is_some(),
+        "catalogue_read": catalogue.is_some(),
+        "discovery": models::discovery(provider.id()),
         "provenance": models::provenance(provider.id()),
         "candidates": found.iter().map(|c| candidate_row(provider, c, &log)).collect::<Vec<_>>(),
     })
@@ -192,6 +239,7 @@ async fn model_catalogue(State(state): State<AppState>) -> Response {
             "automatic": false,
             "cost": "one real request per model, billed to that CLI's own subscription, and up to three minutes each while it answers",
             "route": "POST /models/probe with {\"provider\": \"codex\", \"models\": [\"gpt-5.6-luna\"]}",
+            "why_still_useful": "a catalogue says a model exists; only asking it says this account may spawn it",
         },
     }))
     .into_response()
@@ -1106,15 +1154,47 @@ mod tests {
             );
         }
 
-        let codex = rows.iter().find(|r| r["provider"] == "codex").unwrap();
-        let ids: Vec<&str> = codex["candidates"]
+        let claude = rows.iter().find(|r| r["provider"] == "claude").unwrap();
+        let ids: Vec<&str> = claude["candidates"]
             .as_array()
             .unwrap()
             .iter()
             .map(|c| c["id"].as_str().unwrap())
             .collect();
-        assert!(ids.contains(&"gpt-5.6-sol"));
-        assert!(ids.contains(&"gpt-5.4-mini"));
+        assert!(ids.contains(&"sonnet"), "sonnet is expressible now and must be offered");
+    }
+
+    #[tokio::test]
+    async fn a_cli_with_its_own_catalogue_is_read_for_free_and_the_rest_cost_a_request() {
+        let (_, body) = body_of(state_in("models-discovery"), "/models").await;
+        let rows = body["providers"].as_array().unwrap();
+
+        let codex = rows.iter().find(|r| r["provider"] == "codex").unwrap();
+        assert_eq!(codex["has_catalogue"], true);
+        assert_eq!(codex["discovery"], "a free local catalogue call");
+
+        for id in ["claude", "gemini", "copilot", "kimi"] {
+            let row = rows.iter().find(|r| r["provider"] == id).unwrap();
+            assert_eq!(row["has_catalogue"], false, "{id} has no catalogue subcommand");
+            assert_eq!(row["discovery"], "one real billed request per model");
+        }
+
+        assert!(
+            body["probe"]["why_still_useful"].as_str().unwrap().contains("account"),
+            "a catalogue listing is not entitlement and the payload must say so"
+        );
+    }
+
+    #[test]
+    fn a_provider_with_no_catalogue_is_never_asked_for_one() {
+        for p in [Provider::Claude, Provider::Gemini, Provider::Copilot, Provider::Kimi] {
+            assert_eq!(
+                read_catalogue(p),
+                None,
+                "{} has no catalogue call, so nothing should be spawned for it",
+                p.id()
+            );
+        }
     }
 
     #[tokio::test]

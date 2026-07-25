@@ -13,14 +13,18 @@ pub const CHARS_PER_TOKEN: f64 = 3.6;
 pub enum Model {
     Fable,
     Opus,
+    Sonnet,
     Haiku,
 }
 
 impl Model {
+    pub const ALL: [Model; 4] = [Model::Fable, Model::Opus, Model::Sonnet, Model::Haiku];
+
     pub fn cli_alias(&self) -> &'static str {
         match self {
             Model::Fable => "fable",
             Model::Opus => "opus",
+            Model::Sonnet => "sonnet",
             Model::Haiku => "haiku",
         }
     }
@@ -29,6 +33,16 @@ impl Model {
         match self {
             Model::Fable => 2048,
             Model::Opus | Model::Haiku => 4096,
+            Model::Sonnet => 4096,
+        }
+    }
+
+    pub fn documented_min_cacheable_tokens(&self) -> usize {
+        match self {
+            Model::Fable => 512,
+            Model::Opus => 1024,
+            Model::Sonnet => 1024,
+            Model::Haiku => 4096,
         }
     }
 }
@@ -340,5 +354,116 @@ mod tests {
         assert_eq!(d["role"], "gameplay_engineer");
         assert_eq!(d["prefix_hash"], p.prefix_hash);
         assert_eq!(d["tools"][0], "Glob");
+    }
+}
+
+#[cfg(test)]
+mod widening_tests {
+    use super::*;
+
+    fn probe_charter() -> CharterSource {
+        CharterSource {
+            studio_conventions: "L0 conventions".into(),
+            engine_profile: "L1 engine".into(),
+            role_charter: "L2 charter".into(),
+        }
+    }
+
+    fn probe_tools() -> Vec<String> {
+        vec!["Read".to_string(), "Grep".to_string()]
+    }
+
+    #[test]
+    fn adding_a_model_never_moves_an_existing_models_prefix_hash() {
+        let known = [
+            (Model::Fable, "fc6f52a98d43bcfa838fc87efe3bc0f1ae201ea19545b5be9b13c3eae541d706"),
+            (Model::Opus, "dd2a96259a3118e58adb7dfe10f3e46a6986b95446fc30e59d9354fd12911ddc"),
+            (Model::Haiku, "e6105787abecfddc4b4eb21176d6d158f48e8f0a9cb915b5b375820dfa19e9b5"),
+        ];
+        for (model, expected) in known {
+            let frozen = freeze(&probe_charter(), &probe_tools(), model).unwrap();
+            assert_eq!(
+                frozen.prefix_hash, expected,
+                "{} moved; every warm prefix in the wild for it is now a cold write",
+                model.cli_alias()
+            );
+        }
+    }
+
+    #[test]
+    fn the_hash_is_built_from_the_cli_alias_not_from_the_enum_position() {
+        let mut hasher = blake3::Hasher::new();
+        let frozen = freeze(&probe_charter(), &probe_tools(), Model::Opus).unwrap();
+        hasher.update(frozen.bytes.as_bytes());
+        hasher.update(b"\x00tools\x00");
+        for t in &frozen.tools {
+            hasher.update(t.as_bytes());
+            hasher.update(b"\x00");
+        }
+        hasher.update(b"\x00model\x00");
+        hasher.update(b"opus");
+
+        assert_eq!(
+            frozen.prefix_hash,
+            hasher.finalize().to_hex().to_string(),
+            "the model enters the hash as its alias bytes; a discriminant would make variant order load-bearing"
+        );
+    }
+
+    #[test]
+    fn every_model_hashes_to_its_own_prefix_so_none_can_be_mistaken_for_another() {
+        let mut seen = std::collections::HashSet::new();
+        for m in Model::ALL {
+            let frozen = freeze(&probe_charter(), &probe_tools(), m).unwrap();
+            assert!(seen.insert(frozen.prefix_hash), "{} collides with another model", m.cli_alias());
+        }
+        assert_eq!(seen.len(), Model::ALL.len());
+    }
+
+    #[test]
+    fn every_model_pads_at_or_above_the_minimum_its_documentation_states() {
+        for m in Model::ALL {
+            assert!(
+                m.min_cacheable_tokens() >= m.documented_min_cacheable_tokens(),
+                "{} pads to {} but needs {}; a short charter would silently never cache",
+                m.cli_alias(),
+                m.min_cacheable_tokens(),
+                m.documented_min_cacheable_tokens()
+            );
+        }
+    }
+
+    #[test]
+    fn sonnet_pads_past_its_documented_minimum_rather_than_exactly_to_it() {
+        assert_eq!(Model::Sonnet.documented_min_cacheable_tokens(), 1024);
+        assert_eq!(
+            Model::Sonnet.min_cacheable_tokens(),
+            4096,
+            "padding above the minimum still caches; padding below it caches nothing, silently"
+        );
+    }
+
+    #[test]
+    fn the_padding_the_studio_uses_is_not_mistaken_for_the_published_minimum() {
+        let over_padded: Vec<&str> = Model::ALL
+            .into_iter()
+            .filter(|m| m.min_cacheable_tokens() > m.documented_min_cacheable_tokens())
+            .map(|m| m.cli_alias())
+            .collect();
+        assert_eq!(
+            over_padded,
+            vec!["fable", "opus", "sonnet"],
+            "these three pad further than published; changing any of them moves its prefix hash"
+        );
+    }
+
+    #[test]
+    fn every_model_alias_is_the_lowercase_name_the_cli_takes() {
+        for m in Model::ALL {
+            let alias = m.cli_alias();
+            assert!(!alias.is_empty());
+            assert_eq!(alias, alias.to_lowercase());
+        }
+        assert_eq!(Model::Sonnet.cli_alias(), "sonnet");
     }
 }

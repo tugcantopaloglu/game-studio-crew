@@ -26,8 +26,8 @@ impl Verdict {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
+    Catalogue,
     CliHelp,
-    Picker,
     UserConfig,
     Settings,
     Probe,
@@ -36,8 +36,8 @@ pub enum Source {
 impl Source {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Source::Catalogue => "catalogue",
             Source::CliHelp => "cli_help",
-            Source::Picker => "picker",
             Source::UserConfig => "user_config",
             Source::Settings => "settings",
             Source::Probe => "probe",
@@ -46,8 +46,8 @@ impl Source {
 
     pub fn explain(&self) -> &'static str {
         match self {
+            Source::Catalogue => "the CLI listed it in its own machine-readable catalogue",
             Source::CliHelp => "named in the CLI's own --help output",
-            Source::Picker => "listed by the CLI's own model picker",
             Source::UserConfig => "found in this machine's config file for that CLI",
             Source::Settings => "you typed it into the studio settings",
             Source::Probe => "the studio has probed this name before",
@@ -123,6 +123,81 @@ pub struct Candidate {
     pub id: String,
     pub label: Option<String>,
     pub sources: Vec<Source>,
+    pub efforts: Vec<String>,
+    pub default_effort: Option<String>,
+    pub context_window: Option<u64>,
+}
+
+impl Candidate {
+    fn named(id: String, label: Option<String>, source: Source) -> Self {
+        Self {
+            id,
+            label,
+            sources: vec![source],
+            efforts: Vec::new(),
+            default_effort: None,
+            context_window: None,
+        }
+    }
+}
+
+pub const CATALOGUE_COMMAND: [&str; 3] = ["debug", "models", "--"];
+
+pub fn catalogue_argv(provider: &str) -> Option<Vec<String>> {
+    match provider {
+        "codex" => Some(vec!["debug".into(), "models".into()]),
+        _ => None,
+    }
+}
+
+pub fn from_codex_catalogue(json: &str) -> Vec<Candidate> {
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let Some(rows) = parsed.get("models").and_then(|m| m.as_array()) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for row in rows {
+        let Some(slug) = row.get("slug").and_then(|s| s.as_str()) else {
+            continue;
+        };
+        if row.get("visibility").and_then(|v| v.as_str()) != Some("list") {
+            continue;
+        }
+        if row.get("supported_in_api").and_then(|v| v.as_bool()) == Some(false) {
+            continue;
+        }
+
+        let efforts = row
+            .get("supported_reasoning_levels")
+            .and_then(|l| l.as_array())
+            .map(|levels| {
+                levels
+                    .iter()
+                    .filter_map(|l| l.get("effort").and_then(|e| e.as_str()))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        out.push(Candidate {
+            id: slug.to_string(),
+            label: row
+                .get("description")
+                .and_then(|d| d.as_str())
+                .map(str::to_string),
+            sources: vec![Source::Catalogue],
+            efforts,
+            default_effort: row
+                .get("default_reasoning_level")
+                .and_then(|d| d.as_str())
+                .map(str::to_string),
+            context_window: row.get("context_window").and_then(|c| c.as_u64()),
+        });
+    }
+    out
 }
 
 pub fn shipped(provider: &str) -> Vec<(&'static str, Option<&'static str>, Source)> {
@@ -132,14 +207,6 @@ pub fn shipped(provider: &str) -> Vec<(&'static str, Option<&'static str>, Sourc
             ("opus", Some("tier two and three seats"), Source::CliHelp),
             ("sonnet", None, Source::CliHelp),
             ("haiku", Some("cheapest tier, used for sprint rollups"), Source::CliHelp),
-        ],
-        "codex" => vec![
-            ("gpt-5.6-sol", Some("latest frontier agentic coding model"), Source::Picker),
-            ("gpt-5.6-terra", Some("balanced, everyday work"), Source::Picker),
-            ("gpt-5.6-luna", Some("fast and affordable"), Source::Picker),
-            ("gpt-5.5", Some("frontier, complex coding and research"), Source::Picker),
-            ("gpt-5.4", Some("strong, everyday coding"), Source::Picker),
-            ("gpt-5.4-mini", Some("small, fast, cost-efficient for simpler tasks"), Source::Picker),
         ],
         "copilot" => vec![
             ("auto", Some("let Copilot pick"), Source::CliHelp),
@@ -151,11 +218,19 @@ pub fn shipped(provider: &str) -> Vec<(&'static str, Option<&'static str>, Sourc
 
 pub fn provenance(provider: &str) -> &'static str {
     match provider {
-        "claude" => "claude has no subcommand that lists models, so these are the aliases its own --help names; type any other name and the studio will check it",
-        "codex" => "codex has no subcommand that lists models, so these are the ids and descriptions from its own model picker, plus anything found in this machine's ~/.codex/config.toml",
+        "claude" => "claude has no subcommand that lists models, so these are the aliases its own --help names and the only way to tell whether one runs is to ask it; type any other name and the studio will check it",
+        "codex" => "codex renders its own model catalogue with `codex debug models`, which is free and local, so this list is read rather than guessed; models it marks as hidden are not offered",
         "copilot" => "copilot has no subcommand that lists models; these two are the only names its own --help mentions, so treat the list as a starting point rather than a catalogue",
-        "gemini" => "gemini's --help names no model at all and it has no subcommand that lists them, so the studio ships no list for it; type a name and probe it",
+        "gemini" => "gemini's --help names no model at all and it has no subcommand that lists them, so the studio ships no list for it; type a name and check it",
         _ => "the studio has never read this CLI, so it offers no models for it",
+    }
+}
+
+pub fn discovery(provider: &str) -> &'static str {
+    if catalogue_argv(provider).is_some() {
+        "a free local catalogue call"
+    } else {
+        "one real billed request per model"
     }
 }
 
@@ -201,43 +276,56 @@ pub fn candidates(
     settings: &Settings,
     log: &ProbeLog,
     codex_config: Option<&str>,
+    catalogue: Option<&str>,
 ) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = Vec::new();
 
-    let mut add = |id: String, label: Option<&'static str>, source: Source| {
-        if id.trim().is_empty() {
+    let mut add = |found: Candidate| {
+        if found.id.trim().is_empty() {
             return;
         }
-        match out.iter_mut().find(|c| c.id == id) {
+        match out.iter_mut().find(|c| c.id == found.id) {
             Some(existing) => {
-                if !existing.sources.contains(&source) {
-                    existing.sources.push(source);
+                for source in found.sources {
+                    if !existing.sources.contains(&source) {
+                        existing.sources.push(source);
+                    }
                 }
                 if existing.label.is_none() {
-                    existing.label = label.map(str::to_string);
+                    existing.label = found.label;
+                }
+                if existing.efforts.is_empty() {
+                    existing.efforts = found.efforts;
+                }
+                if existing.default_effort.is_none() {
+                    existing.default_effort = found.default_effort;
+                }
+                if existing.context_window.is_none() {
+                    existing.context_window = found.context_window;
                 }
             }
-            None => out.push(Candidate {
-                id,
-                label: label.map(str::to_string),
-                sources: vec![source],
-            }),
+            None => out.push(found),
         }
     };
 
+    if provider == "codex" {
+        for found in catalogue.map(from_codex_catalogue).unwrap_or_default() {
+            add(found);
+        }
+    }
     for (id, label, source) in shipped(provider) {
-        add(id.to_string(), label, source);
+        add(Candidate::named(id.to_string(), label.map(str::to_string), source));
     }
     if provider == "codex" {
         for id in codex_config.map(from_codex_config).unwrap_or_default() {
-            add(id, None, Source::UserConfig);
+            add(Candidate::named(id, None, Source::UserConfig));
         }
     }
     for id in settings.named_models(provider) {
-        add(id, None, Source::Settings);
+        add(Candidate::named(id, None, Source::Settings));
     }
     for id in log.models_seen(provider) {
-        add(id, None, Source::Probe);
+        add(Candidate::named(id, None, Source::Probe));
     }
 
     out
@@ -326,29 +414,106 @@ url = "http://127.0.0.1:8080/mcp"
         assert!(from_codex_config("this is not toml [[[").is_empty());
     }
 
+    const REAL_CATALOGUE: &str = include_str!("../testdata/codex-models.json");
+
     #[test]
     fn a_pinned_model_is_offered_even_though_nobody_has_checked_it_yet() {
-        let list = candidates("codex", &Settings::new(), &ProbeLog::default(), Some(REAL_CODEX_CONFIG));
+        let list = candidates("codex", &Settings::new(), &ProbeLog::default(), Some(REAL_CODEX_CONFIG), None);
         let pinned = list.iter().find(|c| c.id == "gpt-5.2-codex").unwrap();
         assert_eq!(pinned.sources, vec![Source::UserConfig]);
     }
 
     #[test]
-    fn a_model_named_by_the_picker_and_by_the_config_records_both_places() {
-        let list = candidates("codex", &Settings::new(), &ProbeLog::default(), Some(REAL_CODEX_CONFIG));
+    fn a_model_named_by_the_catalogue_and_by_the_config_records_both_places() {
+        let list = candidates(
+            "codex",
+            &Settings::new(),
+            &ProbeLog::default(),
+            Some(REAL_CODEX_CONFIG),
+            Some(REAL_CATALOGUE),
+        );
         let sol = list.iter().find(|c| c.id == "gpt-5.6-sol").unwrap();
-        assert!(sol.sources.contains(&Source::Picker));
+        assert!(sol.sources.contains(&Source::Catalogue));
         assert!(sol.sources.contains(&Source::UserConfig));
-        assert_eq!(sol.label.as_deref(), Some("latest frontier agentic coding model"));
+    }
+
+    #[test]
+    fn the_codex_catalogue_is_read_rather_than_shipped_as_a_constant() {
+        assert!(
+            shipped("codex").is_empty(),
+            "codex names come from its own catalogue call, so hardcoding them would only rot"
+        );
+        assert_eq!(catalogue_argv("codex"), Some(vec!["debug".into(), "models".into()]));
+        assert_eq!(catalogue_argv("claude"), None, "claude has no catalogue subcommand");
+        assert_eq!(discovery("codex"), "a free local catalogue call");
+        assert_eq!(discovery("claude"), "one real billed request per model");
+    }
+
+    #[test]
+    fn the_real_catalogue_yields_the_six_listed_models_and_hides_the_hidden_one() {
+        let found = from_codex_catalogue(REAL_CATALOGUE);
+        let ids: Vec<&str> = found.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]
+        );
+        assert!(
+            !ids.contains(&"codex-auto-review"),
+            "the catalogue marks it hidden; offering it would put a model in front of the user that codex itself does not"
+        );
+    }
+
+    #[test]
+    fn the_catalogue_carries_the_reasoning_levels_each_model_actually_takes() {
+        let found = from_codex_catalogue(REAL_CATALOGUE);
+        let by = |slug: &str| found.iter().find(|c| c.id == slug).unwrap().clone();
+
+        assert_eq!(
+            by("gpt-5.6-sol").efforts,
+            vec!["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(by("gpt-5.6-luna").efforts, vec!["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(by("gpt-5.4").efforts, vec!["low", "medium", "high", "xhigh"]);
+        assert_eq!(
+            by("gpt-5.6-sol").default_effort.as_deref(),
+            Some("low"),
+            "the catalogue's own default, not the studio's guess"
+        );
+    }
+
+    #[test]
+    fn the_levels_differ_between_models_so_effort_cannot_be_chosen_alone() {
+        let found = from_codex_catalogue(REAL_CATALOGUE);
+        let sol = found.iter().find(|c| c.id == "gpt-5.6-sol").unwrap();
+        let older = found.iter().find(|c| c.id == "gpt-5.4").unwrap();
+        assert!(sol.efforts.contains(&"max".to_string()));
+        assert!(
+            !older.efforts.contains(&"max".to_string()),
+            "asking gpt-5.4 for max would be rejected at request time"
+        );
+    }
+
+    #[test]
+    fn a_catalogue_that_does_not_parse_yields_nothing_rather_than_a_guess() {
+        assert!(from_codex_catalogue("not json at all {").is_empty());
+        assert!(from_codex_catalogue("{}").is_empty());
+        assert!(from_codex_catalogue(r#"{"models":[]}"#).is_empty());
     }
 
     #[test]
     fn a_model_the_user_typed_is_offered_back_even_if_no_catalogue_names_it() {
         let s = settings(&[("models.gemini.tier3", "gemini-3-pro")]);
-        let list = candidates("gemini", &s, &ProbeLog::default(), None);
+        let list = candidates("gemini", &s, &ProbeLog::default(), None, None);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "gemini-3-pro");
         assert_eq!(list[0].sources, vec![Source::Settings]);
+    }
+
+    #[test]
+    fn claude_still_offers_sonnet_now_that_the_studio_can_express_it() {
+        let list = candidates("claude", &Settings::new(), &ProbeLog::default(), None, None);
+        let ids: Vec<&str> = list.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["fable", "opus", "sonnet", "haiku"]);
     }
 
     #[test]

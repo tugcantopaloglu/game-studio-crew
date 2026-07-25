@@ -108,6 +108,30 @@ function modelKey(providerId, scope) {
   return providerId === "claude" ? `models.${scope}` : `models.${providerId}.${scope}`;
 }
 
+function effortNote(providerId, modelId, chosen) {
+  const found = candidatesFor(providerId).find((m) => m.id === modelId);
+  const offered = found && found.efforts && found.efforts.length ? found.efforts : null;
+  if (!offered) return null;
+
+  if (chosen && !offered.includes(chosen)) {
+    const usable = offered.filter((e) => EFFORTS.includes(e));
+    const fallback = usable[usable.length - 1];
+    return el("div", {
+      class: "bad",
+      text: `${modelId} does not take ${chosen}; it takes ${offered.join(", ")}${
+        fallback ? `, so the studio would run it at ${fallback}` : ""
+      }`,
+    });
+  }
+  const unknownToStudio = offered.filter((e) => !EFFORTS.includes(e));
+  return el("div", {
+    class: "k",
+    text: `${modelId} takes ${offered.join(", ")}${
+      unknownToStudio.length ? ` — the studio cannot ask for ${unknownToStudio.join(", ")}` : ""
+    }`,
+  });
+}
+
 function modelField(label, providerId, scope) {
   const key = modelKey(providerId, scope);
   const listId = `models-${providerId}-${(listCounter += 1)}`;
@@ -116,7 +140,15 @@ function modelField(label, providerId, scope) {
     suggestions.append(el("option", { value: c.id, label: c.label || "" }));
   }
 
+  const effortKey = `effort.${scope}`;
   const badge = el("div", { class: "hint" }, verdictOf(providerId, read(key, "")));
+  const levels = el("div", { class: "hint" });
+  const showLevels = (named) => {
+    const note = effortNote(providerId, named, read(effortKey, ""));
+    levels.replaceChildren(...(note ? [note] : []));
+  };
+  showLevels(read(key, ""));
+
   const box = el("div", { class: "field" });
   const input = el("input", {
     type: "text",
@@ -127,10 +159,11 @@ function modelField(label, providerId, scope) {
       const named = e.target.value.trim();
       store(key, named);
       badge.replaceChildren(verdictOf(providerId, named));
+      showLevels(named);
     },
   });
 
-  box.append(el("label", { text: label }), input, suggestions, badge);
+  box.append(el("label", { text: label }), input, suggestions, badge, levels);
   return box;
 }
 
@@ -284,6 +317,16 @@ function modelsSection(root) {
     const card = el("div", { class: "card" });
     card.append(el("b", { text: row.title }));
     card.append(el("div", { class: "k", text: row.provenance }));
+    card.append(
+      el("div", {
+        class: row.has_catalogue ? "ok" : "hint",
+        text: row.has_catalogue
+          ? row.catalogue_read
+            ? "read from its own catalogue, at no cost"
+            : "it has a catalogue but the studio could not read it"
+          : `discovery here costs ${row.discovery}`,
+      })
+    );
 
     if (!row.installed) {
       card.append(el("div", { class: "warn", text: `${row.program} is not on PATH, so nothing here can be checked` }));
@@ -321,6 +364,16 @@ function modelsSection(root) {
         el("div", { class: "k", text: c.label || c.sources.map((s) => s.explain).join("; ") }),
         el("div", { class: "hint" }, verdictOf(row.provider, c.id))
       );
+      if (c.efforts && c.efforts.length) {
+        line.append(
+          el("div", {
+            class: "k",
+            text: `reasoning: ${c.efforts.join(", ")}${
+              c.default_effort ? ` (its default is ${c.default_effort})` : ""
+            }`,
+          })
+        );
+      }
       card.append(line);
     }
 

@@ -227,7 +227,7 @@ pub struct Seat {
     pub unusable_model: Option<String>,
 }
 
-pub const CLAUDE_MODELS_THE_STUDIO_CAN_EXPRESS: [&str; 3] = ["fable", "opus", "haiku"];
+pub const CLAUDE_MODELS_THE_STUDIO_CAN_EXPRESS: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
 
 impl Seat {
     pub fn describe(&self) -> String {
@@ -257,15 +257,13 @@ fn first_line(state: &studio_core::StreamStateSnapshot) -> String {
 
 fn model_named(alias: &str) -> Option<Model> {
     let alias = alias.trim();
-    match alias {
-        "fable" => return Some(Model::Fable),
-        "opus" => return Some(Model::Opus),
-        "haiku" => return Some(Model::Haiku),
-        _ => {}
+    if let Some(exact) = Model::ALL.into_iter().find(|m| m.cli_alias() == alias) {
+        return Some(exact);
     }
     for (family, model) in [
         ("claude-fable", Model::Fable),
         ("claude-opus", Model::Opus),
+        ("claude-sonnet", Model::Sonnet),
         ("claude-haiku", Model::Haiku),
     ] {
         if alias.starts_with(family) {
@@ -647,13 +645,47 @@ mod seat_tests {
 
     #[test]
     fn a_claude_model_the_studio_cannot_express_is_flagged_rather_than_quietly_replaced() {
-        let s = settings(&[("models.role.artist", "sonnet")]);
+        let s = settings(&[("models.role.artist", "clyde")]);
         let seat = seat_from(&s, role_named("artist"));
         assert_eq!(
             seat.unusable_model.as_deref(),
-            Some("sonnet"),
+            Some("clyde"),
             "falling back to opus would run a model the user did not ask for and never say so"
         );
+    }
+
+    #[test]
+    fn sonnet_can_now_be_chosen_because_the_cli_has_always_accepted_it() {
+        let s = settings(&[("models.role.artist", "sonnet")]);
+        let seat = seat_from(&s, role_named("artist"));
+        assert_eq!(seat.model, Model::Sonnet);
+        assert_eq!(seat.model_alias, "sonnet");
+        assert_eq!(seat.unusable_model, None);
+    }
+
+    #[test]
+    fn widening_the_enum_moved_no_role_off_the_model_it_ships_on() {
+        for r in &REGISTRY {
+            assert_ne!(
+                r.model,
+                Model::Sonnet,
+                "{} adopted sonnet by default; it is offered, not assigned",
+                r.id
+            );
+        }
+        let on_fable: Vec<&str> =
+            REGISTRY.iter().filter(|r| r.model == Model::Fable).map(|r| r.id).collect();
+        assert_eq!(on_fable, vec!["studio_director"]);
+    }
+
+    #[test]
+    fn every_model_the_studio_can_express_actually_resolves() {
+        for alias in CLAUDE_MODELS_THE_STUDIO_CAN_EXPRESS {
+            let s = settings(&[("models.role.artist", alias)]);
+            let seat = seat_from(&s, role_named("artist"));
+            assert_eq!(seat.unusable_model, None, "{alias} is advertised but does not resolve");
+            assert_eq!(seat.model_alias, alias);
+        }
     }
 
     #[test]
