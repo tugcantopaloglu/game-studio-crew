@@ -78,6 +78,7 @@ export function codexModels(payload) {
       sources: sourcesOf(row),
       cost: row.cost_usd === undefined || row.cost_usd === null ? "" : row.cost_usd,
       seconds: row.seconds === undefined || row.seconds === null ? "" : row.seconds,
+      window: row.context_window || "",
     });
   }
   return out;
@@ -88,6 +89,7 @@ function suggestionTitle(entry) {
   if (entry.label) parts.push(entry.label);
   if (entry.reason) parts.push(entry.reason);
   if (entry.sources) parts.push("named by " + entry.sources);
+  if (entry.window) parts.push(entry.window.toLocaleString() + " token context");
   if (entry.checked) parts.push("checked " + entry.checked);
   if (entry.cost !== "" && entry.cost !== undefined) parts.push("cost $" + entry.cost);
   else if (entry.seconds !== "" && entry.seconds !== undefined && entry.status !== "unknown") {

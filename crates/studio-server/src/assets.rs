@@ -574,9 +574,9 @@ pub fn diagnose(recorded: &str, model: &str) -> Option<String> {
         let said = verbatim_refusal(recorded).unwrap_or_default();
         return Some(format!(
             "{PROGRAM} refused the model {model}. That is a restriction on this ChatGPT account, \
-             not a fault in the studio, and codex said so in these words: \"{said}\" Run \
-             `{PROGRAM} debug models` to see which models this account may use, then put one in \
-             {SETTING_MODEL} in the assets panel"
+             not a fault in the studio, and codex said so in these words: \"{said}\" Pick another \
+             in the assets panel: a model the catalogue merely lists is only known to exist, so \
+             prefer one the studio has already seen answer"
         ));
     }
     if recorded.contains("token_expired") || recorded.contains("refresh token was already used") {
@@ -1217,8 +1217,10 @@ mod tests {
             why.contains("The 'gpt-5.2-codex' model is not supported when using Codex with a ChatGPT account."),
             "codex's own words have to survive verbatim: {why}"
         );
-        assert!(why.contains("codex debug models"));
-        assert!(why.contains(SETTING_MODEL));
+        assert!(
+            why.contains("only known to exist"),
+            "a catalogued model is not a usable one, and this is where that bites: {why}"
+        );
     }
 
     #[test]
