@@ -3,7 +3,7 @@ import {
   buildDesk, buildChair, buildPlant, buildCabinet,
   buildWhiteboard, buildServerRack, buildEasel, buildSofa, buildTestBench,
   buildMeetingTable, buildCoffeeBar, buildWaterCooler, buildShelf, buildBoxes,
-  characterBounds,
+  characterBounds, shell,
 } from "/voxel.js";
 import { buildAvatar, voxelMesh, VOX } from "/avatar.js";
 
@@ -36,7 +36,8 @@ function rand() {
   return rng / 4294967296;
 }
 
-function place(voxels, x, y, z, rotY = 0) {
+function place(raw, x, y, z, rotY = 0) {
+  const voxels = shell(raw);
   const mesh = voxelMesh(voxels);
   const w = Math.max(...voxels.map((v) => v.x)) + 1;
   const d = Math.max(...voxels.map((v) => v.z)) + 1;
