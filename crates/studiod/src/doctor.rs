@@ -21,6 +21,15 @@ fn exit_code(found: &Requirements) -> i32 {
     }
 }
 
+fn actionable_clause(reason: &str) -> String {
+    let cut = [", so ", "; ", ", and "]
+        .iter()
+        .filter_map(|mark| reason.find(mark))
+        .min()
+        .unwrap_or(reason.len());
+    reason[..cut].trim().to_string()
+}
+
 fn render(found: &Requirements) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -28,7 +37,15 @@ fn render(found: &Requirements) -> String {
         found.app_version, found.os
     ));
 
-    let rows: Vec<(Kind, String, String, &str)> = found
+    struct Row {
+        kind: Kind,
+        label: String,
+        state: String,
+        tag: &'static str,
+        why: Option<String>,
+    }
+
+    let rows: Vec<Row> = found
         .tools
         .iter()
         .map(|tool| {
@@ -42,24 +59,34 @@ fn render(found: &Requirements) -> String {
                 (Kind::CodingCli, true, false) => "installed, but the studio cannot drive it",
                 _ => "",
             };
-            (tool.kind, tool.label.clone(), state, tag)
+            Row {
+                kind: tool.kind,
+                label: tool.label.clone(),
+                state,
+                tag,
+                why: tool.cannot_drive.as_deref().map(actionable_clause),
+            }
         })
         .collect();
 
-    let widest = |pick: fn(&(Kind, String, String, &str)) -> usize| {
-        rows.iter().map(pick).max().unwrap_or(0).max(8)
-    };
-    let labels = widest(|r| r.1.chars().count());
-    let states = widest(|r| r.2.chars().count());
+    let widest = |pick: fn(&Row) -> usize| rows.iter().map(pick).max().unwrap_or(0).max(8);
+    let labels = widest(|r| r.label.chars().count());
+    let states = widest(|r| r.state.chars().count());
 
     for kind in Kind::ALL {
         out.push('\n');
         out.push_str(kind.heading());
         out.push('\n');
-        for (_, label, state, tag) in rows.iter().filter(|r| r.0 == kind) {
-            let line = format!("  {label:<labels$}  {state:<states$}  {tag}");
+        for row in rows.iter().filter(|r| r.kind == kind) {
+            let line = format!(
+                "  {:<labels$}  {:<states$}  {}",
+                row.label, row.state, row.tag
+            );
             out.push_str(line.trim_end());
             out.push('\n');
+            if let Some(why) = &row.why {
+                out.push_str(&format!("  {:<labels$}  why: {why}\n", ""));
+            }
         }
     }
 
@@ -182,6 +209,56 @@ mod tests {
             text.lines().any(|l| l.trim_start().starts_with("codex: ")),
             "an undrivable CLI is listed with the provider table's reason: {text}"
         );
+    }
+
+    #[test]
+    fn the_reason_a_cli_cannot_drive_the_crew_is_shown_even_when_another_one_can() {
+        let codex = Tool::found("codex", "codex", Kind::CodingCli, Some("0.9.1".into()));
+        let reason = codex
+            .cannot_drive
+            .clone()
+            .expect("a recognised but undrivable provider always says why");
+
+        let found = Requirements::new(vec![
+            Tool::found("claude", "claude", Kind::CodingCli, Some("2.1.0".into())),
+            codex,
+        ]);
+        let text = render(&found);
+        assert_eq!(exit_code(&found), 0, "claude can still drive the crew");
+
+        let shown = text
+            .lines()
+            .find_map(|l| l.trim_start().strip_prefix("why: "))
+            .expect("an undrivable CLI is never reported as a bare boolean");
+        assert!(!shown.is_empty());
+        assert!(
+            reason.starts_with(shown),
+            "the doctor must show the provider table's own words, not its own gloss:\n\
+             shown:  {shown}\n\
+             reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_drivable_cli_is_not_given_a_reason_it_does_not_need() {
+        let found = Requirements::new(vec![Tool::found(
+            "claude",
+            "claude",
+            Kind::CodingCli,
+            Some("2.1.0".into()),
+        )]);
+        assert!(!render(&found).contains("why:"));
+    }
+
+    #[test]
+    fn a_long_blocker_is_cut_to_the_clause_that_names_the_problem() {
+        let reason = "gemini has no flag that replaces the system prompt, so the frozen charter \
+                      cannot be delivered and every spawn would pay full price; pick claude";
+        assert_eq!(
+            actionable_clause(reason),
+            "gemini has no flag that replaces the system prompt"
+        );
+        assert_eq!(actionable_clause("no provider for codex"), "no provider for codex");
     }
 
     #[test]
