@@ -404,7 +404,7 @@
 <script type="module">
 import * as THREE from "/vendor/three.module.js";
 import { buildOffice, wanderStep, avatarPose, refreshScreens, paintScreens, setMotion, seatAtTable, leaveTable, showBoard, boardSays, boardDecided, hideBoard } from "/scene.js";
-import { pushEvent, setProject, setStage, settings } from "/bus.js";
+import { pushEvent, setProject, onProject, setStage, settings } from "/bus.js";
 import { startChatter, chatterSays } from "/chatter.js";
 import { budget, reducedMotion, sampleFrame, frameP95, frameMean, hardwareHints, shouldOfferLowSpec, noteOffered, reasonForOffer, onTier } from "/perf.js";
 
@@ -956,6 +956,8 @@ function rebuildTo(seq) {
   renderStats();
   renderTrack();
   refreshScreens(screenData());
+  paintScreens(Infinity);
+  miniDirty = true;
 }
 
 function apply(ev, replaying) {
@@ -1087,16 +1089,23 @@ function apply(ev, replaying) {
       break;
     }
   }
-  if (!replaying) allEvents.push(ev);
+  if (!replaying) {
+    allEvents.push(ev);
+    if (allEvents.length > MAX_HISTORY) {
+      droppedBefore = allEvents[allEvents.length - MAX_HISTORY].seq;
+      allEvents.splice(0, allEvents.length - MAX_HISTORY);
+      seek.min = String(droppedBefore);
+    }
+  }
   stats.events++;
   stats.history.push(Math.min(1, ((ev.data && ev.data.output) || 8) / 120));
   if (stats.history.length > 26) stats.history.shift();
   stats.feed.push({ seq: ev.seq, type: ev.type, bad: BAD.has(ev.type) });
   if (stats.feed.length > 12) stats.feed.shift();
   if (!replaying) {
-    renderStats();
-    renderTrack();
-    if (selected && selected === role) showDetail(selected);
+    statsDirty = true;
+    trackDirty = true;
+    if (selected && selected === role) detailDirty = true;
   }
   screensDirty = true;
 }
@@ -1155,13 +1164,24 @@ function renderStats() {
 
 const feed = document.getElementById("feed");
 function logEvent(ev) {
-  const row = document.createElement("div");
-  row.className = "ev" + (TERMINAL.has(ev.type) ? " terminal" : "") + (BAD.has(ev.type) ? " bad" : "");
-  const who = ev.actor === "daemon" ? "" : " " + roleOf(ev.actor);
-  row.innerHTML = `<span class="seq">${esc(ev.seq)}</span><span class="t">${esc(ev.type)}${esc(who)}</span>`;
-  feed.appendChild(row);
+  feedQueue.push(ev);
+  if (feedQueue.length > 400) feedQueue.shift();
+}
+
+function drainFeed() {
+  const pinned = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 26;
+  const batch = document.createDocumentFragment();
+  for (const ev of feedQueue) {
+    const row = document.createElement("div");
+    row.className = "ev" + (TERMINAL.has(ev.type) ? " terminal" : "") + (BAD.has(ev.type) ? " bad" : "");
+    const who = ev.actor === "daemon" ? "" : " " + roleOf(ev.actor);
+    row.innerHTML = `<span class="seq">${esc(ev.seq)}</span><span class="t">${esc(ev.type)}${esc(who)}</span>`;
+    batch.appendChild(row);
+  }
+  feedQueue.length = 0;
+  feed.appendChild(batch);
   while (feed.childElementCount > 400) feed.removeChild(feed.firstChild);
-  feed.scrollTop = feed.scrollHeight;
+  if (pinned) feed.scrollTop = feed.scrollHeight;
 }
 
 const conn = document.getElementById("conn");
@@ -1395,6 +1415,12 @@ function loadProjects() {
 loadProjects();
 
 projectSel.onchange = () => setProject(projectSel.value);
+
+onProject((id) => {
+  if (!id || projectSel.value === id) return;
+  if (![...projectSel.options].some((o) => o.value === id)) return;
+  projectSel.value = id;
+});
 
 document.getElementById("new-project").onclick = () => {
   projectForm.hidden = !projectForm.hidden;
