@@ -618,6 +618,7 @@ pub fn run_planned(
             Ok(false) => {}
             Err(e) => println!("  img2threejs install failed: {e}"),
         }
+        crate::assets::announce(&em.state.studio_dir, &paths.project);
     }
 
     let engine_hint = match profile.as_ref().map(|p| p.id.as_str()) {
@@ -651,6 +652,11 @@ pub fn run_planned(
         _ => "",
     }
     .to_string();
+
+    let engine_hint = format!(
+        "{engine_hint}{}",
+        crate::assets::crew_hint(&em.state.studio_dir, &paths.project)
+    );
 
     let host = Host {
         em,

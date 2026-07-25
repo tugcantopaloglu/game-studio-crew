@@ -1,3 +1,4 @@
+mod assets;
 mod charters;
 mod crash;
 mod doctor;
