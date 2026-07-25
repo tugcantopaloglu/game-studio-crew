@@ -144,7 +144,13 @@ class Rig {
     thigh.position.z = (z + LEG_LEN * Math.sin(tilt)) * blend;
   }
 
-  update(m, dt, t) {
+  update(m, dt, t, minStep) {
+    if (minStep > 0) {
+      this.owed += dt;
+      if (this.owed < minStep) return false;
+      dt = this.owed;
+      this.owed = 0;
+    }
     this.sit = approach(this.sit, m.sitting ? 1 : 0, 5, dt);
     const sit = this.sit;
     const speed = m.speed || 0;
@@ -214,6 +220,7 @@ class Rig {
     this.head.rotation.y = this.headYaw + talk * Math.sin(t * 6.3 + this.seed) * 0.07;
     this.head.rotation.x = this.headPitch + talk * Math.sin(t * 7.9 + this.seed) * 0.05;
     this.head.rotation.z = -this.torso.rotation.z * 0.45;
+    return true;
   }
 }
 

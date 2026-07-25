@@ -1,0 +1,5 @@
+  const st = deskState(role);
+  if (st.ring === name) return;
+  st.ring = name;
+  a.ringMat.color.setHex(RING[name] || RING.idle);
+  miniDirty = true;

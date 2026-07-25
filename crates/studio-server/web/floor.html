@@ -620,17 +620,28 @@ addEventListener("keydown", (e) => {
 
 const ray = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
+const hitList = [];
+const hitRoles = new Map();
+const hits = [];
+
+function rebuildHitList() {
+  hitList.length = 0;
+  hitRoles.clear();
+  for (const [role, a] of avatars) {
+    hitList.push(a.hit);
+    hitRoles.set(a.hit, role);
+  }
+}
+
 function pickAgent(e) {
+  if (!hitList.length) return null;
   const r = el.getBoundingClientRect();
   ndc.x = ((e.clientX - r.left) / r.width) * 2 - 1;
   ndc.y = -((e.clientY - r.top) / r.height) * 2 + 1;
   ray.setFromCamera(ndc, camera);
-  let best = null, bestDist = Infinity;
-  for (const [role, a] of avatars) {
-    const hits = ray.intersectObject(a.hit, true);
-    if (hits.length && hits[0].distance < bestDist) { bestDist = hits[0].distance; best = role; }
-  }
-  return best;
+  hits.length = 0;
+  ray.intersectObjects(hitList, false, hits);
+  return hits.length ? hitRoles.get(hits[0].object) : null;
 }
 
 const detail = document.getElementById("detail");

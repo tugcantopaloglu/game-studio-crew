@@ -1,6 +1,6 @@
 # 18: Desktop Shell, Install and Crash Reporting
 
-> **Status:** v0.2, 2026-07-25. Built and measured on Windows 11: the shell window runs, the installer compiles and was installed and uninstalled on this machine, `studiod doctor` reports against the real toolchain and separates *installed* from *the studio can drive it*, and the panic hook writes a redacted report. **Not exercised here:** the spawn path of the shell against a free port (7878 was held by another daemon throughout), and any platform other than Windows.
+> **Status:** v0.3, 2026-07-25. Built, run and measured on Windows 11: the shell starts its own daemon and serves the floor **1.60 s** after launch, kills the daemon on window close, attaches to a daemon that is already running, and the installer was compiled, installed and uninstalled on this machine. `studiod doctor` reports against the real toolchain and separates *installed* from *the studio can drive it*; the panic hook writes a redacted report. **Not exercised here:** any platform other than Windows.
 > **Consumes** the studio server ([12](12-visual-workspace.md)) and the process group from `studio-core` ([01](01-orchestrator-core.md)). Owns `desktop/`, `installer/`, `crates/studio-server/src/health.rs`, `crates/studiod/src/doctor.rs` and `crates/studiod/src/crash.rs`.
 
 ## What the shell is
@@ -96,6 +96,11 @@ Windows 11 Pro 26200, rustc 1.97.1, MSVC.
 | installed footprint | **23.26 MB** (24,394,759 bytes, uninstaller included) |
 | `studiod doctor`, serial probes | 17.8 s |
 | `studiod doctor`, parallel probes | 4.2 s |
+| shell launch to the floor answering | **1.60 s** |
+
+That 1.60 s is from process start to `127.0.0.1:7878` accepting a connection, with the requirements check running beside it as a second child rather than in front of it — both children were visible under the shell's PID during the run. The window is up and showing the splash for most of it.
+
+One operational note the run turned up: the daemon inherits the shell's environment, so launching the app from inside a Claude Code session makes `guard_nested_session` refuse to start and the window shows that refusal verbatim. That is the guard working, not the shell failing; started normally from the Start Menu there is no such variable.
 
 The daemon is thirty times the size of the shell because it carries SQLite, tree-sitter grammars and tokio, and because the root workspace's release profile is untuned — deliberately not changed here, since every crate in the repo shares it.
 
@@ -104,4 +109,4 @@ The daemon is thirty times the size of the shell because it carries SQLite, tree
 - **Windows only.** The shell compiles for other platforms in principle and `ProcessGroup` has a POSIX path, but nothing here has been run on macOS or Linux, and the installer is Inno Setup.
 - **No app icon.** Shortcuts use the default executable icon.
 - **No auto-update.** Installing a new version over an old one works; nothing checks for one.
-- **The spawn path was never run end to end on this machine.** Port 7878 was held for the whole session by a `studiod studio` the user had started themselves. The user approved stopping it for a minute, but the permission gate refused the kill and that is not something to work around, so the shell was verified live on its attach path and the spawn, port-wait and kill-tree path by unit tests only. `ProcessGroup` itself is proven by the supervisor ([01](01-orchestrator-core.md)).
+- **Only the happy path of the daemon-died page was seen.** The failure page was rendered from a daemon that refused to start; a daemon that dies *after* the floor has loaded is watched for on a 500 ms poll but was never made to happen deliberately.
