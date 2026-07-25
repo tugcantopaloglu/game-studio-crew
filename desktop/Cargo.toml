@@ -5,6 +5,7 @@ edition = "2021"
 rust-version = "1.82"
 license = "MIT"
 publish = false
+build = "build.rs"
 
 [workspace]
 
@@ -16,6 +17,9 @@ path = "src/main.rs"
 studio-core = { path = "../crates/studio-core" }
 tao = "0.35"
 wry = "0.55"
+
+[build-dependencies]
+embed-resource = "3"
 
 [profile.release]
 opt-level = "s"

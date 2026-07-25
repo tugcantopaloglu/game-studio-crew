@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Studio Floor</title>
+<link rel="icon" type="image/png" href="/favicon.png">
 <style>
   :root {
     --bg: #08090d;
@@ -54,9 +55,11 @@
   #grip:hover, #grip.dragging { background: rgba(74,217,145,.35); }
   header { padding: 14px 16px 12px; border-bottom: 1px solid var(--line);
     display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  #brand { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  #mark { height: 19px; width: auto; opacity: .92; flex: none; }
   h1 { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase;
     background: linear-gradient(90deg, #f0f4fb, #97a2b6); -webkit-background-clip: text;
-    background-clip: text; color: transparent; }
+    background-clip: text; color: transparent; white-space: nowrap; }
   #conn { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
     color: var(--dim); padding: 3px 9px 3px 7px; border: 1px solid var(--line-2); border-radius: 999px;
     display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
@@ -370,7 +373,7 @@
 </div>
 <div id="side">
   <div id="grip" title="drag to resize"></div>
-  <header><h1>Studio Floor</h1><div id="conn">connecting</div></header>
+  <header><div id="brand"><img id="mark" src="/mark.png" alt=""><h1>Studio Floor</h1></div><div id="conn">connecting</div></header>
   <div id="stats">
     <div class="sec">telemetry</div>
     <div class="stat"><span>run</span><b id="s-run">-</b></div>

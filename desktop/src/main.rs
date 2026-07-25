@@ -15,6 +15,8 @@ use wry::WebViewBuilder;
 use daemon::{Daemon, Failure};
 
 const WATCH_INTERVAL: Duration = Duration::from_millis(500);
+#[cfg(windows)]
+const ICON_RESOURCE: u16 = 1;
 
 enum Signal {
     Ready,
@@ -25,12 +27,14 @@ type Slot = Arc<Mutex<Option<Daemon>>>;
 
 fn main() -> wry::Result<()> {
     let event_loop = EventLoopBuilder::<Signal>::with_user_event().build();
-    let window = WindowBuilder::new()
-        .with_title("Game Studio Crew")
-        .with_inner_size(LogicalSize::new(1440.0, 900.0))
-        .with_min_inner_size(LogicalSize::new(900.0, 600.0))
-        .build(&event_loop)
-        .expect("the studio window could not be created");
+    let window = wearing_the_studio_mark(
+        WindowBuilder::new()
+            .with_title("Game Studio Crew")
+            .with_inner_size(LogicalSize::new(1440.0, 900.0))
+            .with_min_inner_size(LogicalSize::new(900.0, 600.0)),
+    )
+    .build(&event_loop)
+    .expect("the studio window could not be created");
 
     let webview = WebViewBuilder::new()
         .with_html(page::starting())
@@ -79,6 +83,23 @@ fn main() -> wry::Result<()> {
             _ => {}
         }
     });
+}
+
+#[cfg(windows)]
+fn wearing_the_studio_mark(builder: WindowBuilder) -> WindowBuilder {
+    use tao::dpi::PhysicalSize;
+    use tao::platform::windows::{IconExtWindows, WindowBuilderExtWindows};
+    use tao::window::Icon;
+
+    let sized = |edge| Icon::from_resource(ICON_RESOURCE, Some(PhysicalSize::new(edge, edge))).ok();
+    builder
+        .with_window_icon(sized(16))
+        .with_taskbar_icon(sized(32))
+}
+
+#[cfg(not(windows))]
+fn wearing_the_studio_mark(builder: WindowBuilder) -> WindowBuilder {
+    builder
 }
 
 fn watch(slot: &Slot, proxy: EventLoopProxy<Signal>) {

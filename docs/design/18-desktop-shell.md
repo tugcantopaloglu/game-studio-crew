@@ -11,7 +11,7 @@ It lives in `desktop/`, a crate with its **own `[workspace]` table and its own l
 
 ### Why wry + tao and not Tauri
 
-Both were built here. A minimal Tauri v2 app compiles on this machine and produces an **8.28 MB** binary from **419** locked crates on the default release profile. The wry + tao shell produces a **576 KB** binary from **282** locked crates with LTO, one codegen unit, `panic = "abort"` and symbols stripped. Tauri's value is its command bridge, its bundler and its updater; the floor talks to the daemon over HTTP and a WebSocket and needs none of them, so all three would be paid for and unused. The shell is 60 lines of window code around a WebView, which is exactly the amount of framework the job justifies.
+Both were built here. A minimal Tauri v2 app compiles on this machine and produces an **8.28 MB** binary from **419** locked crates on the default release profile. The wry + tao shell produces a **722 KB** binary from **282** locked crates with LTO, one codegen unit, `panic = "abort"` and symbols stripped — 576 KB of code and 135 KB of icon resource, plus seven build-only crates in the lock that never reach the binary. Tauri's value is its command bridge, its bundler and its updater; the floor talks to the daemon over HTTP and a WebSocket and needs none of them, so all three would be paid for and unused. The shell is 60 lines of window code around a WebView, which is exactly the amount of framework the job justifies.
 
 ### Why the daemon stays a separate process
 
@@ -32,6 +32,17 @@ It could have been a library linked into the window. It is not, for four reasons
 6. Concurrently run the requirements check (below). It does not gate the floor: it only replaces the page if the answer is "nothing to code with", so a healthy machine never waits on it.
 
 If the daemon exits before it serves, or dies later while the window is open, the shell replaces the page with the last lines of `daemon.log` and says what to do next. All daemon text is HTML-escaped on the way into that page.
+
+### The mark
+
+`images/logo.png` is the only drawn file; every icon in the product is derived from it by `python images/build-assets.py`, which is checked in so the crop box, the ink colour and the sizes are recoverable rather than folklore. The mark ships white on a dark rounded tile because the drawing is solid black on transparency and would vanish against both the floor and a dark taskbar.
+
+Four consumers, three of which must work before the daemon is up:
+
+- **The executable.** `desktop/app.rc` names `assets/icon.ico` as resource ordinal 1 and carries the version block Task Manager and the installer read; `build.rs` compiles it with `embed-resource`. The ico holds nine sizes, 16 through 256, as 32-bit BMP frames except the 256 which is PNG. Explorer, the Start Menu shortcut and the uninstall entry all pick it up from the exe with nothing further declared. At runtime the window asks Windows for ordinal 1 twice — 16 px for the title bar, 32 px for the taskbar — and shrugs off a failure, so a build on a machine with no `rc.exe` still runs, just without an icon. That is also why `build.rs` uses `manifest_optional`: a missing resource compiler is not a reason to fail a build, a broken `.rc` is.
+- **The splash and failure pages.** Both are `with_html` strings shown *before* there is a daemon to fetch anything from, so the mark is inlined as base64 from `desktop/assets/mark.b64`. It is a two-channel grey+alpha PNG rather than RGBA: constant luminance compresses to a third of the size, and 8.8 KB of data URL is cheap enough to repeat on both pages.
+- **The floor.** The daemon serves `/mark.png` beside the "Studio Floor" title and `/favicon.png` for the tab, both `include_bytes!` in `web.rs` alongside the JS modules, so a browser on a second screen gets them from the same origin with no filesystem lookup.
+- **The installer.** Inno reads the same ico for `SetupIconFile` and takes the wizard page and badge bitmaps from `installer/assets/`, at 1x and 2x so a hidpi display gets a sharp one.
 
 ## The requirements check
 
@@ -132,6 +143,5 @@ The daemon is thirty times the size of the shell because it carries SQLite, tree
 ## What is not built
 
 - **Windows only.** The shell compiles for other platforms in principle and `ProcessGroup` has a POSIX path, but nothing here has been run on macOS or Linux, and the installer is Inno Setup.
-- **No app icon.** Shortcuts use the default executable icon.
 - **No auto-update.** Installing a new version over an old one works; nothing checks for one.
 - **Only the happy path of the daemon-died page was seen.** The failure page was rendered from a daemon that refused to start; a daemon that dies *after* the floor has loaded is watched for on a 500 ms poll but was never made to happen deliberately.

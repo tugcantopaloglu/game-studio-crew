@@ -1,5 +1,7 @@
 use crate::daemon::Failure;
 
+const MARK: &str = include_str!("../assets/mark.b64");
+
 const STYLE: &str = r#"
 :root {
   --bg: #08090d; --panel: #0d1015; --line: rgba(148,163,184,.17);
@@ -19,6 +21,7 @@ pre { background: var(--panel); border: 1px solid var(--line); border-radius: 8p
   padding: 14px 16px; margin: 0 0 18px; max-height: 46vh; overflow: auto;
   font: 11.5px/1.5 var(--mono); color: var(--dim); white-space: pre-wrap; }
 .hint { color: var(--faint); font-size: 12px; }
+.mark { display: block; height: 46px; width: auto; margin: 0 0 22px; opacity: .9; }
 .dots::after { content: ""; animation: dots 1.4s steps(4, end) infinite; }
 @keyframes dots { 0% { content: ""; } 25% { content: "."; } 50% { content: ".."; } 75% { content: "..."; } }
 "#;
@@ -26,7 +29,9 @@ pre { background: var(--panel); border: 1px solid var(--line); border-radius: 8p
 fn page(title: &str, body: String) -> String {
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
-         <title>{title}</title><style>{STYLE}</style></head><body><main>{body}</main></body></html>"
+         <title>{title}</title><style>{STYLE}</style></head><body><main>\
+         <img class=\"mark\" src=\"data:image/png;base64,{MARK}\" alt=\"\">\
+         {body}</main></body></html>"
     )
 }
 
@@ -98,5 +103,18 @@ mod tests {
     #[test]
     fn the_splash_says_what_is_happening_before_the_floor_loads() {
         assert!(starting().contains("Starting the studio"));
+    }
+
+    #[test]
+    fn both_shell_pages_carry_the_studio_mark() {
+        let broken = failure(&Failure {
+            headline: "stopped".into(),
+            detail: String::new(),
+            what_to_do: String::new(),
+        });
+        for html in [starting(), broken] {
+            assert!(html.contains("data:image/png;base64,iVBOR"), "the mark is missing");
+        }
+        assert!(!MARK.contains(char::is_whitespace), "a wrapped blob breaks the data url");
     }
 }

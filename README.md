@@ -1,3 +1,5 @@
+<img src="images/logo-tile.png" alt="Game Studio Crew" width="104">
+
 # Game Studio Crew
 
 A ground-up rebuild of `claude-code-game-studios` as a **Rust daemon** that drives `claude` CLI subprocesses as stateless workers, owns all context and budget itself, and streams a realtime event feed to a browser-based visual studio floor.

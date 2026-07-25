@@ -232,7 +232,16 @@ pub fn run_bounded(
 
     let started = Instant::now();
     let mut group = studio_core::ProcessGroup::new()?;
-    let mut cmd = studio_core::command(program);
+    let found = studio_core::resolve(program).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "{program} is not on PATH as anything this OS can execute; check it is \
+                 installed and that its directory is on PATH"
+            ),
+        )
+    })?;
+    let mut cmd = studio_core::command(found);
     cmd.args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1294,6 +1303,41 @@ mod tests {
         assert_eq!(code, Some(0));
         assert_eq!(stdout, "42");
         assert_eq!(stderr, "noise");
+    }
+
+    #[test]
+    fn a_cli_that_npm_installed_as_a_shim_is_still_something_the_studio_can_run() {
+        if !cfg!(windows) {
+            return;
+        }
+        let dir = std::env::temp_dir().join("studio-shim-probe");
+        std::fs::create_dir_all(&dir).unwrap();
+        let shim = dir.join("studio-fake-cli.cmd");
+        std::fs::write(&shim, "@echo off\r\necho catalogue-ok %1\r\n").unwrap();
+
+        let (code, stdout, _, _) = run_bounded(
+            &shim.to_string_lossy(),
+            &["gpt-5.6-sol&echo pwned".to_string()],
+            "",
+            Duration::from_secs(20),
+        )
+        .expect(
+            "npm installs codex, gemini and copilot as a .cmd shim and a bare name never resolves \
+             to one, so every check of them failed while the panel said they were installed",
+        );
+        assert_eq!(code, Some(0));
+        assert!(stdout.contains("catalogue-ok"), "the shim's output was lost: {stdout:?}");
+        assert!(
+            stdout.contains("gpt-5.6-sol&echo pwned"),
+            "the model name did not reach the shim whole: {stdout:?}"
+        );
+        assert_eq!(
+            stdout.lines().count(),
+            1,
+            "a second command ran, so the name was parsed as shell rather than passed as one \
+             argument; names come from a config file and from the CLI's own catalogue, so they \
+             are not ours to trust: {stdout:?}"
+        );
     }
 
     #[test]

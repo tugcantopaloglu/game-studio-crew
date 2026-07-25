@@ -18,6 +18,11 @@ pub const MODULES: [(&str, &str); 10] = [
     ("perf.js", include_str!("../web/perf.js")),
 ];
 
+pub const IMAGES: [(&str, &[u8]); 2] = [
+    ("mark.png", include_bytes!("../web/mark.png")),
+    ("favicon.png", include_bytes!("../web/favicon.png")),
+];
+
 pub fn lookup(name: &str) -> Option<&'static str> {
     MODULES.iter().find(|(n, _)| *n == name).map(|(_, body)| *body)
 }
@@ -29,10 +34,23 @@ fn js(body: &'static str) -> impl IntoResponse {
     )
 }
 
+fn png(body: &'static [u8]) -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        body,
+    )
+}
+
 pub fn routes() -> Router<AppState> {
     let mut router = Router::new();
     for (name, body) in MODULES {
         router = router.route(&format!("/{name}"), get(move || async move { js(body) }));
+    }
+    for (name, body) in IMAGES {
+        router = router.route(&format!("/{name}"), get(move || async move { png(body) }));
     }
     router
 }
@@ -84,6 +102,21 @@ mod tests {
     fn no_served_module_is_empty() {
         for (name, body) in MODULES {
             assert!(!body.trim().is_empty(), "{name} is served as an empty file");
+        }
+    }
+
+    #[test]
+    fn every_image_the_floor_asks_for_is_served_as_a_png() {
+        let floor = include_str!("../web/floor.html");
+        for (name, body) in IMAGES {
+            assert!(
+                body.starts_with(b"\x89PNG\r\n\x1a\n"),
+                "{name} is served as image/png but is not one"
+            );
+            assert!(
+                floor.contains(&format!("/{name}")),
+                "{name} is served but the floor never asks for it"
+            );
         }
     }
 }
