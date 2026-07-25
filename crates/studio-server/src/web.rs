@@ -5,13 +5,14 @@ use axum::Router;
 
 use crate::AppState;
 
-pub const MODULES: [(&str, &str); 9] = [
+pub const MODULES: [(&str, &str); 10] = [
     ("bus.js", include_str!("../web/bus.js")),
     ("panels.js", include_str!("../web/panels.js")),
     ("settings.js", include_str!("../web/settings.js")),
     ("games.js", include_str!("../web/games.js")),
     ("gitpanel.js", include_str!("../web/gitpanel.js")),
     ("runpanel.js", include_str!("../web/runpanel.js")),
+    ("assets.js", include_str!("../web/assets.js")),
     ("chatter.js", include_str!("../web/chatter.js")),
     ("avatar.js", include_str!("../web/avatar.js")),
     ("perf.js", include_str!("../web/perf.js")),
@@ -57,9 +58,25 @@ mod tests {
     #[test]
     fn every_panel_the_host_mounts_is_served() {
         let panels = include_str!("../web/panels.js");
-        for name in ["settings.js", "games.js", "gitpanel.js", "runpanel.js"] {
+        for name in ["settings.js", "games.js", "gitpanel.js", "runpanel.js", "assets.js"] {
             assert!(panels.contains(name), "the host does not mount {name}");
             assert!(lookup(name).is_some(), "{name} is mounted but never served");
+        }
+    }
+
+    #[test]
+    fn every_panel_the_host_lists_has_somewhere_on_the_floor_to_render_into() {
+        let panels = include_str!("../web/panels.js");
+        let floor = include_str!("../web/floor.html");
+        for id in ["run", "games", "git", "assets", "settings"] {
+            assert!(
+                panels.contains(&format!("id: \"{id}\"")),
+                "the host does not list the {id} panel"
+            );
+            assert!(
+                floor.contains(&format!("id=\"panel-{id}\"")),
+                "the {id} panel has no host div, so the tab would open onto nothing"
+            );
         }
     }
 

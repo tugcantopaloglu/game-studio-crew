@@ -2,6 +2,7 @@ import { settings } from "/bus.js";
 import { mount as mountRun } from "/runpanel.js";
 import { mount as mountGames } from "/games.js";
 import { mount as mountGit } from "/gitpanel.js";
+import { mount as mountAssets } from "/assets.js";
 import { mount as mountSettings } from "/settings.js";
 
 const PANELS = [
@@ -9,6 +10,7 @@ const PANELS = [
   { id: "run", label: "run", mount: mountRun },
   { id: "games", label: "games", mount: mountGames },
   { id: "git", label: "git", mount: mountGit },
+  { id: "assets", label: "assets", mount: mountAssets },
   { id: "settings", label: "settings", mount: mountSettings },
 ];
 
