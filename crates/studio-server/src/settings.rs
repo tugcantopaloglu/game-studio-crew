@@ -10,13 +10,16 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::AppState;
-use studio_core::{Provider, RoleNeeds};
+use studio_core::{probe_answered, BriefDelivery, Provider, RoleNeeds, PROBE_QUESTION};
+use studio_settings::models::{self, Candidate, ProbeLog, ProbeRecord, Verdict};
 use studio_settings::Settings;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/settings", get(read_settings).post(write_settings))
         .route("/providers", get(providers))
+        .route("/models", get(model_catalogue))
+        .route("/models/probe", axum::routing::post(probe_models))
         .route("/limits", get(limits))
         .route("/music", get(music_list))
         .route("/music/track", get(music_track))
@@ -126,6 +129,327 @@ fn provider_row(p: Provider) -> Value {
 async fn providers() -> Response {
     let rows: Vec<Value> = Provider::ALL.into_iter().map(provider_row).collect();
     axum::Json(rows).into_response()
+}
+
+const PROBE_TIMEOUT: Duration = Duration::from_secs(180);
+
+fn probe_log_path(state: &AppState) -> PathBuf {
+    ProbeLog::path_in(&state.studio_dir)
+}
+
+fn read_codex_config() -> Option<String> {
+    std::fs::read_to_string(models::codex_config_path()?).ok()
+}
+
+fn candidate_row(provider: Provider, c: &Candidate, log: &ProbeLog) -> Value {
+    let seen = log.find(provider.id(), &c.id);
+    serde_json::json!({
+        "id": c.id,
+        "label": c.label,
+        "sources": c.sources.iter().map(|s| serde_json::json!({
+            "id": s.as_str(),
+            "explain": s.explain(),
+        })).collect::<Vec<_>>(),
+        "verdict": seen.map(|r| r.verdict).unwrap_or(Verdict::Unknown).as_str(),
+        "detail": seen.and_then(|r| r.detail.clone()),
+        "checked_at": seen.map(|r| r.checked_at.clone()),
+        "seconds": seen.map(|r| r.seconds),
+        "cost_usd": seen.and_then(|r| r.cost_usd),
+        "tokens": seen.and_then(|r| r.tokens),
+    })
+}
+
+fn catalogue_for(state: &AppState, provider: Provider) -> Value {
+    let settings = Settings::load(&settings_path(state)).unwrap_or_default();
+    let log = ProbeLog::load(&probe_log_path(state));
+    let codex_config = if provider == Provider::Codex {
+        read_codex_config()
+    } else {
+        None
+    };
+    let found = models::candidates(provider.id(), &settings, &log, codex_config.as_deref());
+
+    serde_json::json!({
+        "provider": provider.id(),
+        "title": provider.title(),
+        "installed": on_path(provider.program()).is_some(),
+        "probeable": provider.probe_args("").is_some(),
+        "provenance": models::provenance(provider.id()),
+        "candidates": found.iter().map(|c| candidate_row(provider, c, &log)).collect::<Vec<_>>(),
+    })
+}
+
+async fn model_catalogue(State(state): State<AppState>) -> Response {
+    let rows: Vec<Value> = Provider::ALL
+        .into_iter()
+        .map(|p| catalogue_for(&state, p))
+        .collect();
+
+    axum::Json(serde_json::json!({
+        "providers": rows,
+        "probe": {
+            "question": PROBE_QUESTION,
+            "automatic": false,
+            "cost": "one real request per model, billed to that CLI's own subscription, and up to three minutes each while it answers",
+            "route": "POST /models/probe with {\"provider\": \"codex\", \"models\": [\"gpt-5.6-luna\"]}",
+        },
+    }))
+    .into_response()
+}
+
+pub fn run_bounded(
+    program: &str,
+    args: &[String],
+    stdin_text: &str,
+    limit: Duration,
+) -> std::io::Result<(Option<i32>, String, String, f64)> {
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+
+    let started = Instant::now();
+    let mut group = studio_core::ProcessGroup::new()?;
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    group.prepare(&mut cmd);
+
+    let mut child = cmd.spawn()?;
+    group.adopt(&child)?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let payload = stdin_text.as_bytes().to_vec();
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&payload);
+        });
+    }
+
+    let drain = |mut pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut raw = Vec::new();
+            if let Some(p) = pipe.as_mut() {
+                let _ = p.read_to_end(&mut raw);
+            }
+            String::from_utf8_lossy(&raw).into_owned()
+        })
+    };
+    let out_pump = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let err_pump = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+
+    let mut code = None;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            code = status.code();
+            break;
+        }
+        if started.elapsed() >= limit {
+            let _ = group.kill_tree();
+            let _ = child.wait();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+
+    let stdout = out_pump.join().unwrap_or_default();
+    let stderr = err_pump.join().unwrap_or_default();
+    Ok((code, stdout, stderr, started.elapsed().as_secs_f64()))
+}
+
+fn is_noise(line: &str) -> bool {
+    let noisy = [
+        "Cannot POST /mcp",
+        "rmcp::transport",
+        "<!DOCTYPE",
+        "<html",
+        "</html>",
+        "worker quit with fatal",
+        "<head>",
+        "</head>",
+        "<body>",
+        "</body>",
+        "<meta",
+        "<title>",
+        "<pre>",
+    ];
+    line.trim().is_empty() || noisy.iter().any(|n| line.contains(n))
+}
+
+pub fn explain_refusal(stdout: &str, stderr: &str) -> Option<String> {
+    const STRONGEST_FIRST: [&str; 7] = [
+        "not supported",
+        "invalid_request_error",
+        "issue with the selected model",
+        "unauthorized",
+        "unknown model",
+        "does not exist",
+        "not found",
+    ];
+
+    let lines: Vec<&str> = stdout
+        .lines()
+        .chain(stderr.lines())
+        .filter(|l| !is_noise(l))
+        .collect();
+
+    let pick = STRONGEST_FIRST
+        .iter()
+        .find_map(|marker| {
+            lines
+                .iter()
+                .rev()
+                .find(|l| l.to_lowercase().contains(marker))
+        })
+        .or_else(|| lines.last())?;
+
+    Some(pick.trim().chars().take(400).collect())
+}
+
+fn probe_one(provider: Provider, model: &str, now: String) -> ProbeRecord {
+    let unknown = |detail: &str| ProbeRecord {
+        provider: provider.id().into(),
+        model: model.to_string(),
+        verdict: Verdict::Unknown,
+        detail: Some(detail.to_string()),
+        checked_at: now.clone(),
+        seconds: 0.0,
+        cost_usd: None,
+        tokens: None,
+    };
+
+    let Some(args) = provider.probe_args(model) else {
+        return unknown(
+            "the studio has never read this CLI's flags, so it will not guess a command line to probe with",
+        );
+    };
+    if on_path(provider.program()).is_none() {
+        return unknown(&format!("{} is not on PATH, so nothing was run", provider.program()));
+    }
+
+    let stdin_text = match provider.brief_delivery() {
+        BriefDelivery::Stdin => PROBE_QUESTION,
+        _ => "",
+    };
+
+    let run = run_bounded(provider.program(), &args, stdin_text, PROBE_TIMEOUT);
+    let (_, stdout, stderr, seconds) = match run {
+        Ok(v) => v,
+        Err(e) => {
+            let mut record = unknown(&format!("could not start {}: {e}", provider.program()));
+            record.seconds = 0.0;
+            return record;
+        }
+    };
+
+    let terminal: Option<Value> = stdout
+        .lines()
+        .rev()
+        .find_map(|l| serde_json::from_str::<Value>(l.trim()).ok());
+    let cost_usd = terminal
+        .as_ref()
+        .and_then(|v| v.get("total_cost_usd"))
+        .and_then(Value::as_f64);
+    let tokens = tokens_used(&stdout).or_else(|| tokens_used(&stderr));
+
+    let answered = probe_answered(&stdout);
+    let spoken = terminal
+        .as_ref()
+        .and_then(|v| v.get("result"))
+        .and_then(Value::as_str)
+        .map(|s| s.trim().chars().take(400).collect::<String>());
+
+    ProbeRecord {
+        provider: provider.id().into(),
+        model: model.to_string(),
+        verdict: if answered { Verdict::Working } else { Verdict::Refused },
+        detail: if answered {
+            None
+        } else {
+            spoken.or_else(|| explain_refusal(&stdout, &stderr))
+        },
+        checked_at: now,
+        seconds,
+        cost_usd,
+        tokens,
+    }
+}
+
+pub fn tokens_used(stdout: &str) -> Option<u64> {
+    let lines: Vec<&str> = stdout.lines().map(str::trim).collect();
+    let at = lines.iter().rposition(|l| *l == "tokens used")?;
+    let raw = lines.get(at + 1)?.replace(',', "");
+    raw.parse().ok()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProbeRequest {
+    pub provider: String,
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+async fn probe_models(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<ProbeRequest>,
+) -> Response {
+    let Some(provider) = Provider::from_id(&req.provider) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("{} is not a provider the studio knows", req.provider),
+        )
+            .into_response();
+    };
+    let wanted: Vec<String> = req
+        .models
+        .iter()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .collect();
+    if wanted.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "name at least one model to check; probing every model on every panel open would spend your subscription without being asked".to_string(),
+        )
+            .into_response();
+    }
+    if wanted.len() > 12 {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{} models at once is more than this will do in one request; each one is a real billed call",
+                wanted.len()
+            ),
+        )
+            .into_response();
+    }
+
+    let path = probe_log_path(&state);
+    let done = tokio::task::spawn_blocking(move || {
+        let mut log = ProbeLog::load(&path);
+        let mut fresh = Vec::new();
+        for model in wanted {
+            let record = probe_one(provider, &model, crate::now_rfc3339());
+            log.record(record.clone());
+            fresh.push(record);
+        }
+        let saved = log.save(&path);
+        (fresh, saved.err().map(|e| e.to_string()))
+    })
+    .await;
+
+    match done {
+        Ok((fresh, cache_error)) => axum::Json(serde_json::json!({
+            "provider": provider.id(),
+            "checked": fresh,
+            "cache_error": cache_error,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the probe did not finish: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 static OBSERVED_WINDOWS: Mutex<Vec<(String, Value, String)>> = Mutex::new(Vec::new());
@@ -681,5 +1005,251 @@ mod tests {
     #[test]
     fn the_daemon_is_on_the_path_it_claims_to_spawn_workers_from() {
         assert_eq!(on_path("a-program-nobody-installed-xyz"), None);
+    }
+
+    const CODEX_WORKED_STDOUT: &str = "42\n";
+
+    const CODEX_WORKED_STDERR: &str = concat!(
+        "OpenAI Codex v0.145.0\n",
+        "--------\n",
+        "model: gpt-5.6-luna\n",
+        "--------\n",
+        "user\n",
+        "what is 17 plus 25? reply with just the number\n",
+        "codex\n",
+        "42\n",
+        "tokens used\n",
+        "1,668\n"
+    );
+
+    const CODEX_REFUSED_STDOUT: &str = "";
+
+    const CODEX_REFUSED_STDERR: &str = concat!(
+        "2026-07-25T12:06:57.721399Z ERROR rmcp::transport::worker: worker quit with fatal: ",
+        "Transport channel closed, when UnexpectedServerResponse(\"HTTP 404: <!DOCTYPE html>\")\n",
+        "<pre>Cannot POST /mcp</pre>\n",
+        "OpenAI Codex v0.145.0\n",
+        "user\n",
+        "what is 17 plus 25? reply with just the number\n",
+        "warning: Model metadata for `gpt-5.2-codex` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.\n",
+        "ERROR: {\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-5.2-codex' model is not supported when using Codex with a ChatGPT account.\"}}\n"
+    );
+
+    #[test]
+    fn a_refusal_is_explained_in_the_cli_s_own_words_not_by_a_dead_mcp_server() {
+        let said = explain_refusal(CODEX_REFUSED_STDOUT, CODEX_REFUSED_STDERR).unwrap();
+        assert!(
+            said.contains("not supported when using Codex with a ChatGPT account"),
+            "got {said}"
+        );
+        assert!(
+            !said.contains("Cannot POST /mcp"),
+            "this machine's dead MCP server must never be reported as the model's problem: {said}"
+        );
+        assert!(
+            !said.contains("Model metadata"),
+            "a fallback-metadata warning is not the reason the model was refused: {said}"
+        );
+    }
+
+    #[test]
+    fn a_run_that_says_nothing_useful_still_reports_something_rather_than_nothing() {
+        assert!(explain_refusal("", "<pre>Cannot POST /mcp</pre>\n").is_none());
+        assert_eq!(
+            explain_refusal("something odd happened", "").as_deref(),
+            Some("something odd happened")
+        );
+    }
+
+    #[test]
+    fn a_working_codex_run_is_recognised_by_the_answer_it_puts_on_stdout() {
+        assert!(probe_answered(CODEX_WORKED_STDOUT));
+        assert!(
+            !probe_answered(CODEX_REFUSED_STDOUT),
+            "a refused model prints nothing at all on stdout"
+        );
+    }
+
+    #[test]
+    fn the_token_count_is_found_even_though_codex_prints_it_on_stderr() {
+        assert_eq!(
+            tokens_used(CODEX_WORKED_STDOUT),
+            None,
+            "stdout carries only the answer, so reading stdout alone loses the count"
+        );
+        assert_eq!(tokens_used(CODEX_WORKED_STDERR), Some(1668));
+        assert_eq!(tokens_used(CODEX_REFUSED_STDERR), None);
+    }
+
+    #[test]
+    fn a_cli_that_merges_its_streams_still_cannot_pass_on_the_echo_alone() {
+        let merged = format!("{CODEX_WORKED_STDERR}");
+        assert!(probe_answered(&merged), "the real answer is in there too");
+        let echo_only = concat!("user\n", "what is 17 plus 25? reply with just the number\n", "codex\n");
+        assert!(!probe_answered(echo_only));
+    }
+
+    #[tokio::test]
+    async fn every_provider_reports_a_catalogue_and_says_where_the_names_came_from() {
+        let (status, body) = body_of(state_in("models"), "/models").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let rows = body["providers"].as_array().unwrap();
+        assert_eq!(rows.len(), Provider::ALL.len());
+        assert_eq!(body["probe"]["automatic"], false);
+
+        for row in rows {
+            assert!(
+                row["provenance"].as_str().unwrap().len() > 20,
+                "{} does not say where its list came from",
+                row["provider"]
+            );
+        }
+
+        let codex = rows.iter().find(|r| r["provider"] == "codex").unwrap();
+        let ids: Vec<&str> = codex["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"gpt-5.6-sol"));
+        assert!(ids.contains(&"gpt-5.4-mini"));
+    }
+
+    #[tokio::test]
+    async fn a_model_nobody_has_checked_reads_as_unknown_rather_than_as_working() {
+        let (_, body) = body_of(state_in("models-unknown"), "/models").await;
+        for row in body["providers"].as_array().unwrap() {
+            for c in row["candidates"].as_array().unwrap() {
+                assert_eq!(
+                    c["verdict"], "unknown",
+                    "{} was never probed and must not claim to work",
+                    c["id"]
+                );
+                assert!(c["checked_at"].is_null());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cached_verdict_is_reported_with_the_moment_it_was_measured() {
+        let state = state_in("models-cached");
+        let mut log = ProbeLog::default();
+        log.record(ProbeRecord {
+            provider: "codex".into(),
+            model: "gpt-5.6-luna".into(),
+            verdict: Verdict::Working,
+            detail: None,
+            checked_at: "2026-07-25T12:08:00Z".into(),
+            seconds: 11.4,
+            cost_usd: None,
+            tokens: Some(1668),
+        });
+        log.save(&ProbeLog::path_in(&state.studio_dir)).unwrap();
+
+        let (_, body) = body_of(state, "/models").await;
+        let codex = body["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["provider"] == "codex")
+            .unwrap();
+        let luna = codex["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "gpt-5.6-luna")
+            .unwrap();
+        assert_eq!(luna["verdict"], "working");
+        assert_eq!(luna["checked_at"], "2026-07-25T12:08:00Z");
+        assert_eq!(luna["tokens"], 1668);
+    }
+
+    async fn post_probe(state: AppState, body: &str) -> StatusCode {
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/models/probe")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        crate::router(state).oneshot(req).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn probing_nothing_is_refused_so_a_panel_open_can_never_spend_the_subscription() {
+        assert_eq!(
+            post_probe(state_in("probe-empty"), r#"{"provider":"codex","models":[]}"#).await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn probing_an_unknown_provider_is_refused_by_name() {
+        assert_eq!(
+            post_probe(state_in("probe-nobody"), r#"{"provider":"wishful","models":["x"]}"#).await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn a_probe_of_a_cli_the_studio_never_read_records_unknown_not_refused() {
+        let record = probe_one(Provider::Kimi, "kimi-k2", "now".into());
+        assert_eq!(
+            record.verdict,
+            Verdict::Unknown,
+            "never checked and refused are different facts and must not be conflated"
+        );
+        assert!(record.detail.unwrap().contains("never read"));
+    }
+
+    #[tokio::test]
+    async fn a_probe_of_a_cli_that_is_not_installed_says_so_instead_of_blaming_the_model() {
+        let record = probe_one(Provider::Kimi, "anything", "now".into());
+        assert_eq!(record.verdict, Verdict::Unknown);
+    }
+
+    #[test]
+    fn a_bounded_run_kills_a_command_that_never_finishes() {
+        let started = Instant::now();
+        let out = run_bounded(
+            "node",
+            &["-e".to_string(), "setTimeout(()=>{}, 60000)".to_string()],
+            "",
+            Duration::from_millis(400),
+        );
+        assert!(out.is_ok());
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "a probe must not hold the route open forever"
+        );
+    }
+
+    #[test]
+    fn a_bounded_run_returns_what_the_command_printed_on_both_pipes() {
+        let script = "process.stdout.write('42'); process.stderr.write('noise');";
+        let (code, stdout, stderr, _) = run_bounded(
+            "node",
+            &["-e".to_string(), script.to_string()],
+            "",
+            Duration::from_secs(20),
+        )
+        .unwrap();
+        assert_eq!(code, Some(0));
+        assert_eq!(stdout, "42");
+        assert_eq!(stderr, "noise");
+    }
+
+    #[test]
+    fn a_bounded_run_hands_the_question_to_a_command_that_reads_stdin() {
+        let script = "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>process.stdout.write(s));";
+        let (_, stdout, _, _) = run_bounded(
+            "node",
+            &["-e".to_string(), script.to_string()],
+            PROBE_QUESTION,
+            Duration::from_secs(20),
+        )
+        .unwrap();
+        assert_eq!(stdout, PROBE_QUESTION);
     }
 }

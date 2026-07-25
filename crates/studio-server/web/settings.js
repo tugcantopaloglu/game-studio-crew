@@ -1,7 +1,6 @@
 import { settings, api, el, toast } from "/bus.js";
 
-const CLAUDE_MODELS = ["fable", "opus", "haiku"];
-const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+const EFFORTS =["low", "medium", "high", "xhigh", "max"];
 const TIERS = [
   [1, "tier 1 · direction"],
   [2, "tier 2 · department leads"],
@@ -71,6 +70,70 @@ function mark(ok) {
   return el("span", { class: ok ? "ok" : "bad", text: ok ? "yes" : "no" });
 }
 
+let catalogue = { providers: [], probe: {} };
+let listCounter = 0;
+
+function catalogueFor(providerId) {
+  return catalogue.providers.find((p) => p.provider === providerId) || null;
+}
+
+function candidatesFor(providerId) {
+  const row = catalogueFor(providerId);
+  return row ? row.candidates : [];
+}
+
+function shortWhen(iso) {
+  if (!iso) return "never";
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return iso;
+  return at.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function verdictOf(providerId, id) {
+  if (!id) return el("span", { class: "hint", text: "following the shipped default" });
+  const found = candidatesFor(providerId).find((m) => m.id === id);
+  if (!found || found.verdict === "unknown") {
+    return el("span", { class: "warn", text: "never checked on this machine" });
+  }
+  if (found.verdict === "working") {
+    return el("span", { class: "ok", text: `answered when checked ${shortWhen(found.checked_at)}` });
+  }
+  return el("span", {
+    class: "bad",
+    text: `refused ${shortWhen(found.checked_at)}: ${found.detail || "the CLI gave no reason"}`,
+  });
+}
+
+function modelKey(providerId, scope) {
+  return providerId === "claude" ? `models.${scope}` : `models.${providerId}.${scope}`;
+}
+
+function modelField(label, providerId, scope) {
+  const key = modelKey(providerId, scope);
+  const listId = `models-${providerId}-${(listCounter += 1)}`;
+  const suggestions = el("datalist", { id: listId });
+  for (const c of candidatesFor(providerId)) {
+    suggestions.append(el("option", { value: c.id, label: c.label || "" }));
+  }
+
+  const badge = el("div", { class: "hint" }, verdictOf(providerId, read(key, "")));
+  const box = el("div", { class: "field" });
+  const input = el("input", {
+    type: "text",
+    list: listId,
+    value: read(key, ""),
+    placeholder: providerId === "claude" ? "shipped default" : `${providerId} model name`,
+    onchange: (e) => {
+      const named = e.target.value.trim();
+      store(key, named);
+      badge.replaceChildren(verdictOf(providerId, named));
+    },
+  });
+
+  box.append(el("label", { text: label }), input, suggestions, badge);
+  return box;
+}
+
 function whenIsThat(unixSeconds) {
   if (!unixSeconds) return "not given";
   const at = new Date(unixSeconds * 1000);
@@ -103,21 +166,19 @@ function crewSection(root, roles, providers) {
     )
   );
 
+  const studioProvider = read("provider", "claude");
   for (const [tier, label] of TIERS) {
-    const row = el("div", { class: "row" });
-    row.append(
-      choose(
-        [["", "inherit shipped default"]].concat(CLAUDE_MODELS.map((m) => [m, m])),
-        read(`models.tier${tier}`, ""),
-        (v) => store(`models.tier${tier}`, v)
-      ),
-      choose(
-        [["", "shipped effort"]].concat(EFFORTS.map((e) => [e, e])),
-        read(`effort.tier${tier}`, ""),
-        (v) => store(`effort.tier${tier}`, v)
+    root.append(modelField(label, studioProvider, `tier${tier}`));
+    root.append(
+      field(
+        `${label} effort`,
+        choose(
+          [["", "shipped effort"]].concat(EFFORTS.map((e) => [e, e])),
+          read(`effort.tier${tier}`, ""),
+          (v) => store(`effort.tier${tier}`, v)
+        )
       )
     );
-    root.append(field(label, row));
   }
 
   const seats = el("div", { class: "card" });
@@ -130,35 +191,20 @@ function crewSection(root, roles, providers) {
   );
 
   for (const r of roles) {
-    const row = el("div", { class: "row" });
-    const modelKey = `models.role.${r.id}`;
     const providerKey = `provider.role.${r.id}`;
-    const chosenProvider = read(providerKey, "") || read("provider", "claude");
+    const chosenProvider = read(providerKey, "") || studioProvider;
 
-    const models =
-      chosenProvider === "claude"
-        ? choose(
-            [["", `tier ${r.tier}`]].concat(CLAUDE_MODELS.map((m) => [m, m])),
-            read(modelKey, ""),
-            (v) => store(modelKey, v)
-          )
-        : el("input", {
-            type: "text",
-            value: read(`models.${chosenProvider}.role.${r.id}`, ""),
-            placeholder: `${chosenProvider} model name`,
-            onchange: (e) =>
-              store(`models.${chosenProvider}.role.${r.id}`, e.target.value.trim()),
-          });
-
-    row.append(
-      models,
-      choose(
-        [["", "tier"]].concat(EFFORTS.map((e) => [e, e])),
-        read(`effort.role.${r.id}`, ""),
-        (v) => store(`effort.role.${r.id}`, v)
+    seats.append(modelField(`${r.title} · tier ${r.tier}`, chosenProvider, `role.${r.id}`));
+    seats.append(
+      field(
+        `${r.title} effort`,
+        choose(
+          [["", "tier"]].concat(EFFORTS.map((e) => [e, e])),
+          read(`effort.role.${r.id}`, ""),
+          (v) => store(`effort.role.${r.id}`, v)
+        )
       )
     );
-    seats.append(field(`${r.title} · tier ${r.tier}`, row));
 
     if (installed.length > 1) {
       seats.append(
@@ -222,6 +268,85 @@ function providerSection(root, providers) {
       card.append(el("div", { class: "ok", text: "serves every seat in the studio" }));
     }
 
+    root.append(card);
+  }
+}
+
+function modelsSection(root) {
+  root.append(
+    ...section(
+      "models",
+      "no CLI here has a subcommand that lists its models, so the studio checks them by asking one"
+    )
+  );
+
+  for (const row of catalogue.providers) {
+    const card = el("div", { class: "card" });
+    card.append(el("b", { text: row.title }));
+    card.append(el("div", { class: "k", text: row.provenance }));
+
+    if (!row.installed) {
+      card.append(el("div", { class: "warn", text: `${row.program} is not on PATH, so nothing here can be checked` }));
+      root.append(card);
+      continue;
+    }
+    if (!row.probeable) {
+      card.append(el("div", { class: "warn", text: "the studio has never read this CLI's flags, so it will not invent a command to check it with" }));
+      root.append(card);
+      continue;
+    }
+    if (!row.candidates.length) {
+      card.append(el("div", { class: "hint", text: "no name to offer yet; type one in a picker above and check it here" }));
+      root.append(card);
+      continue;
+    }
+
+    const chosen = new Set();
+    const status = el("div", { class: "hint", text: "" });
+    const button = el("button", { text: "check the ticked models" });
+
+    for (const c of row.candidates) {
+      const tick = el("input", { type: "checkbox" });
+      tick.onchange = () => {
+        if (tick.checked) chosen.add(c.id);
+        else chosen.delete(c.id);
+        button.textContent = chosen.size
+          ? `check ${chosen.size} model${chosen.size === 1 ? "" : "s"}`
+          : "check the ticked models";
+      };
+
+      const line = el("div", { class: "field" });
+      line.append(
+        el("label", { class: "check" }, tick, el("span", { text: c.id })),
+        el("div", { class: "k", text: c.label || c.sources.map((s) => s.explain).join("; ") }),
+        el("div", { class: "hint" }, verdictOf(row.provider, c.id))
+      );
+      card.append(line);
+    }
+
+    card.append(el("div", { class: "warn", text: catalogue.probe.cost }));
+    button.onclick = () => {
+      if (!chosen.size) {
+        status.textContent = "tick a model first; nothing is checked without being asked";
+        return;
+      }
+      const asked = [...chosen];
+      button.disabled = true;
+      status.textContent = `asking ${row.title} about ${asked.length} model${asked.length === 1 ? "" : "s"}; this can take a few minutes`;
+      api("/models/probe", { body: { provider: row.provider, models: asked } })
+        .then((done) => {
+          const worked = done.checked.filter((r) => r.verdict === "working").length;
+          status.textContent = `${worked} of ${done.checked.length} answered`;
+          return reloadCatalogue();
+        })
+        .then(redraw)
+        .catch((err) => {
+          button.disabled = false;
+          status.textContent = `the check did not finish: ${err.message}`;
+        });
+    };
+    card.append(button);
+    card.append(status);
     root.append(card);
   }
 }
@@ -502,16 +627,30 @@ function aboutSection(root) {
 let host = null;
 let timers = [];
 
+export function models(providerId) {
+  return providerId ? candidatesFor(providerId) : catalogue.providers;
+}
+
+export function reloadCatalogue() {
+  return api("/models")
+    .then((data) => {
+      catalogue = data;
+      return catalogue;
+    })
+    .catch(() => catalogue);
+}
+
 function redraw() {
   if (!host) return;
   for (const t of timers) clearInterval(t);
   timers = [];
   host.replaceChildren(el("div", { class: "hint", text: "reading the studio settings" }));
 
-  Promise.all([api("/roles"), api("/providers")])
+  Promise.all([api("/roles"), api("/providers"), reloadCatalogue()])
     .then(([roles, providers]) => {
       host.replaceChildren();
       crewSection(host, roles, providers);
+      modelsSection(host);
       providerSection(host, providers);
       limitsSection(host);
       musicSection(host);

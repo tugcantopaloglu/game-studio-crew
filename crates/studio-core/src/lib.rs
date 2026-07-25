@@ -5,7 +5,8 @@ mod stream;
 
 pub use proc::ProcessGroup;
 pub use spec::{
-    BriefDelivery, Capabilities, Effort, Provider, RoleNeeds, SessionMode, WorkerSpec,
+    probe_answered, BriefDelivery, Capabilities, Effort, Provider, RoleNeeds, SessionMode,
+    WorkerSpec, PROBE_ANSWER, PROBE_QUESTION,
 };
 pub use stream::{map_cli_event, CliEvent, McpServer, StreamState};
 

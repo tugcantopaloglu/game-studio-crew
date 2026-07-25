@@ -224,15 +224,55 @@ pub struct Seat {
     pub model_alias: String,
     pub effort: Effort,
     pub overridden: bool,
+    pub unusable_model: Option<String>,
+}
+
+pub const CLAUDE_MODELS_THE_STUDIO_CAN_EXPRESS: [&str; 3] = ["fable", "opus", "haiku"];
+
+impl Seat {
+    pub fn describe(&self) -> String {
+        let named = if self.model_alias.is_empty() {
+            self.model.cli_alias()
+        } else {
+            &self.model_alias
+        };
+        format!("{} {}", self.provider.id(), named)
+    }
+}
+
+fn first_line(state: &studio_core::StreamStateSnapshot) -> String {
+    let spoken = state
+        .result_message
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .unwrap_or(&state.text);
+    spoken
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("no output")
+        .to_string()
 }
 
 fn model_named(alias: &str) -> Option<Model> {
+    let alias = alias.trim();
     match alias {
-        "fable" => Some(Model::Fable),
-        "opus" => Some(Model::Opus),
-        "haiku" => Some(Model::Haiku),
-        _ => None,
+        "fable" => return Some(Model::Fable),
+        "opus" => return Some(Model::Opus),
+        "haiku" => return Some(Model::Haiku),
+        _ => {}
     }
+    for (family, model) in [
+        ("claude-fable", Model::Fable),
+        ("claude-opus", Model::Opus),
+        ("claude-haiku", Model::Haiku),
+    ] {
+        if alias.starts_with(family) {
+            return Some(model);
+        }
+    }
+    None
 }
 
 fn effort_named(name: &str) -> Option<Effort> {
@@ -261,12 +301,16 @@ pub fn seat_from(settings: &studio_settings::Settings, role: &Role) -> Seat {
     let provider = Provider::from_id(&choice.provider).unwrap_or(Provider::Claude);
     let chosen_model = choice.model.filter(|m| !m.is_empty());
 
-    let (model, model_alias) = match provider {
-        Provider::Claude => match chosen_model.as_deref().and_then(model_named) {
-            Some(m) => (m, m.cli_alias().to_string()),
-            None => (role.model, role.model.cli_alias().to_string()),
+    let shipped = (role.model, role.model.cli_alias().to_string(), None);
+    let (model, model_alias, unusable_model) = match provider {
+        Provider::Claude => match chosen_model.as_deref() {
+            None => shipped,
+            Some(named) => match model_named(named) {
+                Some(m) => (m, m.cli_alias().to_string(), None),
+                None => (role.model, role.model.cli_alias().to_string(), Some(named.to_string())),
+            },
         },
-        _ => (role.model, chosen_model.clone().unwrap_or_default()),
+        _ => (role.model, chosen_model.clone().unwrap_or_default(), None),
     };
 
     let effort = choice
@@ -283,6 +327,7 @@ pub fn seat_from(settings: &studio_settings::Settings, role: &Role) -> Seat {
         model,
         model_alias,
         effort,
+        unusable_model,
     }
 }
 
@@ -310,6 +355,15 @@ fn run_worker_inner(
 ) -> Result<Metered> {
     let actor = format!("{}#{}", role.id, index);
     let seat = seat_for(role, &em.state.studio_dir);
+    if let Some(named) = &seat.unusable_model {
+        anyhow::bail!(
+            "{} is set to the claude model {named}, which the studio cannot express. \
+             The prefix cache is keyed on the model, so the studio only spawns models it can name in its own hash, and it knows {}. \
+             Change that seat in settings, or widen studio_context::Model before using {named}.",
+            role.id,
+            CLAUDE_MODELS_THE_STUDIO_CAN_EXPRESS.join(", ")
+        );
+    }
     let needs = RoleNeeds {
         structured_output: json_schema.is_some(),
         restricted_tools: true,
@@ -387,6 +441,10 @@ fn run_worker_inner(
         BriefDelivery::Stdin => brief,
         BriefDelivery::PromptArgument => {
             args.push("-p".into());
+            args.push(brief.to_string());
+            ""
+        }
+        BriefDelivery::Positional => {
             args.push(brief.to_string());
             ""
         }
@@ -499,19 +557,16 @@ fn run_worker_inner(
 
     if report.outcome != Outcome::Completed {
         anyhow::bail!(
-            "{} did not complete ({:?}): {}",
+            "{} on {} did not complete ({:?}): {}",
             role.id,
+            seat.describe(),
             report.outcome,
-            report.state.text.lines().next().unwrap_or("no output")
+            first_line(&report.state)
         );
     }
 
     if report.state.is_error {
-        anyhow::bail!(
-            "{} failed: {}",
-            role.id,
-            report.state.text.lines().next().unwrap_or("unknown error")
-        );
+        anyhow::bail!("{} on {} failed: {}", role.id, seat.describe(), first_line(&report.state));
     }
 
     if commit {
@@ -591,11 +646,38 @@ mod seat_tests {
     }
 
     #[test]
-    fn a_model_name_the_cli_does_not_take_leaves_the_seat_on_its_shipped_model() {
-        let s = settings(&[("models.role.artist", "gpt-5.4")]);
+    fn a_claude_model_the_studio_cannot_express_is_flagged_rather_than_quietly_replaced() {
+        let s = settings(&[("models.role.artist", "sonnet")]);
         let seat = seat_from(&s, role_named("artist"));
-        assert_eq!(seat.model, Model::Opus);
-        assert_eq!(seat.model_alias, "opus");
+        assert_eq!(
+            seat.unusable_model.as_deref(),
+            Some("sonnet"),
+            "falling back to opus would run a model the user did not ask for and never say so"
+        );
+    }
+
+    #[test]
+    fn a_full_model_name_resolves_to_the_family_the_cache_key_is_built_from() {
+        for (typed, expected) in [
+            ("claude-opus-5", Model::Opus),
+            ("claude-fable-5", Model::Fable),
+            ("claude-haiku-4-5-20251001", Model::Haiku),
+        ] {
+            let s = settings(&[("models.role.artist", typed)]);
+            let seat = seat_from(&s, role_named("artist"));
+            assert_eq!(seat.model, expected, "{typed} should resolve");
+            assert_eq!(seat.unusable_model, None);
+        }
+    }
+
+    #[test]
+    fn a_seat_names_the_provider_and_the_model_so_a_refusal_is_not_a_generic_failure() {
+        let s = settings(&[
+            ("provider.role.artist", "codex"),
+            ("models.codex.role.artist", "gpt-5.2-codex"),
+        ]);
+        assert_eq!(seat_from(&s, role_named("artist")).describe(), "codex gpt-5.2-codex");
+        assert_eq!(seat_from(&Settings::new(), role_named("artist")).describe(), "claude opus");
     }
 
     #[test]

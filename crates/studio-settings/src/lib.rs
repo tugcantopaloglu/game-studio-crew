@@ -1,3 +1,7 @@
+pub mod models;
+
+pub use models::{Candidate, ProbeLog, ProbeRecord, Source, Verdict};
+
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 

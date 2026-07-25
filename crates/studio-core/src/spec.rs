@@ -39,6 +39,7 @@ impl Effort {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
     Claude,
+    Codex,
     Gemini,
     Copilot,
     Kimi,
@@ -48,6 +49,14 @@ pub enum Provider {
 pub enum BriefDelivery {
     Stdin,
     PromptArgument,
+    Positional,
+}
+
+pub const PROBE_QUESTION: &str = "what is 17 plus 25? reply with just the number";
+pub const PROBE_ANSWER: &str = "42";
+
+pub fn probe_answered(output: &str) -> bool {
+    output.replace(PROBE_QUESTION, " ").contains(PROBE_ANSWER)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,12 +76,18 @@ pub struct RoleNeeds {
 }
 
 impl Provider {
-    pub const ALL: [Provider; 4] =
-        [Provider::Claude, Provider::Gemini, Provider::Copilot, Provider::Kimi];
+    pub const ALL: [Provider; 5] = [
+        Provider::Claude,
+        Provider::Codex,
+        Provider::Gemini,
+        Provider::Copilot,
+        Provider::Kimi,
+    ];
 
     pub fn id(&self) -> &'static str {
         match self {
             Provider::Claude => "claude",
+            Provider::Codex => "codex",
             Provider::Gemini => "gemini",
             Provider::Copilot => "copilot",
             Provider::Kimi => "kimi",
@@ -82,6 +97,7 @@ impl Provider {
     pub fn title(&self) -> &'static str {
         match self {
             Provider::Claude => "Claude Code",
+            Provider::Codex => "Codex CLI",
             Provider::Gemini => "Gemini CLI",
             Provider::Copilot => "GitHub Copilot CLI",
             Provider::Kimi => "Kimi CLI",
@@ -103,8 +119,56 @@ impl Provider {
     pub fn brief_delivery(&self) -> BriefDelivery {
         match self {
             Provider::Claude => BriefDelivery::Stdin,
+            Provider::Codex => BriefDelivery::Positional,
             _ => BriefDelivery::PromptArgument,
         }
+    }
+
+    pub fn probe_args(&self, model: &str) -> Option<Vec<String>> {
+        let mut a: Vec<String> = match self {
+            Provider::Claude => vec![
+                "-p".into(),
+                "--setting-sources".into(),
+                String::new(),
+                "--tools".into(),
+                String::new(),
+                "--output-format".into(),
+                "json".into(),
+            ],
+            Provider::Codex => vec![
+                "exec".into(),
+                "--sandbox".into(),
+                "read-only".into(),
+                "--skip-git-repo-check".into(),
+            ],
+            Provider::Gemini => vec!["--output-format".into(), "json".into()],
+            Provider::Copilot => vec![
+                "--output-format".into(),
+                "json".into(),
+                "--no-custom-instructions".into(),
+                "--no-color".into(),
+            ],
+            Provider::Kimi => return None,
+        };
+
+        if !model.trim().is_empty() {
+            a.push(match self {
+                Provider::Codex => "-m".into(),
+                _ => "--model".into(),
+            });
+            a.push(model.trim().to_string());
+        }
+
+        match self.brief_delivery() {
+            BriefDelivery::Stdin => {}
+            BriefDelivery::PromptArgument => {
+                a.push("-p".into());
+                a.push(PROBE_QUESTION.into());
+            }
+            BriefDelivery::Positional => a.push(PROBE_QUESTION.into()),
+        }
+
+        Some(a)
     }
 
     pub fn capabilities(&self) -> Capabilities {
@@ -114,6 +178,14 @@ impl Provider {
                 usage_reporting: true,
                 tool_restriction: true,
                 system_prompt_file: true,
+                structured_output: true,
+                session_control: true,
+            },
+            Provider::Codex => Capabilities {
+                streaming_events: true,
+                usage_reporting: false,
+                tool_restriction: false,
+                system_prompt_file: false,
                 structured_output: true,
                 session_control: true,
             },
@@ -157,6 +229,7 @@ impl Provider {
         if !caps.system_prompt_file {
             out.push(match self {
                 Provider::Gemini => "gemini has no flag that replaces the system prompt, so the frozen charter cannot be delivered and every spawn would pay full price for context the studio already froze; pick claude",
+                Provider::Codex => "codex takes its instructions from AGENTS.md and has no flag that replaces the system prompt, so the frozen charter cannot be delivered and every spawn would pay full price for context the studio already froze; pick claude",
                 _ => "this CLI has no flag that replaces the system prompt, so the frozen charter and its cache cannot be delivered; pick claude",
             });
         }
@@ -208,10 +281,34 @@ impl WorkerSpec {
     pub fn to_args_for(&self, provider: Provider, model: &str) -> Vec<String> {
         match provider {
             Provider::Claude => self.claude_args(model),
+            Provider::Codex => self.codex_args(model),
             Provider::Gemini => self.gemini_args(model),
             Provider::Copilot => self.copilot_args(model),
             Provider::Kimi => Vec::new(),
         }
+    }
+
+    fn codex_args(&self, model: &str) -> Vec<String> {
+        let mut a: Vec<String> = vec!["exec".into(), "--json".into(), "--skip-git-repo-check".into()];
+
+        a.push("--sandbox".into());
+        a.push(if self.allowed_tools.is_empty() {
+            "read-only".into()
+        } else {
+            "workspace-write".into()
+        });
+
+        if !model.is_empty() {
+            a.push("-m".into());
+            a.push(model.into());
+        }
+
+        if let Some(schema) = &self.json_schema {
+            a.push("--output-schema".into());
+            a.push(schema.clone());
+        }
+
+        a
     }
 
     fn gemini_args(&self, model: &str) -> Vec<String> {
@@ -478,9 +575,79 @@ mod tests {
     #[test]
     fn only_claude_takes_its_brief_on_stdin() {
         assert_eq!(Provider::Claude.brief_delivery(), BriefDelivery::Stdin);
+        assert_eq!(Provider::Codex.brief_delivery(), BriefDelivery::Positional);
         for p in [Provider::Gemini, Provider::Copilot, Provider::Kimi] {
             assert_eq!(p.brief_delivery(), BriefDelivery::PromptArgument);
         }
+    }
+
+    #[test]
+    fn a_cli_that_echoes_the_question_cannot_pass_a_probe_on_the_echo_alone() {
+        let echoed = format!("user\n{PROBE_QUESTION}\ncodex\n");
+        assert!(
+            !probe_answered(&echoed),
+            "codex prints the prompt back; matching the prompt would grade every model as working"
+        );
+        assert!(probe_answered(&format!("{echoed}42\ntokens used\n1,668\n")));
+    }
+
+    #[test]
+    fn the_probe_question_cannot_contain_its_own_answer() {
+        assert!(!PROBE_QUESTION.contains(PROBE_ANSWER));
+    }
+
+    #[test]
+    fn a_probe_reaches_each_cli_the_way_that_cli_takes_a_prompt() {
+        let claude = Provider::Claude.probe_args("haiku").unwrap();
+        assert!(claude.iter().any(|a| a == "-p"));
+        assert!(!claude.iter().any(|a| a == PROBE_QUESTION), "claude reads it on stdin");
+        assert_eq!(pair(&claude, "--model"), Some("haiku".into()));
+        assert_eq!(pair(&claude, "--output-format"), Some("json".into()));
+
+        let codex = Provider::Codex.probe_args("gpt-5.6-luna").unwrap();
+        assert_eq!(codex.first().map(String::as_str), Some("exec"));
+        assert_eq!(pair(&codex, "-m"), Some("gpt-5.6-luna".into()));
+        assert_eq!(pair(&codex, "--sandbox"), Some("read-only".into()));
+        assert_eq!(codex.last().map(String::as_str), Some(PROBE_QUESTION));
+    }
+
+    #[test]
+    fn a_probe_of_a_cli_the_studio_never_read_is_not_offered_at_all() {
+        assert!(Provider::Kimi.probe_args("kimi-k2").is_none());
+    }
+
+    #[test]
+    fn a_probe_with_no_model_named_asks_the_cli_about_its_own_default() {
+        let codex = Provider::Codex.probe_args("").unwrap();
+        assert!(!codex.iter().any(|a| a == "-m"));
+        assert_eq!(codex.last().map(String::as_str), Some(PROBE_QUESTION));
+    }
+
+    #[test]
+    fn codex_gets_the_schema_flag_it_really_has_and_a_sandbox_matching_the_role() {
+        let mut s = spec();
+        s.json_schema = Some("C:/run/plan.schema.json".into());
+        let args = s.to_args_for(Provider::Codex, "gpt-5.6-sol");
+        assert_eq!(pair(&args, "--output-schema"), Some("C:/run/plan.schema.json".into()));
+        assert_eq!(pair(&args, "--sandbox"), Some("workspace-write".into()));
+        assert_eq!(pair(&args, "-m"), Some("gpt-5.6-sol".into()));
+
+        s.allowed_tools = Vec::new();
+        assert_eq!(
+            pair(&s.to_args_for(Provider::Codex, ""), "--sandbox"),
+            Some("read-only".into())
+        );
+    }
+
+    #[test]
+    fn codex_can_hold_a_schema_but_still_cannot_hold_the_frozen_charter() {
+        let caps = Provider::Codex.capabilities();
+        assert!(caps.structured_output, "codex exec --output-schema is a real flag");
+        assert!(!caps.system_prompt_file);
+        assert!(Provider::Codex
+            .blockers(RoleNeeds::default())
+            .iter()
+            .any(|r| r.contains("AGENTS.md")));
     }
 
     #[test]

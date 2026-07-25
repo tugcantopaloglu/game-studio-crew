@@ -1029,6 +1029,7 @@ dependencies = [
  "serde_json",
  "studio-context",
  "thiserror 2.0.19",
+ "toml",
 ]
 
 [[package]]

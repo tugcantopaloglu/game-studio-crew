@@ -78,19 +78,22 @@ Two honest consequences of moving a seat:
 
 ### Capability table
 
-| | claude | gemini | copilot | kimi |
-|---|---|---|---|---|
-| program | `claude` | `gemini` | `copilot` | `kimi` |
-| **flags read on a real install** | **yes** | **yes** | **yes** | **no** |
-| frozen charter as a system prompt | `--system-prompt-file` | **no flag exists** | **no flag exists** | unknown |
-| streamed events | `--output-format stream-json --include-partial-messages --verbose` | `--output-format stream-json` | `--output-format json --stream on` | unknown |
-| token usage the studio can read | terminal `result.usage` | **not exposed** | **not exposed** | unknown |
-| tool restriction | `--tools` | **no** — `--allowed-tools` only skips confirmation | `--available-tools` | unknown |
-| structured output | `--json-schema` | **no** | **no** | unknown |
-| session control | `--session-id`, `--resume`, `--fork-session` | `--resume` by index only | `--session-id`, `--resume` | unknown |
-| effort | `--effort low…max` | none | `--effort none…max` | unknown |
+| | claude | codex | gemini | copilot | kimi |
+|---|---|---|---|---|---|
+| program | `claude` | `codex` | `gemini` | `copilot` | `kimi` |
+| **flags read on a real install** | **yes** | **yes** | **yes** | **yes** | **no** |
+| frozen charter as a system prompt | `--system-prompt-file` | **no flag exists** (AGENTS.md only) | **no flag exists** | **no flag exists** | unknown |
+| streamed events | `--output-format stream-json --include-partial-messages --verbose` | `exec --json` | `--output-format stream-json` | `--output-format json --stream on` | unknown |
+| token usage the studio can read | terminal `result.usage` | **prose on stderr only** | **not exposed** | **not exposed** | unknown |
+| tool restriction | `--tools` | **no** — `--sandbox` limits writes, not tools | **no** — `--allowed-tools` only skips confirmation | `--available-tools` | unknown |
+| structured output | `--json-schema` | `exec --output-schema` | **no** | **no** | unknown |
+| session control | `--session-id`, `--resume`, `--fork-session` | `resume`, `fork` | `--resume` by index only | `--session-id`, `--resume` | unknown |
+| effort | `--effort low…max` | `-c model_reasoning_effort=` | none | `--effort none…max` | unknown |
+| brief arrives as | stdin | positional argument | `-p` | `-p` | unknown |
 
-**Verified against a real installed CLI:** claude, gemini and copilot. Each row above for those three was read out of `--help` on the machine this was built on — not from documentation and not from memory. What was **not** done for gemini and copilot is an actual spawn: no worker has been driven through either CLI, so the shape of their event streams is unconfirmed and the studio's stream parser is claude-shaped.
+**Verified against a real installed CLI:** claude, codex, gemini and copilot. Every row above for those four was read out of `--help` on the machine this was built on — not from documentation and not from memory. codex went further: its `exec` command line was actually run, both to a working model and to a refused one, and the stream split in the table above is measured.
+
+What was **not** done for gemini and copilot is an actual spawn: no worker or probe has been driven through either, so the shape of their event streams is unconfirmed and the studio's stream parser is claude-shaped.
 
 **Not verified at all:** kimi. It is not on PATH here, so its flags could not be read. The studio therefore refuses to spawn it rather than guessing a command line, and says so in those words. `a_cli_the_studio_never_probed_is_refused_before_any_flag_is_guessed` holds `to_args_for(Kimi, ..)` empty so there is nothing to accidentally execute.
 
@@ -147,6 +150,73 @@ Two front-end rules the browser forces:
 
 - The `<audio>` element lives on `document.body`, not inside the panel div, so switching tabs does not tear playback down mid-track.
 - Nothing plays without a user gesture. Music is disabled by default, and playback is only ever started from a click — ticking the enable box, pressing play, pressing next, or the `ended` handler of a track the user already started. On page load a previously enabled setting restores the selection but does not start audio; a blocked `play()` says so instead of failing silently.
+
+## Which models are actually usable
+
+Every model list in the studio used to be hardcoded, which rots quietly and then lies: this machine's `~/.codex/config.toml` pins `model = "gpt-5.2-codex"`, a name the account refuses, and nothing noticed.
+
+**No CLI here has a subcommand that lists models.** Checked, not assumed: `claude --help` offers agents, auth, auto-mode, doctor, gateway, install, mcp, plugin, project, setup-token, ultrareview and update; `codex --help` offers exec, review, login, logout, mcp, plugin, mcp-server, app-server, remote-control, app, completion, update, doctor, sandbox, debug, apply, resume, archive, delete, unarchive, fork, cloud, exec-server and features. Neither has a catalogue call. There is no cheap way to ask, so the studio asks the expensive way, and only when told to.
+
+### `GET /models`
+
+Per provider: the offered candidates, where each name came from, and what happened when it was last checked.
+
+| Source | Means |
+|---|---|
+| `cli_help` | named in that CLI's own `--help` output |
+| `picker` | listed by the CLI's own interactive model picker |
+| `user_config` | found in this machine's config file for that CLI |
+| `settings` | you typed it into the studio settings |
+| `probe` | the studio has probed this name before |
+
+A name can carry several sources at once, and they are all reported. `gpt-5.6-sol` is both a `picker` entry and a `user_config` one on this machine, because codex's own `[tui.model_availability_nux]` table records having shown it.
+
+Verdicts are exactly three: **`working`** (it answered), **`refused`** (it did not, with the CLI's own words), **`unknown`** (nobody has checked). A model that has never been probed reads as `unknown` and is still offered — never hidden for being unprobed, and never dressed up as working. `a_model_nobody_has_checked_reads_as_unknown_rather_than_as_working` walks every candidate of every provider on a fresh studio and asserts it.
+
+### Probing is asked for, never automatic
+
+`POST /models/probe` with `{"provider": "codex", "models": ["gpt-5.6-luna"]}`. It is a real billed request per model and takes real seconds, so:
+
+- **Nothing probes on panel open.** `GET /models` never spawns anything. Posting an empty list is a `400` whose message says why, and more than twelve at once is refused too.
+- The panel states the cost — one real request per model on that CLI's own subscription, up to three minutes each — before the button does anything.
+- Results cache to `.studio/model-probes.json` with a timestamp, and **a cached refusal is kept exactly as carefully as a cached success**. Reading a corrupt or absent cache yields "nothing checked yet", never a guess.
+- Each probe is bounded and its process tree killed on timeout, so a wedged CLI cannot hold the route open.
+
+### How a probe decides, and the two traps in it
+
+The question is `what is 17 plus 25? reply with just the number` and the answer is `42`.
+
+**Trap one: codex echoes the prompt.** Probing with "reply with pong" and grepping for `pong` matches your own request, and every model grades as working. The question is therefore arithmetic whose answer cannot appear in it — `the_probe_question_cannot_contain_its_own_answer` asserts that literally — and `probe_answered` strips occurrences of the question before looking for the answer, so an echo alone can never pass.
+
+**Trap two: stderr is full of unrelated noise.** This machine's codex config registers a dead MCP server at `127.0.0.1:8080`, so every codex run logs `HTTP 404 Cannot POST /mcp`. A probe therefore never judges by exit code or by stderr being empty — only by whether the answer is present.
+
+Measured on this machine, streams separated:
+
+| | stdout | stderr |
+|---|---|---|
+| `codex exec -m gpt-5.6-luna` (works) | `42` and nothing else, 3 bytes | banner, echoed prompt, `tokens used` / `1,668` |
+| `codex exec -m gpt-5.2-codex` (refused) | **empty, 0 bytes** | MCP 404 noise, then `The 'gpt-5.2-codex' model is not supported when using Codex with a ChatGPT account.` |
+
+Two things fall out of that table and both were bugs first. The token count is on **stderr**, so reading stdout alone silently loses it. And the refusal reason is on stderr too, mixed in with the MCP noise, so `explain_refusal` filters known noise and then ranks the remaining lines strongest-signal-first — because taking the first plausible line picked `warning: Model metadata for gpt-5.2-codex not found`, a fallback-metadata warning, over the actual reason. `a_refusal_is_explained_in_the_cli_s_own_words_not_by_a_dead_mcp_server` pins all three failures at once.
+
+`claude` refuses an unknown model for **$0**: `--output-format json` returns `is_error: true`, `api_error_status: 404`, `total_cost_usd: 0` and a `result` of "There's an issue with the selected model (X). It may not exist or you may not have access to it." Checking a claude name that does not exist is free; checking one that does costs one small call, and the probe records the `total_cost_usd` the CLI itself reported rather than an estimate.
+
+### Where the list is surfaced
+
+Every place a model is chosen: the three tier pickers and all thirteen per-role pickers. Each is a **free-text input with the discovered list as `<datalist>` suggestions**, not a closed dropdown, so a model released next month can be typed in today; underneath each one sits the verdict for the name currently in it. The catalogue is also exported from `settings.js` as `models(providerId)` and reachable at `GET /models`, so no other panel needs a list of its own.
+
+### The `Model` enum is a real gap
+
+`studio_context::Model` has `Fable`, `Opus` and `Haiku`. The claude CLI's own `--help` also names **`sonnet`**, so the studio cannot express a model the CLI accepts. This is a genuine gap, not a cosmetic one, and widening the enum is not free:
+
+- The model is **part of the prefix cache key** ([02](02-context-engine.md)). That actually makes widening *safe* rather than dangerous — a new variant hashes to its own prefix and cannot collide with an existing one.
+- But each variant needs a correct `min_cacheable_tokens`. Opus is 4096 and Fable 2048, both documented rather than probed, and Sonnet's minimum is unknown here. Get it wrong and charters for that seat **silently never cache**: `cache_creation` stays 0 with no error.
+
+Until it is widened, a claude model name the studio cannot express is **refused at spawn, naming the model**, rather than quietly falling back to the registry and running something the user did not ask for. Full names resolve by family, so `claude-opus-5` is `Opus`; `sonnet` is refused with a message saying which names work and what would have to change. `a_claude_model_the_studio_cannot_express_is_flagged_rather_than_quietly_replaced` holds that line.
+
+### A refused model is never a generic failure
+
+When a spawn fails, the message names the provider and the model — `Seat::describe()` renders `codex gpt-5.2-codex` — and quotes the CLI's own terminal message rather than the first line of streamed prose. So a refusal reads as "artist on codex gpt-5.2-codex failed: The 'gpt-5.2-codex' model is not supported…", not "artist failed".
 
 ## Low spec
 
