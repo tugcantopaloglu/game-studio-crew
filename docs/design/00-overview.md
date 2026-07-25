@@ -21,7 +21,7 @@ Game Studio Crew is a re-architecture of `claude-code-game-studios`. The origina
 The rebuild is a **Rust daemon** that treats `claude` CLI subprocesses as **stateless workers**. The daemon owns all context, all budget, all state, and streams a realtime event feed to a browser-based visual studio floor. Workers are cheap, disposable, and told only what they need for one task.
 
 - **Tier 1** is the top of the tree: a single `studio_director` seat on **Fable 5**.
-- **Tier 2 and Tier 3** (department leads and specialists) run on **Opus 4.8**.
+- **Tier 2 and Tier 3** (department leads and specialists) run on **Opus 5**. The registry names the CLI alias `opus`, and a real spawn confirms that alias resolves to `claude-opus-5` (`modelUsage` reported `claude-opus-5`). This sentence used to say Opus 4.8, which is a different model with a different minimum cacheable prefix — 1024 tokens against Opus 5's 512 — so anyone sizing the charter padding from the old sentence would have padded below the floor and stopped every Tier-2/3 seat caching, silently. If the studio is ever pinned to an explicit model rather than the alias, this line and `Model::documented_min_cacheable_tokens` move together.
 
 Fable is the more expensive model, not the cheaper one ($10/$50 per MTok against Opus at $5/$25), which is exactly why it sits on the one lowest-volume seat. See [04](04-agent-graph.md).
 - **Unity, Unreal Engine 5 and Godot 4** are all first-class.
