@@ -4,6 +4,12 @@ A ground-up rebuild of `claude-code-game-studios` as a **Rust daemon** that driv
 
 > **Status:** M1 through M5 built and running against the real CLI and a real engine; M6, the code index, is under way. `studiod studio` serves an interactive 3D studio floor: you create a project, assign tasks, convene meetings and start workflows from the browser, and watch real `claude` workers do them. **Godot is the only probed engine**; the Unity and UE5 profiles are written but have never been executed ([07](docs/design/07-engine-layer.md)).
 
+## The desktop app
+
+There is a Windows desktop build. `powershell -ExecutionPolicy Bypass -File installer\build.ps1` compiles the daemon, the shell and a per-user installer in one command; the installer needs no admin rights, adds a Start Menu entry, touches neither `PATH` nor any service, and on uninstall asks before removing the studio's own data — your project folders live where you put them and are never touched. The window itself is a thin native frame around the same floor the daemon already serves on `127.0.0.1:7878`: it starts `studiod studio` for you, waits for the port rather than guessing, and takes the daemon and every worker down with it when you close it. If a daemon is already running it attaches to that one instead of starting a second, and leaves it running when the window closes. See [`18-desktop-shell.md`](docs/design/18-desktop-shell.md).
+
+What it requires is one coding CLI and nothing else. `studiod doctor` prints what it found — `claude`, `codex`, `gemini`, `copilot` and `kimi` are all recognised, and **any one of them is enough**; git, cargo and the engines the studio can drive are reported so you know what you have, but their absence is never an error. The installer runs the same check after copying files and shows you the report if there is nothing to code with, and the shell shows it in the window for the same reason. There are still no API keys anywhere in this: the CLI you already pay for is the whole authentication story.
+
 ## Projects
 
 Work is scoped to a project: a directory you name, at a path you choose, with its own git repo. Create one from the floor — name, absolute path, engine, and whether to `git init` — and every task, workflow and build you send afterwards runs with that directory as the worker's working directory and indexes against that tree.

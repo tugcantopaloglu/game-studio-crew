@@ -69,7 +69,10 @@ pub fn floor_url() -> String {
     format!("http://127.0.0.1:{PORT}/")
 }
 
-pub fn bring_up(slot: &Mutex<Option<Daemon>>) -> Result<(), Failure> {
+pub fn bring_up(
+    slot: &Mutex<Option<Daemon>>,
+    complain: impl Fn(Failure) + Send + 'static,
+) -> Result<(), Failure> {
     if floor_answers() {
         park(slot, attached()?);
         return Ok(());
@@ -77,7 +80,13 @@ pub fn bring_up(slot: &Mutex<Option<Daemon>>) -> Result<(), Failure> {
 
     let exe = locate_daemon()?;
     let home = studio_home()?;
-    check_requirements(&exe, &home)?;
+
+    let checked = (exe.clone(), home.clone());
+    std::thread::spawn(move || {
+        if let Err(missing) = check_requirements(&checked.0, &checked.1) {
+            complain(missing);
+        }
+    });
 
     let daemon = spawn(&exe, &home)?;
     let log = daemon.log.clone();

@@ -11,7 +11,7 @@ use crate::AppState;
 pub const CODING_CLIS: [&str; 5] = ["claude", "codex", "gemini", "copilot", "kimi"];
 pub const TOOLCHAIN: [&str; 3] = ["git", "cargo", "rustc"];
 const SAFE_TO_ASK_FOR_A_VERSION: [&str; 3] = ["godot", "web", "python"];
-const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -106,13 +106,14 @@ pub fn catalog() -> Vec<(&'static str, Kind)> {
 }
 
 pub fn probe() -> Requirements {
-    let mut tools: Vec<Tool> = catalog()
-        .into_iter()
-        .map(|(name, kind)| probe_command(name, name, kind))
-        .collect();
-    for profile in studio_engine::EngineProfile::builtin() {
-        tools.push(probe_engine(&profile));
+    let mut probing = Vec::new();
+    for (name, kind) in catalog() {
+        probing.push(std::thread::spawn(move || probe_command(name, name, kind)));
     }
+    for profile in studio_engine::EngineProfile::builtin() {
+        probing.push(std::thread::spawn(move || probe_engine(&profile)));
+    }
+    let tools = probing.into_iter().filter_map(|p| p.join().ok()).collect();
     Requirements::new(tools)
 }
 
@@ -284,6 +285,30 @@ mod tests {
         .unwrap();
         assert!(json.contains("\"ready\":true"));
         assert!(json.contains("\"kind\":\"coding_cli\""));
+    }
+
+    #[tokio::test]
+    async fn the_shell_reads_the_doctors_report_over_http() {
+        use tower::ServiceExt;
+
+        let dir = std::env::temp_dir().join("studio-health-route");
+        let _ = std::fs::create_dir_all(&dir);
+        let store = std::sync::Arc::new(studio_store::Store::open(dir.join("s.db")).unwrap());
+        let app = crate::router(crate::AppState::new(store));
+
+        let request = axum::http::Request::builder()
+            .uri("/health")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("\"ready\""), "{text}");
+        assert!(text.contains("\"claude\""), "{text}");
     }
 
     #[test]

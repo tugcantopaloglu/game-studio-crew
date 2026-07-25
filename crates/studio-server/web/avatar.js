@@ -12,7 +12,7 @@ const THIGH_LEAN = 0.4;
 const ARM_SWING = 0.6;
 const BOB = 0.026;
 const ROLL = 0.05;
-const SEAT_DROP = 0.33;
+const SEAT_DROP = 0.29;
 const TURN_RATE = 7.5;
 const RUN_SPEED = 1.5;
 

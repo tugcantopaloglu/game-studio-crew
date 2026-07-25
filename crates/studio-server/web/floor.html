@@ -719,7 +719,7 @@ const bubbleCtx = bubbleCanvas.getContext("2d");
 const bubbleTex = new THREE.CanvasTexture(bubbleCanvas);
 bubbleTex.colorSpace = THREE.SRGBColorSpace;
 const bubbleMat = new THREE.MeshBasicMaterial({
-  map: bubbleTex, transparent: true, depthWrite: false, depthTest: false, opacity: 0,
+  map: bubbleTex, transparent: true, depthWrite: false, depthTest: false, fog: false, opacity: 0,
 });
 const bubble = new THREE.Mesh(new THREE.PlaneGeometry(2.05, 2.05 * (BUBBLE_H / BUBBLE_W)), bubbleMat);
 bubble.renderOrder = 20;

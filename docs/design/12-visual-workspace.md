@@ -27,9 +27,27 @@ The floor is **generated from the role registry ([04](04-agent-graph.md)), not h
 
 An avatar encodes three orthogonal facts with three orthogonal visual channels, so nothing is ambiguous:
 
-- **Shape encodes tier** (1/2/3): headgear and silhouette in the voxel model; you can read seniority at a glance.
-- **Fill encodes department**: the six department colors ([04](04-agent-graph.md)).
+- **Shape encodes identity**: hair, outfit cut and the prop in hand are per-role, drawn from the reference sheet in `agent-images/`. The designer carries a flowchart pad, the QA engineer a ticked checklist, the audio designer a field recorder and headphones, the director a black suit and a gold-edged folio. Tier still reads through the silhouette, but the prop is what tells you *what this person does* at floor distance.
+- **Fill encodes department**: the six department colors ([04](04-agent-graph.md)) tint the room, the desk and the status ring; the avatar's own palette is its role palette.
 - **Only the status ring encodes runtime state**: idle / running / blocked / meeting / error. Runtime churn touches *only* the ring, so a worker starting and finishing never changes its shape or color, only the ring animates. This separation is what keeps the floor readable under load and is the last thing to degrade ([§performance](#performance-budget-and-degradation)).
+
+## Avatars are rigged, not rigid
+
+An avatar is not one mesh sliding between waypoints. It is a nine-joint rig — hips, torso, head, two arms, two thighs, two shins, plus the prop parented to the right hand — each joint an `InstancedMesh` of voxels sharing one geometry and one material.
+
+The walk cycle is **driven by distance travelled, not by time**, which is what makes the feet plant. During the stance half of the cycle the leg group is *translated* backwards at exactly the body's speed, so the contact foot is stationary in world space no matter how fast the avatar is moving; the swing half arcs the foot forward with a bent knee. Speed itself ramps: a waypoint is approached with a deceleration curve and left with an acceleration curve, and turning is rate-limited, so nobody snaps to a heading any more.
+
+On top of the cycle sit the small human tells — hip bob and shoulder roll on the step, breathing while idle, a slow weight shift, a head that turns toward the monitor at the desk, toward the table in a meeting and toward the direction of travel while walking, an occasional glance elsewhere, and an occasional lean back in the chair. Sitting is a real pose: thighs forward, shins down, hips dropped onto the seat.
+
+## Thinking out loud
+
+A worker's reasoning is streamed by the CLI as one delta per token. Putting that on the wire unbuffered would write a SQLite row and broadcast a websocket frame per token, so the daemon buffers it: text accumulates, is cut at the last sentence boundary, is capped at 200 characters and is emitted **at most once every 500ms per worker — two `agent_thought` events a second, plus one closing event when the worker finishes**. Reasoning blocks and answer text are parsed apart and tagged `thinking` / `speaking` / `done`, and a phase change never mixes one into the other's bubble.
+
+The client shows it only for the agent the camera is on: a billboarded bubble above the head plus a block in the detail card, faded out a few seconds after the worker goes quiet. `thoughts.enabled` turns the whole channel off client-side.
+
+## Chatter
+
+The floor has a voice track: procedural WebAudio babble with no words — a pitched glottal source through a sweeping formant filter, three to six syllables an utterance, panned by screen position and attenuated by distance from the camera. It sounds only for agents near the camera, the focused agent, and agents actually sitting in a meeting, capped at two concurrent voices. Audio is created on the first user gesture and stays silent until then, which is the browser autoplay policy rather than a bug. `chatter.enabled` and `chatter.volume` (default **0.12** — background texture, never intrusive) control it.
 
 ## Desk PC screens as RenderTextures
 
@@ -108,12 +126,14 @@ Choreography is driven entirely by `meeting_started`/`meeting_spoke`/`meeting_en
 | `plan_proposed` | the plan opens in plain language, each step editable, with interrupt and add-step controls |
 | `step_approval_needed` | the run holds at the tier boundary and the step card asks approve, improve, or redo |
 | `run_interrupted` | an interrupt bar shows what was sent into the run and which step it lands on |
-| `agent_thought` | the focused agent's thought bubble streams the line it is reasoning through |
+| `agent_thought` | the focused agent's bubble and detail card stream the line it is reasoning through, then fade |
 | `game_summarized` | the adopted game's card fills in with its mechanics glimpse |
 
 ## Art and assets
 
 Programmatic art for the floor/desks/rings (drawn from primitives so it scales and recolors deterministically), **Kenney CC0** furniture tilesets for props, and **Lucide** icons for tools/status glyphs. All CC0/permissive; nothing blocks a self-contained build.
+
+The crew's per-role looks were drawn from the reference sheet in `agent-images/` but are **generated, never loaded**: every avatar is a voxel list built at runtime from a palette-and-shape table, so the single-binary story holds and there is no runtime image fetch. Four sheet entries (animator, data analyst, security engineer, support specialist) have no role in the registry and are unused; `ui-ux_designer`, `senior_engineer`, `infrastructure_engineer`, `technical_artist` and `game_artist` map onto `ux_designer`, `systems_engineer`, `infra_engineer`, `tech_artist` and `artist`.
 
 ## Performance budget and degradation
 

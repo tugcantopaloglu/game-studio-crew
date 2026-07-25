@@ -27,6 +27,14 @@ fn render(found: &Requirements) -> String {
         found.app_version, found.os
     ));
 
+    let column = found
+        .tools
+        .iter()
+        .map(|t| t.label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(8);
+
     for kind in Kind::ALL {
         out.push('\n');
         out.push_str(kind.heading());
@@ -37,7 +45,12 @@ fn render(found: &Requirements) -> String {
                 (true, None) => "present".into(),
                 (false, _) => "absent".into(),
             };
-            out.push_str(&format!("  {:<14} {}\n", tool.label, state));
+            out.push_str(&format!(
+                "  {:<width$}  {}\n",
+                tool.label,
+                state,
+                width = column
+            ));
         }
     }
 

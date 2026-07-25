@@ -39,25 +39,33 @@ fn main() -> wry::Result<()> {
     let slot: Slot = Arc::new(Mutex::new(None));
     let starter = event_loop.create_proxy();
     let watcher = event_loop.create_proxy();
+    let doctor = event_loop.create_proxy();
     let supervised = slot.clone();
 
-    std::thread::spawn(move || match daemon::bring_up(&supervised) {
-        Err(failure) => {
-            let _ = starter.send_event(Signal::Broken(failure));
-        }
-        Ok(()) => {
-            let _ = starter.send_event(Signal::Ready);
-            watch(&supervised, watcher);
+    std::thread::spawn(move || {
+        let complain = move |missing| {
+            let _ = doctor.send_event(Signal::Broken(missing));
+        };
+        match daemon::bring_up(&supervised, complain) {
+            Err(failure) => {
+                let _ = starter.send_event(Signal::Broken(failure));
+            }
+            Ok(()) => {
+                let _ = starter.send_event(Signal::Ready);
+                watch(&supervised, watcher);
+            }
         }
     });
 
+    let mut broken = false;
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
-            Event::UserEvent(Signal::Ready) => {
+            Event::UserEvent(Signal::Ready) if !broken => {
                 let _ = webview.load_url(&daemon::floor_url());
             }
             Event::UserEvent(Signal::Broken(failure)) => {
+                broken = true;
                 let _ = webview.load_html(&page::failure(&failure));
             }
             Event::WindowEvent {
