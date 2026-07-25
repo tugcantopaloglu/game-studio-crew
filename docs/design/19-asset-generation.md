@@ -35,7 +35,11 @@ Three consequences, each of them tested:
 
 **`codex exec --sandbox workspace-write` reported `sandbox: read-only` in its own session header on this Windows box.** Recorded here because the next person will otherwise assume that flag can be relied on: it cannot, at least not here. It is *not* the reason for the rule above — the rule would stand on a machine where the sandbox honoured the flag — but it does mean that asking codex to write the file would have failed anyway.
 
-**`codex exec` hangs forever if its stdin is left open.** The first real run died at the ten-minute cap with `Reading additional input from stdin...` and nothing else in the log: given a prompt argument *and* an open pipe, codex waits for EOF on the pipe before it starts. `run_codex` therefore sets `Stdio::null()`. This is the kind of thing [ADR 0004](adr/0004-explicit-context-control-not-bare.md) is about — the flag documentation says stdin is "appended as a `<stdin>` block" and does not mention that an unclosed pipe is a deadlock.
+**`codex exec` hangs forever if its stdin is left open.** The first real run died at the ten-minute cap with `Reading additional input from stdin...` and nothing else in the log: given a prompt argument *and* an open pipe, codex waits for EOF on the pipe before it starts. This is the kind of thing [ADR 0004](adr/0004-explicit-context-control-not-bare.md) is about — the flag documentation says stdin is "appended as a `<stdin>` block" and does not mention that an unclosed pipe is a deadlock. The brief is therefore **written to a file and handed over as stdin**, which is codex's documented primary path for instructions and gives EOF for free. It also keeps the argument vector short, which matters on Windows for the reason below.
+
+**`on_path` finding codex is not the same as being able to start it, and this cost a real failure.** The first attempt to drive `generate()` failed with `codex would not start: program not found` *even though* `capability()` had just reported it installed and ready. On Windows the PATH entry is `codex.cmd` and an extensionless shell script; `Command::new("codex")` does not apply `PATHEXT`, and `CreateProcess` cannot execute a `.cmd` or an extensionless script at all. So `spawnable()` resolves the program through `PATHEXT` and, for a `.cmd` or `.bat`, runs it through `COMSPEC` with `/c`. Two tests pin this, and one of them asserts that on Windows the resolved launcher **has an extension**, because an extensionless resolution is precisely the thing that silently fails to spawn.
+
+This is worth stating as a general lesson, not a Windows footnote: **"the binary exists" and "the daemon can run it" are two different facts**, exactly as [14](14-settings-and-providers.md) insists that "installed" and "drivable" are two different facts about a provider. `capability()` answers the first and is right to; only a spawn answers the second.
 
 **codex authenticates per machine and its token expires.** When the refresh token is spent, every request fails with `401 token_expired` and the fix is an interactive `codex login`, which no daemon can do. That is a blocker to report, not an error to raise, which is why a failed generation degrades.
 
@@ -102,12 +106,12 @@ For the `.glb` engines the prompt also says textures, canvases and data URIs do 
 ## The generation, step by step
 
 ```
-codex exec --skip-git-repo-check --sandbox read-only --color never \
+<launcher> codex exec --skip-git-repo-check --sandbox read-only --color never \
   -C <project> --output-schema <schema.json> -o <answer.json> \
-  -m <assets.model> [-i <reference image>] "<the brief>"
+  -m <assets.model> [-i <reference image>]      < <brief.txt>
 ```
 
-**`--output-schema` is what shipped, and it works.** This is a statement about a run, not an intention: the real generation below used exactly these flags and codex returned well-formed JSON matching `ANSWER_SCHEMA` in `-o`'s file. Stdout capture was the fallback if it had not, and it was not needed, so it is not in the code.
+**`--output-schema` is what shipped, and it works.** A statement about a run, not an intention: the real generations below used exactly this, and codex wrote well-formed JSON with exactly the keys `source` and `notes` into `-o`'s file. Stdout capture was the fallback if it had not; it was not needed, so it is not in the code and there is no second path to maintain.
 
 1. **Refuse first.** `Capability::ready()`, then a name that slugifies to something, then a non-empty description. An asset with no description is refused before codex is paid to guess.
 2. **Ask.** The answer is `{source, notes}` against `ANSWER_SCHEMA`. stdout and stderr go to `.studio-out/assets/<slug>.codex.log`, a file rather than a pipe, so a chatty run cannot deadlock on a full pipe buffer. The wait is bounded at ten minutes and the child is killed on overrun.
@@ -168,9 +172,10 @@ Everything else the route takes is either a store-resolved project id or text th
 | the export bridge report is parsed for the mesh count | **unit tested** against a real report line |
 | `--output-schema` returns usable JSON | **observed** in the real run below |
 | the model default, the refusal diagnosis, path containment, no-clobber | **unit tested** |
-| a character is generated end to end and loads | **done for real, once**; see below |
-| a prop is generated end to end | **not done.** Only the prompt and the destination are tested. |
-| `run_codex` itself, the Rust process path | **not executed.** See the caveat below. |
+| a character is generated end to end and loads | **done for real**; see below |
+| a prop is generated end to end | **done for real, through `generate()` itself**; see below |
+| `run_codex`, the Rust spawn path | **executed against the live CLI**, and it failed the first time |
+| the no-clobber refusal | **unit tested, and observed on the real run's second ask** |
 
 The panel has **not** been seen in a browser. There was no connected Chrome on the machine this was built on, so `assets.js` is checked by `node --check`, by the module and panel-host tests in `web.rs`, and by a run under the `probes/floor-dom.mjs` stubbed DOM which mounts it against a stubbed `/assets` and asserts it hides the form when off, offers it when on, lists a previously generated asset, and reports a failed read instead of swallowing it. Nothing is claimed about how it looks.
 
@@ -189,8 +194,29 @@ A `character` named **Scrapyard Scout**, on a scratch web project in a temp dire
 
 Loaded and measured afterwards: root group named `scrapyard_scout`, **69 named children** (`torso`, `patched_coat_body`, `coat_left_hem`, `head`, `hood`, `goggle_left_lens`, `satchel_crossbody_strap`, and so on), height **1.706** units against the 1.7 asked for, no imports, no comments anywhere in the file, one default export.
 
-**The caveat, stated plainly:** that generation was driven by invoking `codex exec` directly with the flag vector `run_codex` builds, and the answer was then written and verified by hand through the same two steps the code performs. **The Rust `run_codex` function has not itself been executed against the live CLI.** So the codex contract is proven and the Rust wrapper around it is not; a mistake in how it spawns the child would not have been caught. Driving `generate()` once through the real route is the obvious next thing and it needs a second authorised generation.
+That first generation was driven by invoking `codex exec` with the flag vector `run_codex` builds, with the write and the verify done by hand through the same two steps the code performs. It proved the codex contract but not the Rust wrapper, so a second one was authorised to close exactly that gap.
 
-One miss worth recording: the lowest point came out at **y = -0.0061**, so it stands 6mm below the ground plane rather than exactly on it. The contract asked for `y = 0` and got within a centimetre. `verify` does not check this, because `model_export.mjs` reports only bytes and a mesh count and that helper belongs to [07](07-engine-layer.md); a bounding-box assertion is the obvious next thing to add the next time that file changes hands.
+One miss worth recording: the lowest point came out at **y = -0.0061**, so it stands 6mm below the ground plane rather than exactly on it.
+
+### The second real generation, through `generate()` itself
+
+A `prop`, driven by the code rather than around it: `a_real_codex_generates_a_prop_that_loads_through_the_export_bridge`, an `#[ignore]`d test that also requires `STUDIO_REAL_CODEX=1` before it will spend anything — two locks, because a test that bills a subscription must not run because someone typed `cargo test -- --ignored`.
+
+| | |
+|---|---|
+| asset | `prop` named **Wooden Crate** — "a plain wooden shipping crate, planks with visible seams and iron corner brackets" |
+| model | `gpt-5.4-mini`, Codex's own "small, fast and cost-efficient" option |
+| wall clock | 148.6 seconds |
+| cost | **unknown**, same as before: a ChatGPT-plan session reports no figure |
+| answer | 2334 bytes of JSON with exactly the keys `source` and `notes`, 2131 bytes of source |
+| result | `src/models/wooden_crate.js`, **22 meshes, 4528 bytes** of `.glb` |
+
+Measured afterwards: root group `wooden_crate`, **all 22 children named**, size 1.600 × 1.200 × 1.600, **lowest point exactly `y = 0.0000`** and **centred exactly on x and z at `0.0000, 0.0000`** — the prop contract asks for both and got both, which the character run did not quite manage. No imports, no comments, one default export. The manifest at `.studio/assets.json` recorded the row.
+
+**And this is the run that found the launcher bug.** The very first attempt failed with `codex would not start: program not found` after `capability()` had reported ready. That failure is the whole reason the second generation was worth its cost: nothing in the unit suite could have caught it, because the unit suite never spawns a process. The fix is `spawnable()` above.
+
+The test then asks for the same prop a second time and asserts the refusal, so the no-clobber guard is confirmed against a real generated file and not only against a planted one.
+
+What is still **not** proven: generation with a `-i` reference image attached, and generation on a `godot`/`unity`/`ue5` project where the factory is baked to a `.glb` the engine imports. Both are wired and unit-tested; neither has been run. The contract asked for `y = 0` and got within a centimetre. `verify` does not check this, because `model_export.mjs` reports only bytes and a mesh count and that helper belongs to [07](07-engine-layer.md); a bounding-box assertion is the obvious next thing to add the next time that file changes hands.
 
 `Provider::Codex` in `studio_core` is a different thing to this and deliberately not reused: that is about spawning a *worker* as codex, which the provider table refuses because codex has no flag that replaces a system prompt. This feature invokes codex as a one-shot tool for a single asset, where no frozen charter is involved at all.

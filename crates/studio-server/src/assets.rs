@@ -30,6 +30,53 @@ pub fn model_in(settings: &Settings) -> String {
         .to_string()
 }
 
+pub fn path_extensions() -> Vec<String> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
+        .split(';')
+        .map(|e| e.trim().to_lowercase())
+        .filter(|e| !e.is_empty())
+        .collect()
+}
+
+pub fn launcher_for(found: &Path) -> (PathBuf, Vec<String>) {
+    let ext = found
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if cfg!(windows) && (ext == "cmd" || ext == "bat") {
+        let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
+        return (
+            PathBuf::from(shell),
+            vec!["/c".into(), found.to_string_lossy().into_owned()],
+        );
+    }
+    (found.to_path_buf(), Vec::new())
+}
+
+pub fn spawnable(program: &str) -> Option<(PathBuf, Vec<String>)> {
+    let raw = std::env::var_os("PATH")?;
+    let extensions = path_extensions();
+    for dir in std::env::split_paths(&raw) {
+        for ext in &extensions {
+            let candidate = dir.join(format!("{program}{ext}"));
+            if candidate.is_file() {
+                return Some(launcher_for(&candidate));
+            }
+        }
+        if !cfg!(windows) {
+            let bare = dir.join(program);
+            if bare.is_file() {
+                return Some((bare, Vec::new()));
+            }
+        }
+    }
+    None
+}
+
 pub fn inside(project: &Path, relative: &Path) -> Result<PathBuf, String> {
     for part in relative.components() {
         if !matches!(part, std::path::Component::Normal(_)) {
@@ -550,7 +597,7 @@ pub fn diagnose(recorded: &str, model: &str) -> Option<String> {
 fn run_codex(
     project: &Path,
     req: &Request,
-    prompt: &str,
+    brief: &Path,
     schema: &Path,
     answer: &Path,
     log: &Path,
@@ -560,9 +607,19 @@ fn run_codex(
     let errs = out
         .try_clone()
         .map_err(|e| format!("could not record {PROGRAM}'s diagnostics: {e}"))?;
+    let asking = std::fs::File::open(brief)
+        .map_err(|e| format!("could not reopen {} to send it: {e}", brief.display()))?;
 
-    let mut cmd = std::process::Command::new(PROGRAM);
-    cmd.arg("exec")
+    let (program, leading) = spawnable(PROGRAM).ok_or_else(|| {
+        format!(
+            "{PROGRAM} is on PATH but not in a form this machine can start; reinstall it with \
+             `npm i -g @openai/codex` so a launcher lands on PATH"
+        )
+    })?;
+
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(leading)
+        .arg("exec")
         .arg("--skip-git-repo-check")
         .args(["--sandbox", "read-only"])
         .args(["--color", "never"])
@@ -576,8 +633,7 @@ fn run_codex(
     if let Some(reference) = req.reference.as_deref() {
         cmd.arg("-i").arg(reference);
     }
-    cmd.arg(prompt)
-        .stdin(std::process::Stdio::null())
+    cmd.stdin(std::process::Stdio::from(asking))
         .stdout(out)
         .stderr(errs);
 
@@ -710,7 +766,10 @@ pub fn generate(project: &Path, cap: &Capability, req: &Request) -> Result<Gener
         &plan,
         req.reference.as_ref().map(|_| "attached"),
     );
-    let said = run_codex(project, req, &prompt, &schema, &answer, &log)?;
+    let brief = work.join(format!("{slug}.brief.txt"));
+    std::fs::write(&brief, &prompt)
+        .map_err(|e| format!("could not write {}: {e}", brief.display()))?;
+    let said = run_codex(project, req, &brief, &schema, &answer, &log)?;
     let raw = match std::fs::read_to_string(&answer) {
         Ok(raw) => raw,
         Err(e) => {
@@ -1205,6 +1264,45 @@ mod tests {
     }
 
     #[test]
+    fn the_codex_on_path_is_resolved_into_something_this_machine_can_actually_start() {
+        let (program, leading) = match spawnable(PROGRAM) {
+            Some(found) => found,
+            None => return,
+        };
+        assert!(
+            program.is_absolute() || program.file_name().is_some(),
+            "the launcher has to be a real program, not a bare name the OS may not resolve"
+        );
+        if cfg!(windows) {
+            let ext = program
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            assert!(
+                !ext.is_empty(),
+                "CreateProcess will not run an extensionless script, so {} would fail to spawn",
+                program.display()
+            );
+            if !leading.is_empty() {
+                assert_eq!(leading[0], "/c", "a .cmd has to go through the shell");
+            }
+        }
+    }
+
+    #[test]
+    fn a_batch_launcher_is_run_through_the_shell_because_createprocess_cannot_exec_one() {
+        let (program, leading) = launcher_for(Path::new(r"C:\npm\codex.cmd"));
+        if cfg!(windows) {
+            assert_eq!(leading, vec!["/c".to_string(), r"C:\npm\codex.cmd".to_string()]);
+            assert!(program.to_string_lossy().to_lowercase().contains("cmd"));
+        }
+
+        let (direct, none) = launcher_for(Path::new(r"C:\npm\codex.exe"));
+        assert_eq!(direct, Path::new(r"C:\npm\codex.exe"));
+        assert!(none.is_empty(), "an exe is started directly");
+    }
+
+    #[test]
     fn a_destination_is_always_a_plain_path_under_the_project_and_never_climbs_out() {
         let root = Path::new("C:").join("games").join("scrapyard");
         assert_eq!(
@@ -1414,6 +1512,83 @@ mod tests {
         assert_eq!(rows.len(), 1, "regenerating an asset replaces its row instead of doubling it");
         assert_eq!(rows[0]["factory"], "src/models/scout.js");
         assert_eq!(rows[0]["meshes"], 12);
+    }
+
+    #[test]
+    #[ignore]
+    fn a_real_codex_generates_a_prop_that_loads_through_the_export_bridge() {
+        if std::env::var("STUDIO_REAL_CODEX").is_err() {
+            println!(
+                "set STUDIO_REAL_CODEX=1 to spend one real Codex request on a generated prop; \
+                 this test is ignored by default because it bills the user's subscription"
+            );
+            return;
+        }
+
+        let dir = std::env::temp_dir().join("studio-assets-real-codex");
+        let _ = std::fs::remove_dir_all(&dir);
+        let studio = dir.join(".studio");
+        let project = dir.join("game");
+        std::fs::create_dir_all(&studio).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("index.html"), "<html></html>").unwrap();
+
+        let profiles = studio_engine::EngineProfile::builtin();
+        let web = profiles.iter().find(|p| p.id == "web").unwrap();
+        studio_engine::install_helpers(web, &project).unwrap();
+
+        let mut stored = Settings::new();
+        stored.set(SETTING_ENABLED, true.into());
+        stored.set(
+            SETTING_MODEL,
+            std::env::var("STUDIO_REAL_CODEX_MODEL")
+                .unwrap_or_else(|_| "gpt-5.4-mini".into())
+                .into(),
+        );
+        stored.save(&Settings::path_in(&studio)).unwrap();
+
+        let cap = capability(&studio, Some(&project));
+        assert!(cap.ready(), "codex is not usable here: {:?}", cap.blockers);
+
+        let asked = Request {
+            kind: AssetKind::Prop,
+            name: "Wooden Crate".into(),
+            description: "a plain wooden shipping crate, planks with visible seams and iron \
+                          corner brackets"
+                .into(),
+            reference: None,
+            model: model_in(&stored),
+            overwrite: false,
+        };
+
+        let made = match generate(&project, &cap, &asked) {
+            Ok(made) => made,
+            Err(why) => panic!("the real generation failed: {why}"),
+        };
+
+        println!("factory   {}", project.join(&made.factory).display());
+        println!("meshes    {}", made.meshes);
+        println!("glb bytes {}", made.bytes);
+        println!("notes     {}", made.notes);
+        println!("log       {}", made.log);
+
+        assert_eq!(made.slug, "wooden_crate");
+        assert_eq!(made.factory, "src/models/wooden_crate.js");
+        assert!(made.meshes > 0, "a prop with no meshes is not a prop");
+        assert!(project.join("src").join("models").join("wooden_crate.js").is_file());
+
+        let source = std::fs::read_to_string(project.join(&made.factory)).unwrap();
+        assert!(looks_like_a_factory(&source).is_ok());
+
+        let rows = recorded(&project);
+        assert_eq!(rows.len(), 1, "the generated prop has to be remembered");
+        assert_eq!(rows[0]["kind"], "prop");
+
+        let again = generate(&project, &cap, &asked).unwrap_err();
+        assert!(
+            again.contains("already exists"),
+            "a second ask must refuse before spending again: {again}"
+        );
     }
 
     #[test]

@@ -25,11 +25,22 @@ function firstArray(value) {
 }
 
 function statusOf(row) {
-  const raw = row.status === undefined ? row.state : row.status;
+  let raw = row.verdict;
+  if (raw === undefined) raw = row.status;
+  if (raw === undefined) raw = row.state;
   const text = String(raw === undefined ? "" : raw).toLowerCase();
-  if (raw === true || text.includes("verified") || text.includes("working")) return "verified";
+  if (raw === true || text.includes("working") || text.includes("verified")) return "verified";
   if (text.includes("refus") || text.includes("denied") || raw === false) return "refused";
   return "unknown";
+}
+
+function sourcesOf(row) {
+  const sources = row.sources;
+  if (!Array.isArray(sources)) return "";
+  return sources
+    .map((s) => (typeof s === "string" ? s : s && (s.id || s.name)))
+    .filter(Boolean)
+    .join(", ");
 }
 
 export function codexModels(payload) {
@@ -52,16 +63,37 @@ export function codexModels(payload) {
   const out = [];
   for (const row of rows) {
     if (!row) continue;
-    const name = typeof row === "string" ? row : row.model || row.id || row.name;
+    if (typeof row === "string") {
+      out.push({ model: row, status: "unknown", reason: "", checked: "", sources: "" });
+      continue;
+    }
+    const name = row.id || row.model || row.name;
     if (!name) continue;
     out.push({
       model: String(name),
-      status: typeof row === "string" ? "unknown" : statusOf(row),
-      reason: (row && (row.reason || row.why)) || "",
-      checked: (row && (row.checked_at || row.last_checked || row.checked)) || "",
+      label: row.label || "",
+      status: statusOf(row),
+      reason: row.detail || row.reason || row.why || "",
+      checked: row.checked_at || row.last_checked || row.checked || "",
+      sources: sourcesOf(row),
+      cost: row.cost_usd === undefined || row.cost_usd === null ? "" : row.cost_usd,
+      seconds: row.seconds === undefined || row.seconds === null ? "" : row.seconds,
     });
   }
   return out;
+}
+
+function suggestionTitle(entry) {
+  const parts = [];
+  if (entry.label) parts.push(entry.label);
+  if (entry.reason) parts.push(entry.reason);
+  if (entry.sources) parts.push("named by " + entry.sources);
+  if (entry.checked) parts.push("checked " + entry.checked);
+  if (entry.cost !== "" && entry.cost !== undefined) parts.push("cost $" + entry.cost);
+  else if (entry.seconds !== "" && entry.seconds !== undefined && entry.status !== "unknown") {
+    parts.push(entry.seconds + "s to answer");
+  }
+  return parts.join(" · ");
 }
 
 function statusLabel(entry) {
@@ -287,12 +319,18 @@ function modelField(view) {
         el("span", {
           class: statusClass(entry),
           style: "font-size:10.5px",
-          title: entry.reason || (entry.checked ? "last checked " + entry.checked : ""),
+          title: suggestionTitle(entry),
           text: entry.model + " · " + statusLabel(entry),
         })
       );
     }
     box.append(row);
+    box.append(
+      el("div", {
+        class: "hint",
+        text: "a model listed but not checked is only known to exist; the settings panel probes one for real",
+      })
+    );
   } else {
     box.append(
       el("div", {
