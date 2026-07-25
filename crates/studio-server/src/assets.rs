@@ -582,7 +582,7 @@ fn run_codex(
         )
     })?;
 
-    let mut cmd = std::process::Command::new(program);
+    let mut cmd = studio_core::command(program);
     cmd.args(leading)
         .arg("exec")
         .arg("--skip-git-repo-check")
@@ -654,7 +654,7 @@ pub fn verify(project: &Path, plan: &Plan) -> Result<(u64, usize), String> {
         ));
     }
 
-    let out = std::process::Command::new(node)
+    let out = studio_core::command(node)
         .arg(&bridge)
         .arg(project.join(&plan.factory))
         .arg(project.join(&plan.proof))

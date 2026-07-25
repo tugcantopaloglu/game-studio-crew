@@ -60,6 +60,21 @@ pub fn on_path(program: &str) -> bool {
     resolve(program).is_some()
 }
 
+pub fn quiet(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd
+}
+
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    quiet(&mut cmd);
+    cmd
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +141,27 @@ mod tests {
     #[test]
     fn an_explicit_path_is_taken_as_given_and_not_hunted_for_on_path() {
         assert!(resolve("./definitely-not-here-either").is_none());
+    }
+
+    #[test]
+    fn no_background_git_call_spawns_a_bare_command_and_flashes_a_console() {
+        let source = include_str!("git.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("git.rs has a production half");
+        assert!(
+            !production.contains("Command::new("),
+            "a bare Command::new on Windows gives the child its own console, and git runs after \
+             every worker — the window flashes on screen each time. Use launcher::command."
+        );
+    }
+
+    #[test]
+    fn the_no_window_flag_is_the_value_windows_actually_documents() {
+        assert_eq!(
+            0x0800_0000u32, 0x08000000,
+            "CREATE_NO_WINDOW is 0x08000000; a wrong constant here silently does nothing"
+        );
     }
 }

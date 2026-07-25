@@ -1,7 +1,6 @@
 use crate::{CoreError, Result};
 use serde::Serialize;
 use std::path::Path;
-use std::process::Command;
 
 const GITIGNORE: &str = "\
 .studio-out/
@@ -20,7 +19,7 @@ Saved/
 ";
 
 fn git(root: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git").args(args).current_dir(root).output()?;
+    let out = crate::launcher::command("git").args(args).current_dir(root).output()?;
     if !out.status.success() {
         return Err(CoreError::Git(format!(
             "{} failed: {}",
@@ -32,7 +31,7 @@ fn git(root: &Path, args: &[&str]) -> Result<String> {
 }
 
 pub fn available() -> bool {
-    Command::new("git")
+    crate::launcher::command("git")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -95,7 +94,7 @@ pub fn commit(root: &Path, subject: &str) -> Result<Option<String>> {
 fn commit_as(root: &Path, subject: &str) -> Result<String> {
     git(root, &["add", "-A"])?;
 
-    let out = Command::new("git")
+    let out = crate::launcher::command("git")
         .args([
             "-c",
             "user.name=Game Studio",
@@ -407,7 +406,7 @@ pub fn push(root: &Path) -> Result<String> {
         ));
     };
 
-    let out = Command::new("git")
+    let out = crate::launcher::command("git")
         .args(["push", "--set-upstream", &remote.name, &branch])
         .env("GIT_TERMINAL_PROMPT", "0")
         .current_dir(root)
@@ -441,7 +440,7 @@ fn login_in(text: &str) -> Option<String> {
 }
 
 pub fn host() -> Host {
-    let present = Command::new("gh")
+    let present = crate::launcher::command("gh")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -449,7 +448,7 @@ pub fn host() -> Host {
     if !present {
         return Host { gh: false, signed_in: false, login: None };
     }
-    let Ok(out) = Command::new("gh").args(["auth", "status"]).output() else {
+    let Ok(out) = crate::launcher::command("gh").args(["auth", "status"]).output() else {
         return Host { gh: true, signed_in: false, login: None };
     };
     let said = format!(
@@ -496,7 +495,7 @@ pub fn create_remote(root: &Path, name: &str, private: bool) -> Result<String> {
     }
 
     let visibility = if private { "--private" } else { "--public" };
-    let out = Command::new("gh")
+    let out = crate::launcher::command("gh")
         .args(["repo", "create", name, visibility, "--source", ".", "--remote", "origin"])
         .current_dir(root)
         .output()?;
@@ -550,6 +549,7 @@ pub fn rollback(root: &Path, sha: &str) -> Result<Rollback> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     #[test]
     fn subject_is_role_then_first_line() {

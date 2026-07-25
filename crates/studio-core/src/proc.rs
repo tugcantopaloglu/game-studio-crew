@@ -23,7 +23,8 @@ impl ProcessGroup {
     pub fn prepare(&self, cmd: &mut Command) {
         #[cfg(windows)]
         {
-            let _ = cmd;
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(windows_impl::CREATE_NO_WINDOW);
         }
         #[cfg(not(windows))]
         {
@@ -77,6 +78,8 @@ mod windows_impl {
         TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JobObjectExtendedLimitInformation,
     };
+
+    pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     pub struct Job {
         handle: HANDLE,

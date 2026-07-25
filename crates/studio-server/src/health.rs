@@ -3,7 +3,7 @@ use axum::routing::get;
 use axum::Router;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 use studio_core::{Provider, RoleNeeds};
 
@@ -179,7 +179,7 @@ fn probe_engine(profile: &studio_engine::EngineProfile) -> Tool {
 }
 
 fn version_of(path: &Path) -> Option<String> {
-    let mut child = Command::new(path)
+    let mut child = studio_core::command(path)
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

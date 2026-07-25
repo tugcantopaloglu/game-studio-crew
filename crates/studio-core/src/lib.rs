@@ -4,7 +4,7 @@ mod proc;
 mod spec;
 mod stream;
 
-pub use launcher::{launcher_for, on_path, resolve, spawnable};
+pub use launcher::{command, launcher_for, on_path, quiet, resolve, spawnable};
 pub use proc::ProcessGroup;
 pub use spec::{
     probe_answered, BriefDelivery, Capabilities, Effort, Provider, RoleNeeds, SessionMode,

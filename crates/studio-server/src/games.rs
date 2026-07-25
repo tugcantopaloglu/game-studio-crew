@@ -150,7 +150,7 @@ pub fn record_adoption(root: &Path) -> std::io::Result<()> {
 }
 
 fn git_out(root: &Path, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new("git")
+    let out = studio_core::command("git")
         .args(args)
         .current_dir(root)
         .output()

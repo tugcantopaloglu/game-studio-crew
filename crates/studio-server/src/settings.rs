@@ -228,11 +228,11 @@ pub fn run_bounded(
     limit: Duration,
 ) -> std::io::Result<(Option<i32>, String, String, f64)> {
     use std::io::{Read, Write};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     let started = Instant::now();
     let mut group = studio_core::ProcessGroup::new()?;
-    let mut cmd = Command::new(program);
+    let mut cmd = studio_core::command(program);
     cmd.args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
