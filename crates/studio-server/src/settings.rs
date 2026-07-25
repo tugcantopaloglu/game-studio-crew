@@ -76,31 +76,7 @@ async fn write_settings(State(state): State<AppState>, body: String) -> Response
 }
 
 pub fn on_path(program: &str) -> Option<PathBuf> {
-    let extensions: Vec<String> = if cfg!(windows) {
-        std::env::var("PATHEXT")
-            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
-            .split(';')
-            .map(|e| e.trim().to_lowercase())
-            .filter(|e| !e.is_empty())
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    let raw = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&raw) {
-        let bare = dir.join(program);
-        if bare.is_file() {
-            return Some(bare);
-        }
-        for ext in &extensions {
-            let with_ext = dir.join(format!("{program}{ext}"));
-            if with_ext.is_file() {
-                return Some(with_ext);
-            }
-        }
-    }
-    None
+    studio_core::resolve(program)
 }
 
 fn provider_row(p: Provider) -> Value {

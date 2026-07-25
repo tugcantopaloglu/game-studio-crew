@@ -31,50 +31,15 @@ pub fn model_in(settings: &Settings) -> String {
 }
 
 pub fn path_extensions() -> Vec<String> {
-    if !cfg!(windows) {
-        return Vec::new();
-    }
-    std::env::var("PATHEXT")
-        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
-        .split(';')
-        .map(|e| e.trim().to_lowercase())
-        .filter(|e| !e.is_empty())
-        .collect()
+    studio_core::launcher::path_extensions()
 }
 
 pub fn launcher_for(found: &Path) -> (PathBuf, Vec<String>) {
-    let ext = found
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    if cfg!(windows) && (ext == "cmd" || ext == "bat") {
-        let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
-        return (
-            PathBuf::from(shell),
-            vec!["/c".into(), found.to_string_lossy().into_owned()],
-        );
-    }
-    (found.to_path_buf(), Vec::new())
+    studio_core::launcher_for(found)
 }
 
 pub fn spawnable(program: &str) -> Option<(PathBuf, Vec<String>)> {
-    let raw = std::env::var_os("PATH")?;
-    let extensions = path_extensions();
-    for dir in std::env::split_paths(&raw) {
-        for ext in &extensions {
-            let candidate = dir.join(format!("{program}{ext}"));
-            if candidate.is_file() {
-                return Some(launcher_for(&candidate));
-            }
-        }
-        if !cfg!(windows) {
-            let bare = dir.join(program);
-            if bare.is_file() {
-                return Some((bare, Vec::new()));
-            }
-        }
-    }
-    None
+    studio_core::spawnable(program)
 }
 
 pub fn inside(project: &Path, relative: &Path) -> Result<PathBuf, String> {

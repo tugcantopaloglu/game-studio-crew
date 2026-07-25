@@ -1,8 +1,10 @@
 pub mod git;
+pub mod launcher;
 mod proc;
 mod spec;
 mod stream;
 
+pub use launcher::{launcher_for, on_path, resolve, spawnable};
 pub use proc::ProcessGroup;
 pub use spec::{
     probe_answered, BriefDelivery, Capabilities, Effort, Provider, RoleNeeds, SessionMode,
@@ -77,8 +79,18 @@ impl Worker {
         cwd: Option<&std::path::Path>,
     ) -> Result<Self> {
         let mut group = ProcessGroup::new()?;
-        let mut cmd = Command::new(program);
-        cmd.args(args)
+        let (launcher, prefix) = launcher::spawnable(program).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "{program} is not on PATH as anything this OS can execute; check it is \
+                     installed and that its directory is on PATH"
+                ),
+            )
+        })?;
+        let mut cmd = Command::new(launcher);
+        cmd.args(&prefix)
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

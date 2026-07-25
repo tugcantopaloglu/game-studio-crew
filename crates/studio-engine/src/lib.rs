@@ -203,26 +203,7 @@ pub fn resolve_binary(profile: &EngineProfile) -> Result<PathBuf> {
 }
 
 fn which(name: &str) -> Option<PathBuf> {
-    let exts: Vec<String> = if cfg!(windows) {
-        std::env::var("PATHEXT")
-            .unwrap_or_else(|_| ".EXE;.CMD;.BAT".into())
-            .split(';')
-            .map(|s| s.to_lowercase())
-            .collect()
-    } else {
-        vec![String::new()]
-    };
-
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        for ext in &exts {
-            let candidate = dir.join(format!("{name}{ext}"));
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
+    studio_core::resolve(name)
 }
 
 #[derive(Debug, Clone, Default)]
