@@ -650,6 +650,24 @@ pub fn run_planned(
         .map_err(|e| anyhow::anyhow!("workflow failed to execute: {e}"))?;
     *seq = host.seq.load(Ordering::SeqCst);
 
+    for missed in em.state.take_interrupts() {
+        let note = missed.note.filter(|n| !n.trim().is_empty());
+        println!(
+            "  an interrupt arrived after the last step and had nowhere to land{}",
+            note.as_deref().map(|n| format!(": {n}")).unwrap_or_default()
+        );
+        em.emit(
+            "daemon",
+            EventType::RunInterrupted,
+            Scene::daemon(),
+            serde_json::json!({
+                "reason": "too late; the run had already finished",
+                "note": note,
+                "step": null,
+            }),
+        )?;
+    }
+
     let outcome = report.outcome.clone().unwrap_or(RunOutcome::Completed);
 
     em.emit(

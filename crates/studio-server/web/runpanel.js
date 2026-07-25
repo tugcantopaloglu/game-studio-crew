@@ -100,28 +100,45 @@ export function mount(root) {
   }
 
   function drawWhere() {
+    const kept = list.value;
+    list.innerHTML = "";
+    for (const d of state.dirs) list.append(el("option", { value: d, text: d }));
+    if (kept && state.dirs.includes(kept)) list.value = kept;
+
     here.innerHTML = "";
     here.append(
       el("b", { text: "the game will live in" }),
-      el("div", { class: "k", text: state.root || "pick a folder" }),
+      el("div", { class: "k", text: destination() || "pick a folder" }),
+      el("div", {
+        class: "hint",
+        text: list.value
+          ? "that folder already exists; the crew works on what is in it"
+          : "double click a folder to go into it, or pick one to work on what is already there",
+      }),
     );
-    list.innerHTML = "";
-    for (const d of state.dirs) list.append(el("option", { value: d, text: d }));
     up.disabled = !state.parent;
+  }
+
+  function destination() {
+    if (!state.root) return "";
+    if (list.value) return join(state.root, list.value);
+    const wanted = name.value.trim();
+    return wanted ? join(state.root, slug(wanted)) : state.root;
   }
 
   list.ondblclick = () => {
     if (list.value) browse(join(state.root, list.value));
   };
+  list.onchange = drawWhere;
+  name.oninput = drawWhere;
   up.onclick = () => browse(state.parent || "");
 
   create.onclick = async () => {
-    const chosen = list.value ? join(state.root, list.value) : state.root;
     const wanted = name.value.trim();
     if (!wanted) return toast("a game needs a name");
-    if (!chosen) return toast("pick a folder for it to live in");
+    const dest = destination();
+    if (!dest) return toast("pick a folder for it to live in");
 
-    const dest = list.value ? chosen : join(state.root, slug(wanted));
     create.disabled = true;
     try {
       const made = await api("/projects", {
@@ -196,7 +213,8 @@ export function mount(root) {
       say.value = s.say;
 
       const role = el("select");
-      for (const r of state.roles) role.append(el("option", { value: r, text: r }));
+      const offered = state.roles.includes(s.role) ? state.roles : [s.role, ...state.roles];
+      for (const r of offered) role.append(el("option", { value: r, text: r }));
       role.value = s.role;
 
       row.append(
