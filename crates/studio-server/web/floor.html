@@ -419,7 +419,7 @@ import * as THREE from "/vendor/three.module.js";
 import { buildOffice, wanderStep, avatarPose, refreshScreens, paintScreens, setMotion, seatAtTable, leaveTable, showBoard, boardSays, boardDecided, hideBoard } from "/scene.js";
 import { pushEvent, setProject, onProject, setStage, settings } from "/bus.js";
 import { startChatter, chatterSays } from "/chatter.js";
-import { budget, reducedMotion, sampleFrame, frameP95, frameMean, hardwareHints, shouldOfferLowSpec, noteOffered, reasonForOffer, onTier } from "/perf.js";
+import { budget, reducedMotion, sampleFrame, hardwareHints, shouldOfferLowSpec, noteOffered, reasonForOffer, onTier } from "/perf.js";
 
 const RING = { idle: 0x2f3644, running: 0x4ad991, blocked: 0xd9c24a, meeting: 0x6fa8d1, error: 0xd95555 };
 const TERMINAL = new Set(["run_ended","meeting_ended","workflow_ended","decision_recorded","escalated","verify_result","budget_exhausted"]);
@@ -450,8 +450,10 @@ const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 400);
 const orbit = { theta: Math.PI * 0.25, phi: Math.PI * 0.30, dist: 44, target: new THREE.Vector3(0, 0.5, 0) };
 let freeCam = false;
 
-scene.add(new THREE.AmbientLight(0x8fa0bc, 0.25));
-scene.add(new THREE.HemisphereLight(0xb8ccf0, 0x14181f, 0.9));
+const ambientLight = new THREE.AmbientLight(0x8fa0bc, tier.ambient);
+scene.add(ambientLight);
+const sky = new THREE.HemisphereLight(0xb8ccf0, 0x14181f, tier.hemisphere);
+scene.add(sky);
 const key = new THREE.DirectionalLight(0xfff2dc, 2.0);
 key.position.set(18, 30, 14);
 key.castShadow = tier.shadows;
@@ -790,6 +792,9 @@ onTier((b) => {
   key.shadow.mapSize.set(b.shadowMap, b.shadowMap);
   if (key.shadow.map) { key.shadow.map.dispose(); key.shadow.map = null; }
 
+  ambientLight.intensity = b.ambient;
+  sky.intensity = b.hemisphere;
+
   const wantLights = b.roomLights || b.deskLights;
   scene.traverse((o) => { if (o.isPointLight || o.isSpotLight) o.visible = wantLights; });
   if (wantLights && !countSceneLights()) {
@@ -1003,7 +1008,7 @@ function animate() {
 
   renderer.render(scene, camera);
   sampleFrame(performance.now() - began);
-  if (shouldOfferLowSpec(hints)) offerLowSpec();
+  if (shouldOfferLowSpec()) offerLowSpec();
 }
 
 function setRing(role, name) {

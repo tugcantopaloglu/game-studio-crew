@@ -1,7 +1,7 @@
-import { readFileSync } from "node:fs";
+
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
-import { loadFloorModules, checkoutWeb, percentile, canvasOps } from "./floor-dom.mjs";
+import { loadFloorModules, checkoutWeb, floorLayout, percentile, canvasOps } from "./floor-dom.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "..");
@@ -19,7 +19,7 @@ const RINGS = ["idle", "running", "running", "meeting", "blocked", "error", "run
 const lowSpec = process.env.LOW_SPEC === "1";
 const { THREE, scene: sceneMod, perf } = await loadFloorModules(webDir, { lowSpec });
 const tier = perf && perf.budget ? perf.budget() : { name: "high", screensPerFrame: 999, screenPeriod: 0.4, minimapPeriod: 0.25, farRigPeriod: 0, farRigDistance: 34 };
-const floor = JSON.parse(readFileSync(floorPath, "utf8"));
+const floor = await floorLayout(floorPath, process.env.FLOOR_URL);
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(34, 16 / 9, 0.1, 400);

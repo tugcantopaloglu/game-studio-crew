@@ -364,8 +364,11 @@ function propVoxels(p) {
   return v;
 }
 
+const KEY_BIAS = 128;
+const KEY_SPAN = 256;
+
 function key(x, y, z) {
-  return x + "," + y + "," + z;
+  return ((x + KEY_BIAS) * KEY_SPAN + (y + KEY_BIAS)) * KEY_SPAN + (z + KEY_BIAS);
 }
 
 export function shell(voxels) {
@@ -392,7 +395,17 @@ function part(voxels, pivot) {
   return { voxels: shell(voxels), pivot };
 }
 
+const partsByRole = new Map();
+
 export function buildCharacterParts(roleId) {
+  const known = partsByRole.get(roleId);
+  if (known) return known;
+  const built = characterParts(roleId);
+  partsByRole.set(roleId, built);
+  return built;
+}
+
+function characterParts(roleId) {
   const p = look(roleId);
   return {
     torso: part(torsoVoxels(p), [0, HIP_Y, 0]),

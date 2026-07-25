@@ -188,4 +188,67 @@ mod tests {
     fn a_fresh_client_replays_from_the_first_event() {
         assert_eq!(plan_resume(0, 3), ResumePlan::Replay { from_seq: 1, to_seq: 3 });
     }
+
+    #[test]
+    fn a_burst_from_one_actor_keys_the_order_list_once() {
+        let mut c = Coalescer::new();
+        for seq in 1..=5000 {
+            c.push(ev(seq, "gameplay_engineer#1", EventType::TokenUsage));
+        }
+        assert_eq!(c.order.len(), 1, "a repeat must not grow the order list");
+        assert_eq!(c.flush().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod scale_probe {
+    use super::*;
+    use crate::Scene;
+    use serde_json::json;
+    use std::time::Instant;
+
+    fn log(events: u64) -> Vec<Envelope> {
+        let types = [
+            EventType::TokenUsage,
+            EventType::ToolCall,
+            EventType::WorkerStateChanged,
+            EventType::AgentThought,
+            EventType::MeetingSpoke,
+        ];
+        (1..=events)
+            .map(|seq| {
+                Envelope::new(
+                    seq,
+                    "2026-07-25T09:12:44.118Z",
+                    "run",
+                    format!("gameplay_engineer#{}", seq % 13),
+                    Scene::daemon(),
+                    types[(seq % types.len() as u64) as usize],
+                    json!({"seq": seq, "bytes": 4096}),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    #[ignore]
+    fn compacting_a_long_log_stays_linear_in_its_length() {
+        println!("events    compact      per event   emitted");
+        for n in [1_000u64, 10_000, 50_000, 200_000] {
+            let events = log(n);
+            let started = Instant::now();
+            let mut c = Coalescer::new();
+            for e in events {
+                c.push(e);
+            }
+            let out = c.flush();
+            let took = started.elapsed();
+            println!(
+                "{n:<9} {:>8.2}ms {:>10.3}us {:>9}",
+                took.as_secs_f64() * 1000.0,
+                took.as_secs_f64() * 1_000_000.0 / n as f64,
+                out.len(),
+            );
+        }
+    }
 }

@@ -1,7 +1,7 @@
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export const canvasOps = { contexts: 0, fills: 0, texts: 0, strokes: 0, clears: 0 };
@@ -102,8 +102,13 @@ export function checkoutWeb(rev, webDir, repo) {
   return dir;
 }
 
+const staged = new Map();
+
 export function stageModules(webDir) {
+  const already = staged.get(webDir);
+  if (already) return already;
   const dir = mkdtempSync(join(tmpdir(), "floor-probe-"));
+  staged.set(webDir, dir);
   for (const name of readdirSync(webDir)) {
     if (!name.endsWith(".js")) continue;
     const src = readFileSync(join(webDir, name), "utf8").replace(/(from\s+")\/([\w./-]+")/g, "$1./$2");
@@ -135,6 +140,17 @@ export async function loadFloorModules(webDir, prefs) {
     perf = null;
   }
   return { THREE, scene, avatar, voxel, perf, dir };
+}
+
+export async function floorLayout(path, url) {
+  if (existsSync(path)) return JSON.parse(readFileSync(path, "utf8"));
+  const from = (url || "http://127.0.0.1:7878") + "/floor";
+  const res = await fetch(from);
+  if (!res.ok) throw new Error(`no layout at ${path} and ${from} answered ${res.status}`);
+  const body = await res.text();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, body);
+  return JSON.parse(body);
 }
 
 export function percentile(samples, p) {

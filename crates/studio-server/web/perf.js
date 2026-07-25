@@ -8,6 +8,8 @@ const HIGH = {
   softShadows: true,
   roomLights: true,
   deskLights: true,
+  ambient: 0.25,
+  hemisphere: 0.9,
   fog: true,
   ambientCrew: 5,
   screensPerFrame: 6,
@@ -26,6 +28,8 @@ const LOW = {
   softShadows: false,
   roomLights: false,
   deskLights: false,
+  ambient: 0.42,
+  hemisphere: 1.2,
   fog: true,
   ambientCrew: 2,
   screensPerFrame: 1,
@@ -115,10 +119,11 @@ export function hardwareHints(renderer) {
 }
 
 export function struggling() {
-  return counted >= STRUGGLE_FRAMES && frameP95() > STRUGGLE_P95;
+  if (counted < STRUGGLE_FRAMES || counted % 60 !== 0) return false;
+  return frameP95() > STRUGGLE_P95;
 }
 
-export function shouldOfferLowSpec(hints) {
+export function shouldOfferLowSpec() {
   if (offered || settings.get("lowSpec")) return false;
   if (!struggling()) return false;
   offered = true;

@@ -966,7 +966,7 @@ export function wanderStep(a, busy, dt, now) {
     a.path.length = 0;
     a.inLobby = false;
     a.speed = 0;
-    a.mode = a.meetingSeat ? "meeting" : "desk";
+    a.mode = a.meetingSeat ? "meeting" : a.homeFacing === undefined ? "idle" : "desk";
     if (a.meetingSeat && a.meetingFace !== null && a.meetingFace !== undefined) {
       a.facing = a.meetingFace;
     } else if (a.homeFacing !== undefined) {

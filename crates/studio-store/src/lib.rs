@@ -6,8 +6,16 @@ use rusqlite::{params, Connection, OpenFlags};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use studio_events::{Envelope, EventType, Outcome, Scene, Usage, WorkerState};
+
+const READER_POOL: usize = 4;
+
+fn wire_index() -> &'static HashMap<&'static str, EventType> {
+    static INDEX: OnceLock<HashMap<&'static str, EventType>> = OnceLock::new();
+    INDEX.get_or_init(|| EventType::ALL.iter().map(|t| (t.wire_name(), *t)).collect())
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -147,7 +155,35 @@ type Reply<T> = std::sync::mpsc::Sender<Result<T>>;
 pub struct Store {
     tx: Sender<Cmd>,
     path: PathBuf,
+    readers: Mutex<Vec<Connection>>,
     handle: Option<thread::JoinHandle<()>>,
+}
+
+pub struct Reader<'a> {
+    conn: Option<Connection>,
+    pool: &'a Mutex<Vec<Connection>>,
+}
+
+impl std::ops::Deref for Reader<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().expect("a live reader always holds its connection")
+    }
+}
+
+impl Drop for Reader<'_> {
+    fn drop(&mut self) {
+        let conn = match self.conn.take() {
+            Some(c) => c,
+            None => return,
+        };
+        if let Ok(mut pool) = self.pool.lock() {
+            if pool.len() < READER_POOL {
+                pool.push(conn);
+            }
+        }
+    }
 }
 
 impl Store {
@@ -182,7 +218,7 @@ impl Store {
             })
             .expect("spawn store writer");
 
-        Ok(Self { tx, path, handle: Some(handle) })
+        Ok(Self { tx, path, readers: Mutex::new(Vec::new()), handle: Some(handle) })
     }
 
     pub fn path(&self) -> &Path {
@@ -328,31 +364,36 @@ impl Store {
         self.send(|r| Cmd::RecordUsage(entry, ts, r))
     }
 
-    fn reader(&self) -> Result<Connection> {
-        let conn = Connection::open_with_flags(
-            &self.path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-        )?;
-        Ok(conn)
+    fn reader(&self) -> Result<Reader<'_>> {
+        let pooled = self.readers.lock().ok().and_then(|mut p| p.pop());
+        let conn = match pooled {
+            Some(conn) => conn,
+            None => Connection::open_with_flags(
+                &self.path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+            )?,
+        };
+        Ok(Reader { conn: Some(conn), pool: &self.readers })
     }
 
     pub fn head_seq(&self, run: &str) -> Result<u64> {
         let conn = self.reader()?;
-        let head: Option<i64> = conn.query_row(
-            "SELECT MAX(seq) FROM events WHERE run = ?1",
-            params![run],
-            |r| r.get(0),
-        )?;
+        let mut stmt = conn.prepare_cached("SELECT MAX(seq) FROM events WHERE run = ?1")?;
+        let head: Option<i64> = stmt.query_row(params![run], |r| r.get(0))?;
         Ok(head.unwrap_or(0) as u64)
     }
 
     pub fn events_since(&self, run: &str, since_seq: u64) -> Result<Vec<Envelope>> {
+        self.events_between(run, since_seq, u64::MAX)
+    }
+
+    pub fn events_between(&self, run: &str, since_seq: u64, limit: u64) -> Result<Vec<Envelope>> {
         let conn = self.reader()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT run, seq, ts, actor, type, scene_json, data_json
-             FROM events WHERE run = ?1 AND seq > ?2 ORDER BY seq",
+             FROM events WHERE run = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![run, since_seq as i64], |r| {
+        let rows = stmt.query_map(params![run, since_seq as i64, limit as i64], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, i64>(1)?,
@@ -367,13 +408,17 @@ impl Store {
         let mut out = Vec::new();
         for row in rows {
             let (run, seq, ts, actor, ty, scene, data) = row?;
+            let event_type = match wire_index().get(ty.as_str()).copied() {
+                Some(t) => t,
+                None => serde_json::from_str::<EventType>(&format!("\"{ty}\""))?,
+            };
             out.push(Envelope::new(
                 seq as u64,
                 ts,
                 run,
                 actor,
                 serde_json::from_str::<Scene>(&scene)?,
-                serde_json::from_str::<EventType>(&format!("\"{ty}\""))?,
+                event_type,
                 serde_json::from_str(&data)?,
             ));
         }
@@ -841,6 +886,65 @@ mod tests {
     }
 
     #[test]
+    fn the_head_of_a_run_is_readable_without_reading_the_run() {
+        let (_d, s) = store();
+        for _ in 0..40 {
+            s.append_event("r", "t", "daemon", EventType::ToolCall, Scene::daemon(), serde_json::json!({}))
+                .unwrap();
+        }
+        for _ in 0..7 {
+            s.append_event("other", "t", "daemon", EventType::ToolCall, Scene::daemon(), serde_json::json!({}))
+                .unwrap();
+        }
+        assert_eq!(s.head_seq("r").unwrap(), 40);
+        assert_eq!(s.head_seq("other").unwrap(), 7);
+    }
+
+    #[test]
+    fn the_head_of_a_run_nobody_has_written_is_zero_rather_than_an_error() {
+        let (_d, s) = store();
+        assert_eq!(s.head_seq("never_ran").unwrap(), 0);
+    }
+
+    #[test]
+    fn a_bounded_read_stops_at_the_limit_it_was_given() {
+        let (_d, s) = store();
+        for _ in 0..100 {
+            s.append_event("r", "t", "daemon", EventType::ToolCall, Scene::daemon(), serde_json::json!({}))
+                .unwrap();
+        }
+        let page = s.events_between("r", 20, 10).unwrap();
+        assert_eq!(page.len(), 10);
+        assert_eq!(page.first().unwrap().seq, 21);
+        assert_eq!(page.last().unwrap().seq, 30);
+        assert_eq!(
+            s.events_since("r", 20).unwrap().len(),
+            80,
+            "an unbounded read still returns the whole tail"
+        );
+    }
+
+    #[test]
+    fn readers_are_reused_across_calls_without_changing_what_they_answer() {
+        let (_d, s) = store();
+        for _ in 0..5 {
+            s.append_event("r", "t", "daemon", EventType::CacheHit, Scene::daemon(), serde_json::json!({"n": 1}))
+                .unwrap();
+        }
+        for _ in 0..20 {
+            assert_eq!(s.events_since("r", 0).unwrap().len(), 5);
+            assert_eq!(s.head_seq("r").unwrap(), 5);
+        }
+        s.append_event("r", "t", "daemon", EventType::CacheHit, Scene::daemon(), serde_json::json!({"n": 2}))
+            .unwrap();
+        assert_eq!(
+            s.head_seq("r").unwrap(),
+            6,
+            "a pooled reader must still see writes that landed after it was parked"
+        );
+    }
+
+    #[test]
     fn event_round_trips_through_sqlite() {
         let (_d, s) = store();
         let sent = s
@@ -1001,6 +1105,45 @@ mod scale_probe {
         }
         let wrote = started.elapsed();
         (dir, s, wrote)
+    }
+
+    #[test]
+    #[ignore]
+    fn a_long_run_can_be_written_to_a_named_database_for_the_http_probes() {
+        let path = match std::env::var("SEED_DB") {
+            Ok(p) => p,
+            Err(_) => {
+                println!("set SEED_DB=<path> and SEED_EVENTS=<n> to seed a database");
+                return;
+            }
+        };
+        let count: u64 = std::env::var("SEED_EVENTS").ok().and_then(|v| v.parse().ok()).unwrap_or(50_000);
+        let run = std::env::var("SEED_RUN").unwrap_or_else(|_| "probe_run".to_string());
+
+        let s = Store::open(&path).unwrap();
+        let data = serde_json::json!({
+            "tool": "Read",
+            "args_digest": "b3:6f1c2d9a4b7e0f3358c1d2e4a5b6c7d8",
+            "bytes": 4096,
+            "ok": true
+        });
+        let started = Instant::now();
+        for i in 0..count {
+            let ty = if i % 7 == 0 { EventType::ToolResult } else { EventType::ToolCall };
+            s.append_event(
+                &run,
+                "2026-07-25T09:12:44.118Z",
+                format!("gameplay_engineer#{}", i % 13),
+                ty,
+                Scene::desk("engineering", "gameplay_engineer#1"),
+                data.clone(),
+            )
+            .unwrap();
+        }
+        println!(
+            "wrote {count} events into run {run} at {path} in {:.0}ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
     }
 
     #[test]
