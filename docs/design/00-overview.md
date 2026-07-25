@@ -140,4 +140,9 @@ Start here, then [02 context-engine](02-context-engine.md) for the token story, 
 | 11 | [index-and-bootstrap](11-index-and-bootstrap.md) | **index** SQLite schema, detection |
 | 12 | [visual-workspace](12-visual-workspace.md) | studio floor, event→visual mapping |
 | 13 | [risks](13-risks.md) | consolidated risk register |
+| 14 | [settings-and-providers](14-settings-and-providers.md) | per-tier and per-role models, music, **the provider capability table** |
+| 15 | [guided-runs](15-guided-runs.md) | the plan a human edits, interrupts, step confirmation |
+| 16 | [adopting-a-game](16-adopting-a-game.md) | listing, adopting and summarising a game |
+| 17 | [version-control](17-version-control.md) | the commit tree, push, rollback |
+| 18 | [desktop-shell](18-desktop-shell.md) | the native window, the installer, requirements and crash reports |
 | ADR | [0001](adr/0001-claude-cli-as-worker.md) · [0002](adr/0002-thirteen-roles.md) · [0003](adr/0003-top-down-not-isometric.md) *(superseded)* · [0004](adr/0004-explicit-context-control-not-bare.md) · [0005](adr/0005-voxel-3d-floor.md) | decision records |

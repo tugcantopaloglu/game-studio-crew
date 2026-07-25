@@ -65,4 +65,4 @@ This constraint is load-bearing enough that it killed the design's original toke
 
 ## Documents
 
-Start with [`docs/design/00-overview.md`](docs/design/00-overview.md). The full set (14 design docs + 4 ADRs) is indexed there.
+Start with [`docs/design/00-overview.md`](docs/design/00-overview.md). The full set (19 design docs + 5 ADRs) is indexed there.
