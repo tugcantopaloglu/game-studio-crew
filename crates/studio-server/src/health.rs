@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use studio_core::{Provider, RoleNeeds};
 
 use crate::AppState;
 
@@ -40,16 +41,21 @@ pub struct Tool {
     pub kind: Kind,
     pub present: bool,
     pub version: Option<String>,
+    pub drivable: bool,
+    pub cannot_drive: Option<String>,
 }
 
 impl Tool {
     pub fn found(name: &str, label: &str, kind: Kind, version: Option<String>) -> Self {
+        let (drivable, cannot_drive) = drive_status(name, kind);
         Self {
             name: name.into(),
             label: label.into(),
             kind,
             present: true,
             version,
+            drivable,
+            cannot_drive,
         }
     }
 
@@ -60,7 +66,25 @@ impl Tool {
             kind,
             present: false,
             version: None,
+            drivable: false,
+            cannot_drive: None,
         }
+    }
+}
+
+fn drive_status(name: &str, kind: Kind) -> (bool, Option<String>) {
+    if kind != Kind::CodingCli {
+        return (false, None);
+    }
+    match Provider::from_id(name) {
+        None => (
+            false,
+            Some(format!("the studio has no provider for {name}")),
+        ),
+        Some(provider) => match provider.blockers(RoleNeeds::default()).first() {
+            None => (true, None),
+            Some(why) => (false, Some((*why).to_string())),
+        },
     }
 }
 
@@ -69,18 +93,20 @@ pub struct Requirements {
     pub app_version: String,
     pub os: String,
     pub ready: bool,
+    pub can_spawn: bool,
     pub tools: Vec<Tool>,
 }
 
 impl Requirements {
     pub fn new(tools: Vec<Tool>) -> Self {
-        let ready = tools
-            .iter()
-            .any(|t| t.kind == Kind::CodingCli && t.present);
+        let installed = |t: &&Tool| t.kind == Kind::CodingCli && t.present;
+        let ready = tools.iter().any(|t| installed(&t));
+        let can_spawn = tools.iter().any(|t| installed(&t) && t.drivable);
         Self {
             app_version: env!("CARGO_PKG_VERSION").into(),
             os: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
             ready,
+            can_spawn,
             tools,
         }
     }
@@ -93,6 +119,20 @@ impl Requirements {
         self.of_kind(Kind::CodingCli)
             .filter(|t| t.present)
             .map(|t| t.name.as_str())
+            .collect()
+    }
+
+    pub fn coding_clis_the_studio_can_drive(&self) -> Vec<&str> {
+        self.of_kind(Kind::CodingCli)
+            .filter(|t| t.present && t.drivable)
+            .map(|t| t.name.as_str())
+            .collect()
+    }
+
+    pub fn installed_but_undrivable(&self) -> Vec<(&str, &str)> {
+        self.of_kind(Kind::CodingCli)
+            .filter(|t| t.present && !t.drivable)
+            .filter_map(|t| t.cannot_drive.as_deref().map(|why| (t.name.as_str(), why)))
             .collect()
     }
 }
@@ -230,6 +270,58 @@ mod tests {
     }
 
     #[test]
+    fn installed_and_drivable_are_two_different_facts() {
+        let report = with(vec![
+            Tool::found("gemini", "gemini", Kind::CodingCli, Some("0.4".into())),
+            Tool::found("codex", "codex", Kind::CodingCli, Some("0.9".into())),
+        ]);
+        assert!(report.ready, "the user chose to install on any coding CLI");
+        assert!(
+            !report.can_spawn,
+            "neither can take a frozen charter, so no worker can start"
+        );
+        assert!(report.coding_clis_the_studio_can_drive().is_empty());
+
+        let excuses = report.installed_but_undrivable();
+        assert_eq!(excuses.len(), 2);
+        assert!(
+            excuses.iter().any(|(name, why)| *name == "codex" && why.contains("no provider")),
+            "codex has no provider at all: {excuses:?}"
+        );
+        assert!(
+            excuses.iter().any(|(name, why)| *name == "gemini" && why.contains("system prompt")),
+            "gemini's blocker must come from the provider table: {excuses:?}"
+        );
+    }
+
+    #[test]
+    fn the_drive_verdict_comes_from_the_provider_table_not_from_here() {
+        for provider in Provider::ALL {
+            let tool = Tool::found(provider.id(), provider.title(), Kind::CodingCli, None);
+            assert_eq!(
+                tool.drivable,
+                provider.can_serve(RoleNeeds::default()),
+                "{} disagrees with studio_core::Provider",
+                provider.id()
+            );
+            assert_eq!(tool.drivable, tool.cannot_drive.is_none());
+        }
+    }
+
+    #[test]
+    fn an_absent_cli_is_not_explained_away_as_undrivable() {
+        let report = with(vec![Tool::absent("gemini", "gemini", Kind::CodingCli)]);
+        assert!(report.installed_but_undrivable().is_empty());
+    }
+
+    #[test]
+    fn only_a_coding_cli_is_ever_judged_drivable() {
+        let node = Tool::found("web", "Pure JavaScript", Kind::Engine, Some("v22".into()));
+        assert!(!node.drivable);
+        assert!(node.cannot_drive.is_none(), "an engine is not a worker CLI");
+    }
+
+    #[test]
     fn every_optional_tool_present_is_still_nothing_to_code_with() {
         let report = with(vec![
             Tool::absent("claude", "claude", Kind::CodingCli),
@@ -284,7 +376,9 @@ mod tests {
         )]))
         .unwrap();
         assert!(json.contains("\"ready\":true"));
+        assert!(json.contains("\"can_spawn\":true"));
         assert!(json.contains("\"kind\":\"coding_cli\""));
+        assert!(json.contains("\"drivable\":true"));
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 # 18: Desktop Shell, Install and Crash Reporting
 
-> **Status:** v0.1, 2026-07-25. Built and measured on Windows 11: the shell window runs, the installer compiles and was installed and uninstalled on this machine, `studiod doctor` reports against the real toolchain, and the panic hook writes a redacted report. **Not exercised here:** the spawn path of the shell against a free port (7878 was held by another daemon throughout), and any platform other than Windows.
+> **Status:** v0.2, 2026-07-25. Built and measured on Windows 11: the shell window runs, the installer compiles and was installed and uninstalled on this machine, `studiod doctor` reports against the real toolchain and separates *installed* from *the studio can drive it*, and the panic hook writes a redacted report. **Not exercised here:** the spawn path of the shell against a free port (7878 was held by another daemon throughout), and any platform other than Windows.
 > **Consumes** the studio server ([12](12-visual-workspace.md)) and the process group from `studio-core` ([01](01-orchestrator-core.md)). Owns `desktop/`, `installer/`, `crates/studio-server/src/health.rs`, `crates/studiod/src/doctor.rs` and `crates/studiod/src/crash.rs`.
 
 ## What the shell is
@@ -41,13 +41,21 @@ It reports, present or absent with the version it found:
 
 | Group | Probed | Required |
 |---|---|---|
-| coding CLIs | `claude`, `codex`, `gemini`, `copilot`, `kimi` | **at least one** |
+| coding CLIs | `claude`, `codex`, `gemini`, `copilot`, `kimi` | **at least one installed** |
 | toolchain | `git`, `cargo`, `rustc` | no |
 | engines | every builtin engine profile ([07](07-engine-layer.md)), resolved through `studio_engine::resolve_binary` | no |
 
-Only the coding CLIs are load-bearing. An install with only Codex, or only Claude, is a working install; everything else is reported so you know what you have. Probes run in parallel with a 3 s cap each, which is what keeps the whole check to about four seconds on this machine rather than eighteen. Unity and Unreal are resolved but never executed for a version string — those editors are not safe to launch to print one line — so they read as `present` without a version.
+Only the coding CLIs are load-bearing. Probes run in parallel with a 3 s cap each, which is what keeps the whole check to about four seconds on this machine rather than eighteen. Unity and Unreal are resolved but never executed for a version string — those editors are not safe to launch to print one line — so they read as `present` without a version.
 
-**Exit codes:** `0` ready, `2` nothing to code with. The installer reads that `2` after copying files and shows the doctor's own output; the shell reads it at startup and shows the same text in the window. Nothing else in the studio interprets those codes.
+### Installed and drivable are two different facts
+
+A CLI being on `PATH` does not mean the studio can spawn a worker through it. `gemini` and `copilot` have no flag that replaces the system prompt, so a frozen charter cannot be delivered and the studio refuses to spawn through them; `kimi`'s flags have never been read; `codex` has no provider at all. Today `claude` is the only CLI that can drive the crew.
+
+The doctor reports **both** facts, and never lets the first pass for the second. Each installed CLI is tagged either *the studio spawns workers through this* or *installed, but the studio cannot drive it*, and an install where nothing is drivable prints the per-CLI reason and says to install Claude Code. This exists so nobody installs, sees a tick next to "gemini found", and discovers at the first task that no worker can start.
+
+The verdict is **not this module's opinion**. `drivable` is `studio_core::Provider::can_serve(RoleNeeds::default())` and the reason text is the first line of `Provider::blockers`, so the doctor, the settings panel and the supervisor cannot disagree. A test asserts row by row that the report agrees with `Provider::ALL`. **If the provider table gains a CLI or a capability, this report follows it automatically; the only thing that must be kept in step by hand is the `CODING_CLIS` probe list, which is what decides whether a CLI is looked for at all.**
+
+**Exit codes:** `0` ready and something can spawn, `2` nothing to code with, `3` a coding CLI is installed but the studio can drive none of them. The installer shows the doctor's own output on `2` and on `3`, with a different headline for each. The shell blocks the floor only on `2`: per the user's decision an install with only Gemini is a successful install, so the window opens and the settings panel carries the drivability report rather than the app refusing to start.
 
 ## What the installer touches
 
@@ -96,4 +104,4 @@ The daemon is thirty times the size of the shell because it carries SQLite, tree
 - **Windows only.** The shell compiles for other platforms in principle and `ProcessGroup` has a POSIX path, but nothing here has been run on macOS or Linux, and the installer is Inno Setup.
 - **No app icon.** Shortcuts use the default executable icon.
 - **No auto-update.** Installing a new version over an old one works; nothing checks for one.
-- **The spawn path was never run end to end on this machine.** Port 7878 was occupied by another daemon for the whole session, so the shell was verified on its attach path, and the spawn path by unit tests only.
+- **The spawn path was never run end to end on this machine.** Port 7878 was held for the whole session by a `studiod studio` the user had started themselves. The user approved stopping it for a minute, but the permission gate refused the kill and that is not something to work around, so the shell was verified live on its attach path and the spawn, port-wait and kill-tree path by unit tests only. `ProcessGroup` itself is proven by the supervisor ([01](01-orchestrator-core.md)).

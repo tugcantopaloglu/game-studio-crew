@@ -1,6 +1,7 @@
 use studio_server::health::{self, Kind, Requirements};
 
 pub const NOTHING_TO_CODE_WITH: i32 = 2;
+pub const NOTHING_THE_STUDIO_CAN_DRIVE: i32 = 3;
 
 pub fn report() -> anyhow::Result<()> {
     let found = health::probe();
@@ -13,10 +14,10 @@ pub fn report() -> anyhow::Result<()> {
 }
 
 fn exit_code(found: &Requirements) -> i32 {
-    if found.ready {
-        0
-    } else {
-        NOTHING_TO_CODE_WITH
+    match (found.ready, found.can_spawn) {
+        (false, _) => NOTHING_TO_CODE_WITH,
+        (true, false) => NOTHING_THE_STUDIO_CAN_DRIVE,
+        (true, true) => 0,
     }
 }
 
@@ -27,45 +28,69 @@ fn render(found: &Requirements) -> String {
         found.app_version, found.os
     ));
 
-    let column = found
+    let rows: Vec<(Kind, String, String, &str)> = found
         .tools
         .iter()
-        .map(|t| t.label.chars().count())
-        .max()
-        .unwrap_or(0)
-        .max(8);
-
-    for kind in Kind::ALL {
-        out.push('\n');
-        out.push_str(kind.heading());
-        out.push('\n');
-        for tool in found.of_kind(kind) {
+        .map(|tool| {
             let state = match (&tool.present, &tool.version) {
                 (true, Some(v)) => v.clone(),
                 (true, None) => "present".into(),
                 (false, _) => "absent".into(),
             };
-            out.push_str(&format!(
-                "  {:<width$}  {}\n",
-                tool.label,
-                state,
-                width = column
-            ));
+            let tag = match (tool.kind, tool.present, tool.drivable) {
+                (Kind::CodingCli, true, true) => "the studio spawns workers through this",
+                (Kind::CodingCli, true, false) => "installed, but the studio cannot drive it",
+                _ => "",
+            };
+            (tool.kind, tool.label.clone(), state, tag)
+        })
+        .collect();
+
+    let widest = |pick: fn(&(Kind, String, String, &str)) -> usize| {
+        rows.iter().map(pick).max().unwrap_or(0).max(8)
+    };
+    let labels = widest(|r| r.1.chars().count());
+    let states = widest(|r| r.2.chars().count());
+
+    for kind in Kind::ALL {
+        out.push('\n');
+        out.push_str(kind.heading());
+        out.push('\n');
+        for (_, label, state, tag) in rows.iter().filter(|r| r.0 == kind) {
+            let line = format!("  {label:<labels$}  {state:<states$}  {tag}");
+            out.push_str(line.trim_end());
+            out.push('\n');
         }
     }
 
     out.push('\n');
-    if found.ready {
-        out.push_str(&format!(
-            "ready: the studio can drive {}.\n",
-            found.coding_clis_found().join(", ")
-        ));
-        out.push_str("anything reported absent above is optional; the studio runs without it.\n");
-    } else {
+    if !found.ready {
         out.push_str("nothing to code with. Install one of ");
         out.push_str(&health::CODING_CLIS.join(", "));
         out.push_str(" and put it on PATH,\nthen run studiod doctor again.\n");
+        return out;
     }
+
+    out.push_str(&format!(
+        "installed: {}\n",
+        found.coding_clis_found().join(", ")
+    ));
+
+    if found.can_spawn {
+        out.push_str(&format!(
+            "the studio can spawn workers through: {}\n",
+            found.coding_clis_the_studio_can_drive().join(", ")
+        ));
+    } else {
+        out.push_str("but nothing installed can run the crew yet:\n");
+        for (name, why) in found.installed_but_undrivable() {
+            out.push_str(&format!("  {name}: {why}\n"));
+        }
+        out.push_str("\nInstall Claude Code and put claude on PATH; it is the only CLI the studio\n");
+        out.push_str("can hand a frozen charter to today.\n");
+    }
+
+    out.push_str("anything else reported absent above is optional; the studio runs without it.\n");
     out
 }
 
@@ -94,7 +119,7 @@ mod tests {
             0,
             "a missing engine must not stop an install that can code"
         );
-        assert!(text.contains("ready: the studio can drive claude."));
+        assert!(text.contains("the studio can spawn workers through: claude"));
     }
 
     #[test]
@@ -115,13 +140,45 @@ mod tests {
     }
 
     #[test]
+    fn a_cli_that_is_installed_but_undrivable_is_never_reported_as_a_green_tick() {
+        let found = Requirements::new(vec![
+            Tool::absent("claude", "claude", Kind::CodingCli),
+            Tool::found("gemini", "gemini", Kind::CodingCli, Some("0.4.1".into())),
+        ]);
+        let text = render(&found);
+
+        assert_eq!(
+            exit_code(&found),
+            NOTHING_THE_STUDIO_CAN_DRIVE,
+            "an install with only gemini succeeds but cannot run the crew"
+        );
+        assert!(text.contains("installed, but the studio cannot drive it"));
+        assert!(text.contains("but nothing installed can run the crew yet"));
+        assert!(
+            text.contains("system prompt"),
+            "the reason must be the provider table's own words: {text}"
+        );
+        assert!(text.contains("Install Claude Code"));
+        assert!(
+            !text.contains("the studio can spawn workers through"),
+            "nothing may read as ready to spawn: {text}"
+        );
+    }
+
+    #[test]
     fn an_install_with_only_codex_reports_what_it_has_and_proceeds() {
         let found = Requirements::new(vec![
             Tool::absent("claude", "claude", Kind::CodingCli),
             Tool::found("codex", "codex", Kind::CodingCli, Some("0.9.1".into())),
         ]);
-        assert_eq!(exit_code(&found), 0);
-        assert!(render(&found).contains("ready: the studio can drive codex."));
+        assert_ne!(
+            exit_code(&found),
+            NOTHING_TO_CODE_WITH,
+            "codex on PATH is still a successful install"
+        );
+        let text = render(&found);
+        assert!(text.contains("installed: codex"));
+        assert!(text.contains("codex: the studio has no provider for codex"));
     }
 
     #[test]

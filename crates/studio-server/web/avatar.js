@@ -121,6 +121,7 @@ class Rig {
     this.glance = 0;
     this.glanceAt = 0;
     this.lean = 0;
+    this.owed = 0;
   }
 
   step(i, thigh, u, blend, dt) {

@@ -336,6 +336,16 @@ impl Store {
         Ok(conn)
     }
 
+    pub fn head_seq(&self, run: &str) -> Result<u64> {
+        let conn = self.reader()?;
+        let head: Option<i64> = conn.query_row(
+            "SELECT MAX(seq) FROM events WHERE run = ?1",
+            params![run],
+            |r| r.get(0),
+        )?;
+        Ok(head.unwrap_or(0) as u64)
+    }
+
     pub fn events_since(&self, run: &str, since_seq: u64) -> Result<Vec<Envelope>> {
         let conn = self.reader()?;
         let mut stmt = conn.prepare(
@@ -959,6 +969,98 @@ mod tests {
             "t",
         );
         assert!(err.is_err());
+    }
+}
+
+#[cfg(test)]
+mod scale_probe {
+    use super::*;
+    use std::time::Instant;
+
+    fn seeded(events: u64) -> (tempfile::TempDir, Store, std::time::Duration) {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path().join("studio-state.db")).unwrap();
+        let data = serde_json::json!({
+            "tool": "Read",
+            "args_digest": "b3:6f1c2d9a4b7e0f3358c1d2e4a5b6c7d8",
+            "bytes": 4096,
+            "ok": true
+        });
+        let started = Instant::now();
+        for i in 0..events {
+            let ty = if i % 7 == 0 { EventType::ToolResult } else { EventType::ToolCall };
+            s.append_event(
+                "r",
+                "2026-07-25T09:12:44.118Z",
+                format!("gameplay_engineer#{}", i % 13),
+                ty,
+                Scene::desk("engineering", "gameplay_engineer#1"),
+                data.clone(),
+            )
+            .unwrap();
+        }
+        let wrote = started.elapsed();
+        (dir, s, wrote)
+    }
+
+    #[test]
+    #[ignore]
+    fn reading_a_long_run_costs_what_the_slice_costs_not_what_the_log_costs() {
+        println!("events    write      whole log   tail of 100   head only");
+        for n in [1_000u64, 10_000, 50_000] {
+            let (_d, s, wrote) = seeded(n);
+
+            let t = Instant::now();
+            let all = s.events_since("r", 0).unwrap();
+            let whole = t.elapsed();
+            assert_eq!(all.len() as u64, n);
+
+            let t = Instant::now();
+            let tail = s.events_since("r", n - 100).unwrap();
+            let slice = t.elapsed();
+            assert_eq!(tail.len(), 100);
+
+            let t = Instant::now();
+            let head = s.head_seq("r").unwrap();
+            let only_head = t.elapsed();
+            assert_eq!(head, n);
+
+            println!(
+                "{n:<9} {:>7.1}ms {:>9.2}ms {:>11.3}ms {:>10.3}ms",
+                wrote.as_secs_f64() * 1000.0,
+                whole.as_secs_f64() * 1000.0,
+                slice.as_secs_f64() * 1000.0,
+                only_head.as_secs_f64() * 1000.0,
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn a_reconnecting_client_pays_for_the_backlog_it_asked_for() {
+        let (_d, s, _) = seeded(50_000);
+        let reconnects = 20;
+
+        let t = Instant::now();
+        for _ in 0..reconnects {
+            let all = s.events_since("r", 0).unwrap();
+            let head = all.last().map(|e| e.seq).unwrap_or(0);
+            let _tail: Vec<Envelope> = all.into_iter().filter(|e| e.seq > head - 5).collect();
+        }
+        let whole_log_each_time = t.elapsed();
+
+        let t = Instant::now();
+        for _ in 0..reconnects {
+            let head = s.head_seq("r").unwrap();
+            let _tail = s.events_since("r", head - 5).unwrap();
+        }
+        let bounded = t.elapsed();
+
+        println!(
+            "{reconnects} reconnects to a 50000-event run: whole log each time {:.1}ms, bounded {:.1}ms",
+            whole_log_each_time.as_secs_f64() * 1000.0,
+            bounded.as_secs_f64() * 1000.0,
+        );
     }
 }
 

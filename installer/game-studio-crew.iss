@@ -79,13 +79,19 @@ begin
     '/C ""' + ExpandConstant('{app}\{#DaemonExe}') + '" doctor > "' + ReportPath + '""',
     '', SW_HIDE, ewWaitUntilTerminated, Code) then
     Exit;
-  if Code <> 2 then
+  if (Code <> 2) and (Code <> 3) then
     Exit;
   if not LoadStringFromFile(ReportPath, Report) then
     Report := '';
-  MsgBox('Game Studio Crew is installed, but there is nothing to code with yet.'
-    + #13#10 + 'Install one coding CLI, put it on PATH, and it will pick it up.'
-    + #13#10#13#10 + String(Report), mbError, MB_OK);
+  if Code = 2 then
+    MsgBox('Game Studio Crew is installed, but there is nothing to code with yet.'
+      + #13#10 + 'Install one coding CLI, put it on PATH, and it will pick it up.'
+      + #13#10#13#10 + String(Report), mbError, MB_OK)
+  else
+    MsgBox('Game Studio Crew is installed and it found a coding CLI, but it cannot drive'
+      + #13#10 + 'any of the ones you have, so no worker can start yet. The report below says'
+      + #13#10 + 'why for each. Install Claude Code and put claude on PATH to fix it.'
+      + #13#10#13#10 + String(Report), mbError, MB_OK);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
