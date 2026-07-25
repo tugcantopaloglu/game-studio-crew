@@ -20,6 +20,7 @@
     --info: #6fa8d1;
     --glass: rgba(11,13,18,.72);
     --shadow: 0 10px 30px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.35);
+    --side-w: clamp(360px, 25vw, 560px);
     --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
     --mono: "Cascadia Code", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
@@ -28,7 +29,7 @@
   html, body { height: 100%; }
   body { margin: 0; background: var(--bg); color: var(--text);
     font: 12.5px/1.55 var(--sans);
-    display: grid; grid-template-columns: 1fr 344px; overflow: hidden; }
+    display: grid; grid-template-columns: 1fr var(--side-w); overflow: hidden; }
   ::selection { background: rgba(74,217,145,.25); }
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -45,9 +46,12 @@
   .sec { font-size: 10px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase;
     color: var(--faint); }
 
-  #side { border-left: 1px solid var(--line-2); min-height: 0; overflow-y: auto;
+  #side { position: relative; border-left: 1px solid var(--line-2); min-height: 0; overflow-y: auto;
     background: linear-gradient(180deg, var(--panel-2), var(--panel) 140px);
-    display: flex; flex-direction: column; }
+    display: flex; flex-direction: column; min-width: 0; }
+  #grip { position: absolute; left: -3px; top: 0; bottom: 0; width: 7px; z-index: 9;
+    cursor: col-resize; }
+  #grip:hover, #grip.dragging { background: rgba(74,217,145,.35); }
   header { padding: 14px 16px 12px; border-bottom: 1px solid var(--line);
     display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   h1 { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase;
@@ -76,6 +80,9 @@
 
   #feed-head { padding: 10px 16px 6px; }
   #feed { overflow-y: auto; padding: 0 6px 6px; min-height: 120px; flex: 1; }
+  #feed:empty { min-height: 0; flex: 0 0 auto; padding: 0; }
+  #feed:empty::before { content: "nothing has happened yet"; display: block;
+    padding: 0 10px 8px; color: var(--faint); font-size: 11.5px; }
   .ev { padding: 2.5px 10px; margin: 0 0 1px; border-radius: 6px;
     display: grid; grid-template-columns: 34px 1fr; gap: 9px; align-items: baseline;
     font-family: var(--mono); font-size: 11.5px; }
@@ -136,12 +143,15 @@
   #tabs button.on { color: var(--text); background: var(--field);
     border-color: var(--line-2); border-bottom-color: transparent; }
 
-  .panel { padding: 12px 16px; display: grid; gap: 8px; }
+  .panel { padding: 12px 16px; display: grid; gap: 8px; min-width: 0; }
+  .panel *, #compose * { min-width: 0; }
   .panel .sec { margin-bottom: 2px; }
-  .panel .hint { color: var(--faint); font-size: 11.5px; }
-  .panel .row { display: grid; grid-template-columns: 1fr auto; gap: 7px; align-items: center; }
-  .panel .field { display: grid; gap: 3px; }
-  .panel label { color: var(--dim); font-size: 11.5px; }
+  .panel .hint { color: var(--faint); font-size: 11.5px; overflow-wrap: anywhere; }
+  .panel .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; align-items: center; }
+  .panel .field { display: grid; gap: 3px; min-width: 0; }
+  .panel label { color: var(--dim); font-size: 11.5px; overflow-wrap: anywhere; }
+  .panel .card { overflow-wrap: anywhere; }
+  .panel select, .panel input[type=text], .panel input[type=number], .panel textarea { width: 100%; }
   .panel select, .panel input[type=text], .panel input[type=number], .panel textarea, .panel button {
     font: inherit; font-size: 12.5px; background: var(--field); color: var(--text);
     border: 1px solid var(--line-2); border-radius: 8px; padding: 6px 9px; }
@@ -320,6 +330,7 @@
   @media (max-width: 720px) {
     body { grid-template-columns: 1fr; grid-template-rows: 44vh minmax(0, 1fr); }
     #side { border-left: none; border-top: 1px solid var(--line-2); }
+    #grip { display: none; }
     #track { right: 14px; }
     #scrub { right: 14px; }
     #scrub input { width: auto; flex: 1; min-width: 70px; }
@@ -358,6 +369,7 @@
   <canvas id="minimap" width="150" height="98"></canvas>
 </div>
 <div id="side">
+  <div id="grip" title="drag to resize"></div>
   <header><h1>Studio Floor</h1><div id="conn">connecting</div></header>
   <div id="stats">
     <div class="sec">telemetry</div>
@@ -754,6 +766,46 @@ function hoverTest(e) {
   tip.style.left = Math.min(e.clientX - r.left + 14, r.width - 300) + "px";
   tip.style.top = (e.clientY - r.top + 14) + "px";
 }
+
+const MIN_SIDE = 300;
+const grip = document.getElementById("grip");
+
+function setSideWidth(px) {
+  const room = Math.max(MIN_SIDE, Math.min(px, innerWidth - 320));
+  document.documentElement.style.setProperty("--side-w", room + "px");
+  try {
+    localStorage.setItem("studio.sideWidth", String(room));
+  } catch (err) {
+    return room;
+  }
+  return room;
+}
+
+try {
+  const remembered = Number(localStorage.getItem("studio.sideWidth"));
+  if (remembered >= MIN_SIDE) setSideWidth(remembered);
+} catch (err) {
+  /* the default clamp stands */
+}
+
+grip.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  grip.classList.add("dragging");
+  grip.setPointerCapture(e.pointerId);
+
+  const move = (m) => {
+    setSideWidth(innerWidth - m.clientX);
+    resize();
+  };
+  const up = () => {
+    grip.classList.remove("dragging");
+    grip.removeEventListener("pointermove", move);
+    grip.removeEventListener("pointerup", up);
+    resize();
+  };
+  grip.addEventListener("pointermove", move);
+  grip.addEventListener("pointerup", up);
+});
 
 function resize() {
   const w = stage.clientWidth, h = stage.clientHeight;
