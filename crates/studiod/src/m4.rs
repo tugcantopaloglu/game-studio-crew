@@ -298,11 +298,19 @@ fn run_worker_inner(
     let worker = Worker::spawn_in("claude", &spec.to_args(), brief, em.project.as_deref())
         .with_context(|| format!("failed to spawn a worker for {}", role.id))?;
 
+    let thoughts = std::sync::Mutex::new(crate::thought::Stream::new());
     let report = worker.drive(&limits_for(acting), |ev| {
         if let Some((ty, data)) = map_cli_event(ev) {
             let _ = em.emit(&actor, ty, scene.clone(), data);
         }
+        if let Some((ty, data)) = thoughts.lock().unwrap().observe(ev, role.id) {
+            let _ = em.emit(&actor, ty, scene.clone(), data);
+        }
     })?;
+
+    if let Some((ty, data)) = thoughts.lock().unwrap().flush(role.id) {
+        let _ = em.emit(&actor, ty, scene.clone(), data);
+    }
 
     let usage = report.state.usage.unwrap_or_default();
     em.store.record_usage(

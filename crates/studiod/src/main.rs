@@ -7,6 +7,7 @@ mod m4;
 mod skills;
 mod studio;
 mod survey;
+mod thought;
 mod wf;
 mod tools;
 
