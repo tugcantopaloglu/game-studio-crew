@@ -11,6 +11,7 @@ use studio_events::{plan_resume, Coalescer, Envelope, ResumePlan};
 use studio_store::Store;
 use tokio::sync::broadcast;
 
+pub mod assets;
 pub mod fsapi;
 pub mod games;
 pub mod gitapi;
@@ -289,6 +290,7 @@ pub fn router(state: AppState) -> Router {
         .route("/shot", get(latest_shot))
         .route("/revert", post(revert))
         .merge(web::routes())
+        .merge(assets::routes())
         .merge(fsapi::routes())
         .merge(settings::routes())
         .merge(games::routes())
