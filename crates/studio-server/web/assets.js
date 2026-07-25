@@ -7,7 +7,74 @@ let host = null;
 let busy = false;
 let lastResult = null;
 
-const asked = { kind: "character", name: "", description: "", reference: "" };
+const asked = {
+  kind: "character",
+  name: "",
+  description: "",
+  reference: "",
+  overwrite: false,
+};
+
+function firstArray(value) {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return null;
+  for (const key of ["models", "candidates", "entries"]) {
+    if (Array.isArray(value[key])) return value[key];
+  }
+  return null;
+}
+
+function statusOf(row) {
+  const raw = row.status === undefined ? row.state : row.status;
+  const text = String(raw === undefined ? "" : raw).toLowerCase();
+  if (raw === true || text.includes("verified") || text.includes("working")) return "verified";
+  if (text.includes("refus") || text.includes("denied") || raw === false) return "refused";
+  return "unknown";
+}
+
+export function codexModels(payload) {
+  if (!payload) return [];
+  let rows = null;
+
+  const providers = firstArray(payload.providers) || (Array.isArray(payload) ? payload : null);
+  if (providers) {
+    const codex = providers.find(
+      (p) => p && (p.id === "codex" || p.provider === "codex" || p.program === "codex")
+    );
+    if (codex) rows = firstArray(codex) || firstArray(codex.models);
+    if (!rows && providers.some((p) => p && p.provider === "codex")) {
+      rows = providers.filter((p) => p.provider === "codex");
+    }
+  }
+  if (!rows) rows = firstArray(payload.codex);
+  if (!rows) return [];
+
+  const out = [];
+  for (const row of rows) {
+    if (!row) continue;
+    const name = typeof row === "string" ? row : row.model || row.id || row.name;
+    if (!name) continue;
+    out.push({
+      model: String(name),
+      status: typeof row === "string" ? "unknown" : statusOf(row),
+      reason: (row && (row.reason || row.why)) || "",
+      checked: (row && (row.checked_at || row.last_checked || row.checked)) || "",
+    });
+  }
+  return out;
+}
+
+function statusLabel(entry) {
+  if (entry.status === "verified") return "verified";
+  if (entry.status === "refused") return "refused";
+  return "not checked";
+}
+
+function statusClass(entry) {
+  if (entry.status === "verified") return "ok";
+  if (entry.status === "refused") return "bad";
+  return "hint";
+}
 
 function store(key, value) {
   settings.set(key, value);
@@ -183,6 +250,7 @@ async function submit(view, button) {
         name: asked.name,
         description: asked.description,
         reference: asked.reference,
+        overwrite: asked.overwrite,
       },
     });
     toast(lastResult.ok ? "generated " + lastResult.name : "codex could not do it");
@@ -192,6 +260,58 @@ async function submit(view, button) {
   }
   busy = false;
   redraw();
+}
+
+function modelField(view) {
+  const box = el("div", { style: "display:grid;gap:5px" });
+  const known = view.models || [];
+  const listId = "codex-model-suggestions";
+
+  const input = el("input", {
+    type: "text",
+    list: listId,
+    placeholder: view.default_model || "",
+    value: settings.get(MODEL, "") || "",
+    onchange: (e) => store(MODEL, e.target.value),
+  });
+  box.append(field("codex model", input));
+
+  if (known.length) {
+    const list = el("datalist", { id: listId });
+    for (const entry of known) list.append(el("option", { value: entry.model }));
+    box.append(list);
+
+    const row = el("div", { class: "row", style: "flex-wrap:wrap;gap:4px" });
+    for (const entry of known) {
+      row.append(
+        el("span", {
+          class: statusClass(entry),
+          style: "font-size:10.5px",
+          title: entry.reason || (entry.checked ? "last checked " + entry.checked : ""),
+          text: entry.model + " · " + statusLabel(entry),
+        })
+      );
+    }
+    box.append(row);
+  } else {
+    box.append(
+      el("div", {
+        class: "hint",
+        text: "no model probe has reported yet, so type a model name; codex debug models lists what this account may use",
+      })
+    );
+  }
+
+  box.append(
+    el("div", {
+      class: "hint",
+      style: "line-height:1.45",
+      text: view.model_note
+        ? view.model_note + ". In force now: " + view.model
+        : "in force now: " + view.model,
+    })
+  );
+  return box;
 }
 
 function form(view) {
@@ -239,14 +359,21 @@ function form(view) {
   );
 
   box.append(el("div", { class: "hint", text: destinationLine(view) }));
+  box.append(modelField(view));
 
-  const model = el("input", {
-    type: "text",
-    placeholder: "the codex default",
-    value: settings.get(MODEL, "") || "",
-    onchange: (e) => store(MODEL, e.target.value),
-  });
-  box.append(field("codex model", model));
+  const replace = el("input", { type: "checkbox" });
+  replace.checked = asked.overwrite;
+  replace.onchange = () => {
+    asked.overwrite = replace.checked;
+  };
+  box.append(
+    el(
+      "label",
+      { class: "check" },
+      replace,
+      el("span", { text: "replace the file if one is already there" })
+    )
+  );
 
   const button = el("button", {
     text: "generate",
@@ -262,11 +389,20 @@ function form(view) {
   return box;
 }
 
+async function discoverModels() {
+  try {
+    return codexModels(await api("/models"));
+  } catch (err) {
+    return [];
+  }
+}
+
 async function load() {
   const id = project();
   const query = id ? "/assets?project=" + encodeURIComponent(id) : "/assets";
   const view = await api(query);
   view.projectId = id;
+  view.models = await discoverModels();
   return view;
 }
 

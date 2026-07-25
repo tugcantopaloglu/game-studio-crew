@@ -21,9 +21,19 @@ So **codex cannot produce a raster image.** It reads images and writes code. Tha
 
 Anything in the UI or in a charter that implied codex draws pictures would be a lie the studio told its user, so `GET /assets` carries the sentence "codex cannot draw a picture" and the panel prints it.
 
-### Four more measurements that changed the design
+## codex is a pure generator; the daemon owns every byte that reaches disk
 
-**`codex exec --sandbox workspace-write` reported `sandbox: read-only` in its own session header on this Windows box.** So codex is not asked to write files. It is asked for the source text through `--output-schema`, and **the daemon writes the file**. That is better anyway: the destination is the one the engine profile dictates, not one the model chose, and a generation that fails cannot have left a half-written file in the project.
+This is the load-bearing rule of the feature, and it is not a workaround. It is the same invariant the studio already holds everywhere else: **no worker runs git, and no worker writes outside what the daemon sanctions** ([03](03-state-store.md), [10](10-standards-and-trust.md)). Commits are daemon-side for exactly this reason. Asset generation is the same shape — codex is handed a brief and returns text, and the daemon decides whether that text becomes a file, which file, and where.
+
+Three consequences, each of them tested:
+
+1. **The destination is derived from the engine profile, never from the model.** `plan_for(engine, slug)` produces it; codex is told the path only so its prose can be accurate about the export step. Nothing codex returns can redirect the write.
+2. **The path is validated to stay inside the project root.** `inside(project, relative)` accepts only `Component::Normal` parts, so an absolute path, a `..`, or a drive prefix is refused before any write. The slug feeding it is already `[a-z0-9_]` only, so this is belt and braces — and `a_slug_cannot_be_crafted_to_write_outside_the_models_directory` asserts both halves, because the day someone loosens `slugify` the containment check is what still holds.
+3. **A generated factory never replaces an existing file unless the caller asked.** `Request::overwrite` defaults to `false` and the panel surfaces it as an explicit "replace the file if one is already there" tick. The refusal happens **before codex is invoked**, so a collision costs nothing. `a_generated_asset_never_replaces_hand_written_art_unless_it_was_asked_to` plants a hand-written factory, asks for the same slug, and asserts the file is byte-identical afterwards and that no working directory was even created. A generator that can silently clobber hand-made art is worse than no generator.
+
+### Four measurements that shaped this
+
+**`codex exec --sandbox workspace-write` reported `sandbox: read-only` in its own session header on this Windows box.** Recorded here because the next person will otherwise assume that flag can be relied on: it cannot, at least not here. It is *not* the reason for the rule above — the rule would stand on a machine where the sandbox honoured the flag — but it does mean that asking codex to write the file would have failed anyway.
 
 **`codex exec` hangs forever if its stdin is left open.** The first real run died at the ten-minute cap with `Reading additional input from stdin...` and nothing else in the log: given a prompt argument *and* an open pipe, codex waits for EOF on the pipe before it starts. `run_codex` therefore sets `Stdio::null()`. This is the kind of thing [ADR 0004](adr/0004-explicit-context-control-not-bare.md) is about — the flag documentation says stdin is "appended as a `<stdin>` block" and does not mention that an unclosed pipe is a deadlock.
 
@@ -53,9 +63,27 @@ The three things that can block it:
 | Key | Value | Default | Changes |
 |---|---|---|---|
 | `assets.enabled` | bool | **`false`** | whether the crew may spend Codex budget on assets |
-| `assets.model` | free text | unset | the `-m` handed to codex; unset means the codex default |
+| `assets.model` | free text | **`gpt-5.6-sol`** | the `-m` handed to codex |
 
 Flat keys in `.studio/settings.json`, read through `studio_settings::Settings`, written by the panel through the existing `POST /settings` merge. Nothing new persists anywhere else.
+
+### The model is always passed explicitly, and never left to codex's config
+
+`-m` is on every invocation. This is not tidiness: on the machine this was built on the user's `~/.codex/config.toml` pins `gpt-5.2-codex`, which **their own account refuses**, so a bare `codex exec` fails for them regardless of this feature. Falling back to "whatever codex is configured to do" would have made the studio's most common failure a stale line in a file it does not own. `model_in` resolves `assets.model`, treats whitespace as unset, and otherwise returns `DEFAULT_MODEL`.
+
+`DEFAULT_MODEL` is `gpt-5.6-sol` — codex's own default and, per its picker, the "latest frontier agentic coding model". The studio does not second-guess the user's tooling about which model it should prefer.
+
+**Model availability is per account and it moves.** No closed list is hard-coded. The panel's model field is free text, and its suggestions come from `GET /models` — the shared per-provider probe owned by [14](14-settings-and-providers.md) — read defensively: the panel understands several plausible payload shapes, and when it understands none of them it offers **no** suggestions rather than inventing any. Crucially, a model is labelled `verified` only when the probe says so; anything unprobed reads as **not checked**, never as working. When the route is absent entirely the field still works, defaulted, and says that no probe has reported yet.
+
+### The failure this feature will actually hit
+
+A refused model, and it gets its own diagnosis rather than a generic failure:
+
+> codex refused the model gpt-5.2-codex. That is a restriction on this ChatGPT account, not a fault in the studio, and codex said so in these words: "The 'gpt-5.2-codex' model is not supported when using Codex with a ChatGPT account." Run `codex debug models` to see which models this account may use, then put one in assets.model in the assets panel.
+
+The model name is in it, the blame is placed where it belongs, and **codex's own sentence survives verbatim** so the user can search for it. `a_refused_model_is_named_and_blamed_on_the_account_rather_than_on_the_studio` pins all four of those properties.
+
+One piece of noise deliberately *not* diagnosed: the user's config registers an MCP server `unityMCP` on `127.0.0.1:8080` which is not running, so every codex invocation logs `HTTP 404 Cannot POST /mcp`. That is their configuration, not this feature's problem, and success is never judged by the absence of stderr — it is judged by the answer file and the mesh count. `an_unrunning_mcp_server_in_the_users_config_is_not_mistaken_for_a_failure` holds that line.
 
 ## Where a generated asset lands
 
@@ -76,8 +104,10 @@ For the `.glb` engines the prompt also says textures, canvases and data URIs do 
 ```
 codex exec --skip-git-repo-check --sandbox read-only --color never \
   -C <project> --output-schema <schema.json> -o <answer.json> \
-  [-m <assets.model>] [-i <reference image>] "<the brief>"
+  -m <assets.model> [-i <reference image>] "<the brief>"
 ```
+
+**`--output-schema` is what shipped, and it works.** This is a statement about a run, not an intention: the real generation below used exactly these flags and codex returned well-formed JSON matching `ANSWER_SCHEMA` in `-o`'s file. Stdout capture was the fallback if it had not, and it was not needed, so it is not in the code.
 
 1. **Refuse first.** `Capability::ready()`, then a name that slugifies to something, then a non-empty description. An asset with no description is refused before codex is paid to guess.
 2. **Ask.** The answer is `{source, notes}` against `ANSWER_SCHEMA`. stdout and stderr go to `.studio-out/assets/<slug>.codex.log`, a file rather than a pipe, so a chatty run cannot deadlock on a full pipe buffer. The wait is bounded at ten minutes and the child is killed on overrun.
@@ -136,8 +166,11 @@ Everything else the route takes is either a store-resolved project id or text th
 | the feature is off by default, reports its blockers, and degrades | **unit tested** |
 | a generated factory lands where the engine expects it | **unit tested** against `plan_for` |
 | the export bridge report is parsed for the mesh count | **unit tested** against a real report line |
+| `--output-schema` returns usable JSON | **observed** in the real run below |
+| the model default, the refusal diagnosis, path containment, no-clobber | **unit tested** |
 | a character is generated end to end and loads | **done for real, once**; see below |
 | a prop is generated end to end | **not done.** Only the prompt and the destination are tested. |
+| `run_codex` itself, the Rust process path | **not executed.** See the caveat below. |
 
 The panel has **not** been seen in a browser. There was no connected Chrome on the machine this was built on, so `assets.js` is checked by `node --check`, by the module and panel-host tests in `web.rs`, and by a run under the `probes/floor-dom.mjs` stubbed DOM which mounts it against a stubbed `/assets` and asserts it hides the form when off, offers it when on, lists a previously generated asset, and reports a failed read instead of swallowing it. Nothing is claimed about how it looks.
 
@@ -155,6 +188,8 @@ A `character` named **Scrapyard Scout**, on a scratch web project in a temp dire
 | which said | `wrote .studio-out/assets/scrapyard_scout.glb (186008 bytes, 54 mesh(es))` |
 
 Loaded and measured afterwards: root group named `scrapyard_scout`, **69 named children** (`torso`, `patched_coat_body`, `coat_left_hem`, `head`, `hood`, `goggle_left_lens`, `satchel_crossbody_strap`, and so on), height **1.706** units against the 1.7 asked for, no imports, no comments anywhere in the file, one default export.
+
+**The caveat, stated plainly:** that generation was driven by invoking `codex exec` directly with the flag vector `run_codex` builds, and the answer was then written and verified by hand through the same two steps the code performs. **The Rust `run_codex` function has not itself been executed against the live CLI.** So the codex contract is proven and the Rust wrapper around it is not; a mistake in how it spawns the child would not have been caught. Driving `generate()` once through the real route is the obvious next thing and it needs a second authorised generation.
 
 One miss worth recording: the lowest point came out at **y = -0.0061**, so it stands 6mm below the ground plane rather than exactly on it. The contract asked for `y = 0` and got within a centimetre. `verify` does not check this, because `model_export.mjs` reports only bytes and a mesh count and that helper belongs to [07](07-engine-layer.md); a bounding-box assertion is the obvious next thing to add the next time that file changes hands.
 

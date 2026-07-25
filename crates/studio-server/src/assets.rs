@@ -19,6 +19,28 @@ pub const SETTING_ENABLED: &str = "assets.enabled";
 pub const SETTING_MODEL: &str = "assets.model";
 pub const MANIFEST: &str = "assets.json";
 pub const GENERATION_CAP: Duration = Duration::from_secs(600);
+pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
+
+pub fn model_in(settings: &Settings) -> String {
+    settings
+        .string(SETTING_MODEL)
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .unwrap_or(DEFAULT_MODEL)
+        .to_string()
+}
+
+pub fn inside(project: &Path, relative: &Path) -> Result<PathBuf, String> {
+    for part in relative.components() {
+        if !matches!(part, std::path::Component::Normal(_)) {
+            return Err(format!(
+                "{} is not a plain path inside the project, so nothing will be written to it",
+                relative.display()
+            ));
+        }
+    }
+    Ok(project.join(relative))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetKind {
@@ -477,19 +499,37 @@ pub struct Request {
     pub name: String,
     pub description: String,
     pub reference: Option<PathBuf>,
-    pub model: Option<String>,
+    pub model: String,
+    pub overwrite: bool,
 }
 
 fn work_dir(project: &Path) -> PathBuf {
     project.join(".studio-out").join("assets")
 }
 
-pub fn diagnose(recorded: &str) -> Option<String> {
-    if recorded.contains("not supported when using Codex with a ChatGPT account") {
+pub fn verbatim_refusal(recorded: &str) -> Option<String> {
+    recorded
+        .lines()
+        .find(|line| line.contains("not supported when using Codex"))
+        .map(|line| {
+            let said = line.rsplit_once("\"message\":\"").map(|(_, tail)| tail).unwrap_or(line);
+            said.trim_end_matches(['}', '"', ' '])
+                .split("\",\"")
+                .next()
+                .unwrap_or(said)
+                .trim()
+                .to_string()
+        })
+}
+
+pub fn diagnose(recorded: &str, model: &str) -> Option<String> {
+    if recorded.contains("not supported when using Codex") {
+        let said = verbatim_refusal(recorded).unwrap_or_default();
         return Some(format!(
-            "the model {PROGRAM} is configured to use is not available on this account; run \
-             `{PROGRAM} debug models` to see which are, and put one in {SETTING_MODEL} in the \
-             assets panel"
+            "{PROGRAM} refused the model {model}. That is a restriction on this ChatGPT account, \
+             not a fault in the studio, and codex said so in these words: \"{said}\" Run \
+             `{PROGRAM} debug models` to see which models this account may use, then put one in \
+             {SETTING_MODEL} in the assets panel"
         ));
     }
     if recorded.contains("token_expired") || recorded.contains("refresh token was already used") {
@@ -532,9 +572,7 @@ fn run_codex(
         .arg(schema)
         .arg("-o")
         .arg(answer);
-    if let Some(model) = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
-        cmd.args(["-m", model]);
-    }
+    cmd.args(["-m", req.model.as_str()]);
     if let Some(reference) = req.reference.as_deref() {
         cmd.arg("-i").arg(reference);
     }
@@ -553,7 +591,7 @@ fn run_codex(
             Ok(Some(status)) => {
                 let said = std::fs::read_to_string(log).unwrap_or_default();
                 if !status.success() {
-                    return Err(match diagnose(&said) {
+                    return Err(match diagnose(&said, &req.model) {
                         Some(why) => why,
                         None => format!(
                             "{PROGRAM} exited {}; its whole run is recorded in {} and usually \
@@ -645,6 +683,15 @@ pub fn generate(project: &Path, cap: &Capability, req: &Request) -> Result<Gener
     let engine = cap.engine.as_deref().unwrap_or_default();
     let plan = plan_for(engine, &slug)
         .ok_or_else(|| format!("the {engine} engine has no place for a generated model"))?;
+    let factory = inside(project, &plan.factory)?;
+    let proof = inside(project, &plan.proof)?;
+    if factory.exists() && !req.overwrite {
+        return Err(format!(
+            "{} already exists, and a generated asset never replaces a file that is already \
+             there; tick replace in the assets panel if you did mean to overwrite it",
+            plan.factory.display()
+        ));
+    }
 
     let work = work_dir(project);
     std::fs::create_dir_all(&work)
@@ -667,7 +714,7 @@ pub fn generate(project: &Path, cap: &Capability, req: &Request) -> Result<Gener
     let raw = match std::fs::read_to_string(&answer) {
         Ok(raw) => raw,
         Err(e) => {
-            return Err(diagnose(&said).unwrap_or_else(|| {
+            return Err(diagnose(&said, &req.model).unwrap_or_else(|| {
                 format!(
                     "{PROGRAM} finished without leaving an answer at {} ({e}); its whole run is \
                      recorded in {}",
@@ -680,7 +727,6 @@ pub fn generate(project: &Path, cap: &Capability, req: &Request) -> Result<Gener
     let (source, notes) = parse_answer(&raw)?;
     looks_like_a_factory(&source)?;
 
-    let factory = project.join(&plan.factory);
     if let Some(parent) = factory.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
@@ -688,7 +734,7 @@ pub fn generate(project: &Path, cap: &Capability, req: &Request) -> Result<Gener
     let existed = std::fs::read_to_string(&factory).ok();
     std::fs::write(&factory, &source)
         .map_err(|e| format!("could not write {}: {e}", factory.display()))?;
-    if let Some(parent) = project.join(&plan.proof).parent() {
+    if let Some(parent) = proof.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
 
@@ -793,7 +839,15 @@ async fn overview(State(state): State<AppState>, Query(q): Query<HashMap<String,
         .as_deref()
         .and_then(|engine| plan_for(engine, "example"));
 
+    let stored = Settings::load(&Settings::path_in(&state.studio_dir)).unwrap_or_default();
     let mut body = capability_value(&cap, plan.as_ref());
+    body["model"] = Value::String(model_in(&stored));
+    body["default_model"] = Value::String(DEFAULT_MODEL.to_string());
+    body["model_setting"] = Value::String(SETTING_MODEL.to_string());
+    body["model_note"] = Value::String(format!(
+        "the studio always passes -m explicitly, because a codex config default can name a model \
+         the account has retired; unset means {DEFAULT_MODEL}"
+    ));
     body["assets"] = Value::Array(root.as_deref().map(recorded).unwrap_or_default());
     body["project"] = match root.as_deref() {
         Some(p) => Value::String(p.to_string_lossy().into_owned()),
@@ -811,6 +865,8 @@ pub struct GenerateRequest {
     pub description: String,
     #[serde(default)]
     pub reference: Option<String>,
+    #[serde(default)]
+    pub overwrite: bool,
 }
 
 async fn generate_asset(State(state): State<AppState>, body: String) -> Response {
@@ -840,7 +896,7 @@ async fn generate_asset(State(state): State<AppState>, body: String) -> Response
     };
 
     let stored = Settings::load(&Settings::path_in(&state.studio_dir)).unwrap_or_default();
-    let model = stored.string(SETTING_MODEL).map(str::to_string);
+    let model = model_in(&stored);
     let cap = capability(&state.studio_dir, Some(&root));
     let asked_for = req.reference.as_deref().map(str::trim).filter(|r| !r.is_empty());
     let reference = match asked_for.map(|r| reference_in(&root, r)) {
@@ -855,6 +911,7 @@ async fn generate_asset(State(state): State<AppState>, body: String) -> Response
         description: req.description.clone(),
         reference,
         model,
+        overwrite: req.overwrite,
     };
     let done = tokio::task::spawn_blocking(move || generate(&root, &cap, &asked)).await;
 
@@ -1091,9 +1148,16 @@ mod tests {
     }
 
     #[test]
-    fn a_model_this_account_cannot_use_is_turned_into_the_two_commands_that_fix_it() {
+    fn a_refused_model_is_named_and_blamed_on_the_account_rather_than_on_the_studio() {
         let said = r#"ERROR: {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-5.2-codex' model is not supported when using Codex with a ChatGPT account."}}"#;
-        let why = diagnose(said).unwrap();
+        let why = diagnose(said, "gpt-5.2-codex").unwrap();
+        assert!(why.contains("gpt-5.2-codex"), "the user has to know which model: {why}");
+        assert!(why.contains("restriction on this ChatGPT account"));
+        assert!(why.contains("not a fault in the studio"));
+        assert!(
+            why.contains("The 'gpt-5.2-codex' model is not supported when using Codex with a ChatGPT account."),
+            "codex's own words have to survive verbatim: {why}"
+        );
         assert!(why.contains("codex debug models"));
         assert!(why.contains(SETTING_MODEL));
     }
@@ -1101,16 +1165,112 @@ mod tests {
     #[test]
     fn an_expired_sign_in_says_a_person_has_to_renew_it_rather_than_retrying_forever() {
         let said = "ERROR: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.";
-        let why = diagnose(said).unwrap();
+        let why = diagnose(said, DEFAULT_MODEL).unwrap();
         assert!(why.contains("only a person can renew it"));
         assert!(why.contains("codex login"));
     }
 
     #[test]
     fn codex_left_waiting_on_stdin_is_named_as_a_studio_bug_because_that_is_whose_bug_it_is() {
-        let why = diagnose("Reading additional input from stdin...").unwrap();
+        let why = diagnose("Reading additional input from stdin...", DEFAULT_MODEL).unwrap();
         assert!(why.contains("studio bug"));
-        assert!(diagnose("everything went fine").is_none());
+        assert!(diagnose("everything went fine", DEFAULT_MODEL).is_none());
+    }
+
+    #[test]
+    fn an_unrunning_mcp_server_in_the_users_config_is_not_mistaken_for_a_failure() {
+        let noise = "ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when UnexpectedServerResponse(\"HTTP 404: Cannot POST /mcp\")";
+        assert!(
+            diagnose(noise, DEFAULT_MODEL).is_none(),
+            "a dead unityMCP server is the user's config, not this feature's problem"
+        );
+    }
+
+    #[test]
+    fn the_model_defaults_to_codexs_own_default_and_is_never_left_to_the_config_file() {
+        assert_eq!(model_in(&Settings::new()), DEFAULT_MODEL);
+        assert_eq!(DEFAULT_MODEL, "gpt-5.6-sol");
+
+        let mut chosen = Settings::new();
+        chosen.set(SETTING_MODEL, "gpt-5.6-luna".into());
+        assert_eq!(model_in(&chosen), "gpt-5.6-luna");
+
+        let mut blanked = Settings::new();
+        blanked.set(SETTING_MODEL, "   ".into());
+        assert_eq!(
+            model_in(&blanked),
+            DEFAULT_MODEL,
+            "whitespace is unset, not a model name"
+        );
+    }
+
+    #[test]
+    fn a_destination_is_always_a_plain_path_under_the_project_and_never_climbs_out() {
+        let root = Path::new("C:").join("games").join("scrapyard");
+        assert_eq!(
+            inside(&root, Path::new("src/models/scout.js")).unwrap(),
+            root.join("src").join("models").join("scout.js")
+        );
+
+        for escaping in ["../elsewhere.js", "src/../../elsewhere.js", "/etc/passwd"] {
+            assert!(
+                inside(&root, Path::new(escaping)).is_err(),
+                "{escaping} was allowed out of the project"
+            );
+        }
+    }
+
+    #[test]
+    fn a_slug_cannot_be_crafted_to_write_outside_the_models_directory() {
+        for hostile in ["../../evil", "..\\..\\evil", "/etc/passwd", "a/b/c"] {
+            let slug = slugify(hostile);
+            assert!(
+                !slug.contains('/') && !slug.contains('\\') && !slug.contains(".."),
+                "{hostile} slugified to {slug}"
+            );
+            let plan = plan_for("web", &slug).unwrap();
+            assert!(inside(Path::new("C:").join("games").as_path(), &plan.factory).is_ok());
+        }
+    }
+
+    #[test]
+    fn a_generated_asset_never_replaces_hand_written_art_unless_it_was_asked_to() {
+        let dir = std::env::temp_dir().join("studio-assets-noclobber");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src").join("models")).unwrap();
+        std::fs::write(dir.join("index.html"), "<html></html>").unwrap();
+        let precious = dir.join("src").join("models").join("scout.js");
+        let by_hand = "export default function scout(THREE) { return new THREE.Group(); }";
+        std::fs::write(&precious, by_hand).unwrap();
+
+        let cap = Capability {
+            installed: true,
+            path: Some(PathBuf::from("codex")),
+            enabled: true,
+            engine: Some("web".into()),
+            blockers: Vec::new(),
+        };
+        let asked = Request {
+            kind: AssetKind::Character,
+            name: "Scout".into(),
+            description: "a wiry salvager".into(),
+            reference: None,
+            model: DEFAULT_MODEL.into(),
+            overwrite: false,
+        };
+
+        let err = generate(&dir, &cap, &asked).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert!(err.contains("tick replace"));
+        assert_eq!(
+            std::fs::read_to_string(&precious).unwrap(),
+            by_hand,
+            "the hand-written factory must be byte-identical after a refusal"
+        );
+        assert!(
+            !dir.join(".studio-out").exists(),
+            "the refusal comes before codex is paid, so no working files appear either"
+        );
     }
 
     #[tokio::test]
@@ -1196,7 +1356,8 @@ mod tests {
             name: "Scout".into(),
             description: "a wiry salvager".into(),
             reference: None,
-            model: None,
+            model: DEFAULT_MODEL.into(),
+            overwrite: false,
         };
 
         let err = generate(&dir, &cap, &asked).unwrap_err();
@@ -1223,7 +1384,8 @@ mod tests {
             name: "Crate".into(),
             description: "   ".into(),
             reference: None,
-            model: None,
+            model: DEFAULT_MODEL.into(),
+            overwrite: false,
         };
         assert!(generate(&dir, &cap, &asked).unwrap_err().contains("needs a description"));
     }
