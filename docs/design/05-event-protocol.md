@@ -1,6 +1,6 @@
 # 05: Event Protocol
 
-> **Status:** v0.1, 2026-07-20, design phase, no runtime code.
+> **Status:** v0.2, 2026-07-25. Built and streaming: 35 event types, the coalescer, and the WebSocket transport all run. `meeting_spoke` was added when meetings stopped being decorative.
 > **This document is the single source of truth for the event envelope and the event enum.** The [12 visual-workspace](12-visual-workspace.md) mapping table must contain **exactly one row per event type below, and no rows for types not below.** That parity is verification check #2 for this phase.
 
 ## Design stance
@@ -66,9 +66,23 @@ Rules:
 | `consult_answered` | consultant returns a capsule | `capsule_id` |
 | `escalated` | worker escalates up the tree | `from_role`, `to_role`, `reason`, `capsule_id` |
 | `capsule_submitted` | any capsule passes schema validation | `capsule_id`, `kind`, `rendered_tokens`, `truncated` (bool) |
-| `meeting_started` | delegation/consult/arbitration convenes | `meeting_id`, `kind`, `participants[]` |
-| `meeting_ended` | meeting closes | `meeting_id`, `outcome` |
-| `decision_recorded` | a decision/ADR is written | `decision_id`, `title`, `supersedes?` |
+| `meeting_started` | delegation/consult/arbitration convenes | `meeting_id`, `kind`, `participants[]`, `chair`, `topic` |
+| `meeting_spoke` | a participant or the chair states a position | `meeting_id`, `role`, `seat` (`participant`\|`chair`), `position` |
+| `meeting_ended` | meeting closes | `meeting_id`, `outcome` (`decided`\|`adjourned`\|`stopped`), `positions`, `billed_tokens`, `usd`, `reason?` |
+| `decision_recorded` | a decision/ADR is written | `decision_id`, `meeting_id`, `title`, `chair`, `claim`, `rationale`, `dissent[]`, `path?`, `supersedes?` |
+
+`meeting_spoke` is what makes a meeting auditable rather than decorative: every
+position a worker was paid to produce is on the wire, which is also how the next
+speaker and the chair receive it (the daemon assembles the brief from these, so a
+participant never needs a tool to read the room). It is **never coalesced** — each
+position is unique text, and dropping one would lose work that was billed for.
+
+`decision_recorded` carries the ruling itself, not just a title. The daemon writes
+the claim and rationale into the `decisions` table, so `decision_search`
+([02](02-context-engine.md)) can hand the decision to a future worker; when the
+meeting names a project it also writes `docs/decisions/<id>-<slug>.md` into that
+repo and commits it. Both are **daemon work at zero token cost** — no worker runs
+git and no worker writes the ADR file.
 
 ### Verification & repair
 | type | when | key `data` fields |
@@ -102,11 +116,25 @@ Rules:
 | type | when | key `data` fields |
 |---|---|---|
 | `commit_recorded` | the daemon commits a worker's output to the project repo | `project`, `role`, `sha`, `subject` |
+| `git_action` | the daemon runs a repository action the floor asked for: push, remote create, rollback | `project`, `action`, `ok`, `detail` |
 
 ### Spend approval
 | type | when | key `data` fields |
 |---|---|---|
 | `budget_approval_needed` | billed tokens cross the run's notify threshold and the run is waiting on a human | `approval_id`, `spent`, `threshold`, `node`, `usd` |
+
+### Run steering
+| type | when | key `data` fields |
+|---|---|---|
+| `plan_proposed` | the director's plan is ready and stated in plain language for a human to read, edit or interrupt | `plan_id`, `title`, `steps`, `editable` |
+| `step_approval_needed` | a step-confirmed run finishes a tier and waits for approve, approve-with-notes, or redo | `approval_id`, `step`, `title`, `summary`, `modes` |
+| `run_interrupted` | a human interrupts a running plan, adds a step, or sends a note into it | `reason`, `note?`, `step?` |
+| `agent_thought` | a worker's reasoning text streams out for the focused agent's thought view | `role`, `text`, `phase` |
+
+### Existing games
+| type | when | key `data` fields |
+|---|---|---|
+| `game_summarized` | a short read of an adopted game's mechanics lands for the floor | `project`, `summary`, `mechanics` |
 
 A run carries a notify threshold rather than a cap. Crossing it emits this
 event and blocks the run until `POST /approve` answers; approving raises the

@@ -124,6 +124,16 @@ pub fn run_worker_metered_uncommitted(
     run_worker_inner(em, role, brief, index, None, acting, false)
 }
 
+pub fn run_worker_metered_json(
+    em: &Emitter,
+    role: &Role,
+    brief: &str,
+    index: usize,
+    json_schema: String,
+) -> Result<Metered> {
+    run_worker_inner(em, role, brief, index, Some(json_schema), false, false)
+}
+
 pub fn commit_wave(em: &Emitter, entries: &[(&str, String)]) {
     let Some(root) = em.project.as_deref() else {
         return;

@@ -1,6 +1,6 @@
 # 12: Visual Workspace
 
-> **Status:** v0.1, 2026-07-20, design phase, no runtime code.
+> **Status:** v0.2, 2026-07-25. Built: the floor, the workflow track, the minimap, the scrubber and the meeting room panel all run against real events. Rendered in 3D with voxel characters rather than the 2D grid first specified ([ADR 0005](adr/0005-voxel-3d-floor.md)).
 > **Consumes** the event protocol ([05](05-event-protocol.md)) and the role registry ([04](04-agent-graph.md)). The **event → visual mapping table** below has **exactly one row per event type in the [05](05-event-protocol.md) enum, and no rows for types not in it**: that 1:1 parity is verification check #2 for this phase.
 
 The studio floor is the answer to "the studio is invisible while it works" ([00](00-overview.md)). It is a browser view that renders the daemon's event stream as a top-down office where you can watch the crew.
@@ -50,10 +50,11 @@ Hovering an avatar shows a bubble with the **live distilled summary** (the turn 
 Meetings ([04](04-agent-graph.md): delegation, consultation, escalation, arbitration) are shown as **choreography**, not just a log line:
 
 - Participants **walk to convergence** at a meeting spot (a table for arbitration, a desk-side for a consult).
-- A **whiteboard** shows the meeting's artifact (the decision under discussion, the failure list).
-- **Single-speaker bubbles**: one participant "speaks" at a time so the exchange is legible.
+- A **whiteboard** shows the meeting's artifact: the topic while the room sits down, then each position as it is stated, then the chair's ruling in green once it lands.
+- **Single-speaker bubbles**: one participant speaks at a time so the exchange is legible. `meeting_spoke` is emitted once per speaker in order, so the board never has to guess who has the floor.
+- A **room panel** holds the whole transcript alongside the 3D view, and keeps the ruling, the positions it overruled and the ADR path readable after the room disperses.
 
-Choreography is driven entirely by `meeting_started`/`meeting_ended` and the collaboration events; the client needs no domain logic because the `scene.meeting` block ([05](05-event-protocol.md)) carries participants and room.
+Choreography is driven entirely by `meeting_started`/`meeting_spoke`/`meeting_ended` and the collaboration events; the client needs no domain logic because the `scene.meeting` block ([05](05-event-protocol.md)) carries participants and room.
 
 ## Camera, minimap, timeline scrubber
 
@@ -85,9 +86,10 @@ Choreography is driven entirely by `meeting_started`/`meeting_ended` and the col
 | `consult_answered` | consultant's reply glyph returns; consultant desk releases |
 | `escalated` | upward arrow to `escalates_to`; escalating ring flags |
 | `capsule_submitted` | capsule glyph emitted from the desk (color by kind) |
-| `meeting_started` | participants walk to convergence; whiteboard appears |
-| `meeting_ended` | participants disperse; whiteboard result flashes |
-| `decision_recorded` | ADR card pinned to the department/wall board |
+| `meeting_started` | participants walk to convergence; whiteboard appears with the topic; the room panel opens |
+| `meeting_spoke` | the speaker's position replaces the whiteboard body and appends to the room panel transcript |
+| `meeting_ended` | participants disperse; the whiteboard holds the ruling instead of clearing |
+| `decision_recorded` | whiteboard turns green and shows the claim; the room panel shows claim, reason, overruled positions and the ADR path |
 | `verify_started` | a "test bench" spins up near infra; progress marker |
 | `verify_result` | pass = green check, fail = red list, inconclusive = amber |
 | `repair_round` | round counter ticks on the failing worker's desk |
@@ -100,6 +102,14 @@ Choreography is driven entirely by `meeting_started`/`meeting_ended` and the col
 | `gate_evaluated` | gate marker on the track flips pass/fail |
 | `workflow_ended` | workflow track closes with its outcome |
 | `index_updated` | a brief "index" pulse at the library/shelf; cache-health tint if `cache_hit_ratio` dips ([03](03-state-store.md)) |
+| `commit_recorded` | a commit chip lands on the workflow track; the run's commit count ticks |
+| `budget_approval_needed` | the run pauses and the spend prompt opens; nothing advances until it is answered |
+| `git_action` | the git panel's tree refreshes and the action reports its result inline |
+| `plan_proposed` | the plan opens in plain language, each step editable, with interrupt and add-step controls |
+| `step_approval_needed` | the run holds at the tier boundary and the step card asks approve, improve, or redo |
+| `run_interrupted` | an interrupt bar shows what was sent into the run and which step it lands on |
+| `agent_thought` | the focused agent's thought bubble streams the line it is reasoning through |
+| `game_summarized` | the adopted game's card fills in with its mechanics glimpse |
 
 ## Art and assets
 

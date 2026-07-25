@@ -1,4 +1,7 @@
 mod charters;
+mod crash;
+mod doctor;
+mod games;
 mod m3;
 mod m4;
 mod skills;
@@ -546,8 +549,10 @@ fn report_check(tag: &str, what: &str, ok: bool, failures: &mut Vec<String>) {
 }
 
 fn main() -> Result<()> {
+    crash::install();
     let cmd = std::env::args().nth(1).unwrap_or_else(|| "help".into());
     match cmd.as_str() {
+        "doctor" => doctor::report(),
         "m1" => m1_proof(),
         "m2" => m2_proof(),
         "m3" => m3_proof(),
@@ -557,10 +562,18 @@ fn main() -> Result<()> {
         "mcp-server" => mcp_server(),
         "index" => index_project(),
         _ => {
-            println!("usage: studiod <m1|m2|index|mcp-server>");
+            println!("usage: studiod <studio|floor|index|doctor|mcp-server|m1|m2|m3|m4>");
             println!();
-            println!("  m1   run the M1 acceptance proof: spawn two same-prefix workers,");
-            println!("       record the ledger, and verify usage capture, cache reuse and reaping.");
+            println!("  studio      serve the interactive studio floor and run what it sends.");
+            println!("  floor       serve the floor read-only against the existing event log.");
+            println!("  index       scan a project into its code index and print what moved.");
+            println!("  doctor      check what the studio needs and report what is installed.");
+            println!("  mcp-server  serve the studio MCP tools over stdio, for a worker.");
+            println!();
+            println!("  m1   two same-prefix workers: usage capture, cache reuse, clean reaping.");
+            println!("  m2   a worker whose only tool is capsule_submit, through the real MCP.");
+            println!("  m3   Godot end to end through verify and the repair loop.");
+            println!("  m4   the studio floor driven by a real five-worker cast.");
             Ok(())
         }
     }
@@ -623,7 +636,7 @@ fn m4_proof() -> Result<()> {
     let store = std::sync::Arc::new(Store::open(studio_dir().join("studio-state.db"))?);
     m4::register_roles(&store)?;
 
-    let state = studio_server::AppState::new(store.clone());
+    let state = studio_server::AppState::new(store.clone()).with_studio_dir(studio_dir());
     let run = id("run");
 
     let rt = tokio::runtime::Runtime::new()?;
@@ -712,7 +725,7 @@ fn m4_proof() -> Result<()> {
 fn floor_only() -> Result<()> {
     fs::create_dir_all(studio_dir())?;
     let store = std::sync::Arc::new(Store::open(studio_dir().join("studio-state.db"))?);
-    let state = studio_server::AppState::new(store);
+    let state = studio_server::AppState::new(store).with_studio_dir(studio_dir());
     println!("studio floor on http://127.0.0.1:7878/");
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(studio_server::serve(state, 7878))

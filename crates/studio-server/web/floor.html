@@ -128,6 +128,38 @@
   #ask-yes { border-color: rgba(224,188,85,.45) !important; color: var(--warn) !important; }
   #ask-no { border-color: rgba(226,99,109,.4) !important; color: var(--error) !important; }
 
+  #tabs { display: flex; gap: 2px; padding: 8px 12px 0; border-top: 1px solid var(--line); }
+  #tabs button { flex: 1; cursor: pointer; font: 600 10.5px var(--sans); letter-spacing: .1em;
+    text-transform: uppercase; color: var(--faint); background: transparent; padding: 6px 4px;
+    border: 1px solid transparent; border-bottom: 1px solid var(--line-2); border-radius: 7px 7px 0 0; }
+  #tabs button:hover { color: var(--dim); background: rgba(148,163,184,.05); }
+  #tabs button.on { color: var(--text); background: var(--field);
+    border-color: var(--line-2); border-bottom-color: transparent; }
+
+  .panel { padding: 12px 16px; display: grid; gap: 8px; }
+  .panel .sec { margin-bottom: 2px; }
+  .panel .hint { color: var(--faint); font-size: 11.5px; }
+  .panel .row { display: grid; grid-template-columns: 1fr auto; gap: 7px; align-items: center; }
+  .panel .field { display: grid; gap: 3px; }
+  .panel label { color: var(--dim); font-size: 11.5px; }
+  .panel select, .panel input[type=text], .panel input[type=number], .panel textarea, .panel button {
+    font: inherit; font-size: 12.5px; background: var(--field); color: var(--text);
+    border: 1px solid var(--line-2); border-radius: 8px; padding: 6px 9px; }
+  .panel textarea { resize: vertical; min-height: 46px; font-family: var(--sans); }
+  .panel button { cursor: pointer; font-weight: 600;
+    background: linear-gradient(180deg, #1b212c, #151a23); }
+  .panel button:hover { background: linear-gradient(180deg, #222a37, #1a202b); }
+  .panel button:disabled { opacity: .5; cursor: default; }
+  .panel input[type=checkbox] { accent-color: var(--running); }
+  .panel .check { display: flex; align-items: center; gap: 7px; color: var(--dim); font-size: 11.5px; }
+  .panel .card { border: 1px solid var(--line-2); border-radius: 10px; background: var(--panel-2);
+    padding: 9px 11px; display: grid; gap: 5px; }
+  .panel .card b { font-size: 12.5px; }
+  .panel .card .k { color: var(--faint); font: 10.5px var(--mono); }
+  .panel .ok { color: var(--running); }
+  .panel .bad { color: var(--error); }
+  .panel .warn { color: var(--warn); }
+
   #help { padding: 9px 16px 11px; border-top: 1px solid var(--line); color: var(--faint); font-size: 11px; }
   kbd { background: rgba(148,163,184,.12); border: 1px solid var(--line-2); border-bottom-width: 2px;
     border-radius: 4px; padding: 0 5px; color: var(--dim); font: 600 10.5px var(--mono); }
@@ -229,6 +261,34 @@
   #detail .act .ln .sq { color: var(--faint); font-variant-numeric: tabular-nums; min-width: 30px; text-align: right; }
   #detail .act .ln.err { color: var(--error); }
 
+  #room { position: absolute; left: 14px; top: 100px; width: 306px; display: none;
+    padding: 12px 14px 11px; z-index: 5; max-height: calc(100% - 200px);
+    display: none; flex-direction: column; border-color: rgba(111,168,209,.34);
+    box-shadow: var(--shadow), 0 0 26px rgba(111,168,209,.12); }
+  #room.on { display: flex; }
+  #room .hd { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  #room .kind { font: 700 9.5px var(--mono); letter-spacing: .16em; text-transform: uppercase;
+    color: var(--info); }
+  #room .chair { font: 600 10.5px var(--mono); color: var(--faint); white-space: nowrap; }
+  #room .topic { margin: 6px 0 9px; font-size: 12.5px; color: var(--text); }
+  #room .said { overflow-y: auto; display: grid; gap: 8px; padding-right: 2px; }
+  #room .pos { display: grid; gap: 2px; padding-left: 9px;
+    border-left: 2px solid rgba(148,163,184,.2); }
+  #room .pos.chair { border-left-color: rgba(111,168,209,.6); }
+  #room .pos .r { font: 700 9.5px var(--mono); letter-spacing: .1em; text-transform: uppercase;
+    color: var(--faint); }
+  #room .pos.chair .r { color: var(--info); }
+  #room .pos .p { font-size: 12px; color: var(--dim); }
+  #room .ruling { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line-2);
+    display: grid; gap: 4px; }
+  #room .ruling .lbl2 { font: 700 9.5px var(--mono); letter-spacing: .14em; text-transform: uppercase;
+    color: var(--running); }
+  #room .ruling .claim { font-size: 12.5px; font-weight: 600; color: var(--text); }
+  #room .ruling .why { font-size: 11.5px; color: var(--dim); }
+  #room .ruling .over { font-size: 11px; color: var(--faint); }
+  #room .ruling .path { font: 10.5px var(--mono); color: var(--faint);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
   @media (max-width: 720px) {
     body { grid-template-columns: 1fr; grid-template-rows: 44vh minmax(0, 1fr); }
     #side { border-left: none; border-top: 1px solid var(--line-2); }
@@ -237,6 +297,7 @@
     #scrub input { width: auto; flex: 1; min-width: 70px; }
     #minimap, #shot { display: none !important; }
     #done { max-width: calc(100% - 28px); flex-wrap: wrap; }
+    #room { right: 14px; width: auto; top: 92px; max-height: calc(100% - 150px); }
   }
 </style>
 </head>
@@ -245,6 +306,18 @@
   <div id="tip" class="overlay"></div><div id="cam" class="overlay">isometric</div><div id="detail" class="overlay"></div>
   <div id="scrub" class="overlay"><span class="lbl">live</span><input id="seek" type="range" min="0" max="0" value="0"><button id="tolive">latest</button></div>
   <div id="track" class="overlay"><div class="name"></div><div class="lane"></div></div>
+  <div id="room" class="overlay">
+    <div class="hd"><span class="kind"></span><span class="chair"></span></div>
+    <div class="topic"></div>
+    <div class="said"></div>
+    <div class="ruling" hidden>
+      <div class="lbl2">decision</div>
+      <div class="claim"></div>
+      <div class="why"></div>
+      <div class="over"></div>
+      <div class="path"></div>
+    </div>
+  </div>
   <div id="done" class="overlay" hidden>
     <div class="badge">&#10003;</div>
     <div class="txt"><b id="done-title">build complete</b><span id="done-sub"></span></div>
@@ -269,6 +342,11 @@
   </div>
   <div id="feed-head" class="sec">event stream</div>
   <div id="feed"></div>
+  <div id="tabs"></div>
+  <div id="panel-run" class="panel" hidden></div>
+  <div id="panel-games" class="panel" hidden></div>
+  <div id="panel-git" class="panel" hidden></div>
+  <div id="panel-settings" class="panel" hidden></div>
   <div id="compose">
     <div class="sec">dispatch</div>
     <div class="row">
@@ -319,7 +397,8 @@
 
 <script type="module">
 import * as THREE from "/vendor/three.module.js";
-import { buildOffice, wanderStep, refreshScreens, seatAtTable, leaveTable, showBoard, hideBoard } from "/scene.js";
+import { buildOffice, wanderStep, refreshScreens, seatAtTable, leaveTable, showBoard, boardSays, boardDecided, hideBoard } from "/scene.js";
+import { pushEvent, setProject, setStage, settings } from "/bus.js";
 
 const RING = { idle: 0x2f3644, running: 0x4ad991, blocked: 0xd9c24a, meeting: 0x6fa8d1, error: 0xd95555 };
 const TERMINAL = new Set(["run_ended","meeting_ended","workflow_ended","decision_recorded","escalated","verify_result","budget_exhausted"]);
@@ -412,6 +491,38 @@ function deskState(role) {
 function logActivity(st, seq, text, err) {
   st.log.push({ seq, text, err: !!err });
   if (st.log.length > 9) st.log.shift();
+}
+
+const roomEl = document.getElementById("room");
+let room = null;
+
+function renderRoom() {
+  if (!room) { roomEl.classList.remove("on"); return; }
+  roomEl.classList.add("on");
+  roomEl.querySelector(".kind").textContent = room.kind || "meeting";
+  roomEl.querySelector(".chair").textContent = room.chair ? "chair " + room.chair : "";
+  roomEl.querySelector(".topic").textContent = room.topic || "";
+
+  roomEl.querySelector(".said").innerHTML = room.said.length
+    ? room.said
+        .map((p) =>
+          `<div class="pos${p.seat === "chair" ? " chair" : ""}">` +
+          `<div class="r">${esc(p.role)}</div><div class="p">${esc(p.position)}</div></div>`
+        )
+        .join("")
+    : `<div class="pos"><div class="p">waiting for the first position</div></div>`;
+
+  const ruling = roomEl.querySelector(".ruling");
+  ruling.hidden = !room.decision;
+  if (room.decision) {
+    const d = room.decision;
+    ruling.querySelector(".claim").textContent = d.claim || "";
+    ruling.querySelector(".why").textContent = d.rationale || "";
+    ruling.querySelector(".over").textContent = (d.dissent || []).length
+      ? "overrules " + d.dissent.join("; ")
+      : "";
+    ruling.querySelector(".path").textContent = d.path || "";
+  }
 }
 
 function updateCamera() {
@@ -694,6 +805,8 @@ function resetState() {
   }
   meetings.clear();
   hideBoard();
+  room = null;
+  renderRoom();
   workflow = null;
   stats = { events: 0, tokens: 0, spend: 0, cacheRead: 0, cacheWrite: 0, symbols: 0, run: stats.run, history: [], feed: [] };
 }
@@ -739,10 +852,45 @@ function apply(ev, replaying) {
       const ids = (ev.data.participants || []).filter((r) => avatars.has(r));
       meetings.set(ev.data.meeting_id, ids);
       showBoard(ev.data.kind, ev.data.topic, ev.data.participants, ev.data.chair);
+      room = {
+        id: ev.data.meeting_id,
+        kind: ev.data.kind,
+        topic: ev.data.topic,
+        chair: ev.data.chair,
+        said: [],
+        decision: null,
+      };
+      renderRoom();
       ids.forEach((r, i) => {
         setRing(r, "meeting");
         if (meetingTable) seatAtTable(avatars.get(r), meetingTable, i, ids.length);
       });
+      break;
+    }
+    case "meeting_spoke": {
+      if (room && room.id === ev.data.meeting_id) {
+        room.said.push({
+          role: ev.data.role,
+          seat: ev.data.seat,
+          position: ev.data.position,
+        });
+        renderRoom();
+      }
+      if (ev.data.seat !== "chair") boardSays(ev.data.role, ev.data.position);
+      if (st) logActivity(st, ev.seq, "spoke: " + String(ev.data.position || "").slice(0, 40));
+      break;
+    }
+    case "decision_recorded": {
+      if (room) {
+        room.decision = {
+          claim: ev.data.claim,
+          rationale: ev.data.rationale,
+          dissent: ev.data.dissent || [],
+          path: ev.data.path,
+        };
+        renderRoom();
+      }
+      if (ev.data.claim) boardDecided(ev.data.claim);
       break;
     }
     case "meeting_ended": {
@@ -752,7 +900,7 @@ function apply(ev, replaying) {
         leaveTable(avatars.get(r));
       });
       meetings.delete(ev.data.meeting_id);
-      if (!meetings.size) hideBoard();
+      if (!meetings.size && !(room && room.decision)) hideBoard();
       break;
     }
     case "escalated": if (known) setRing(role, "blocked"); break;
@@ -888,6 +1036,7 @@ function connect() {
   ws.onmessage = (m) => {
     let ev; try { ev = JSON.parse(m.data); } catch { return; }
     if (typeof ev.seq === "number") lastSeq = Math.max(lastSeq, ev.seq);
+    pushEvent(ev);
     if (scrubbing) { allEvents.push(ev); seek.max = String(lastSeq); return; }
     apply(ev); logEvent(ev);
     seek.max = String(lastSeq);
@@ -912,7 +1061,7 @@ function applyMode() {
   briefBox.placeholder =
     composeMode === "build" ? "describe the game or the change; the crew reads the project first"
     : composeMode === "task" ? "what should they do?"
-    : "what is the meeting about?";
+    : "what should the room settle? the chair's ruling is written to the repo";
 }
 
 modeBtn.onclick = () => {
@@ -1103,7 +1252,7 @@ function loadProjects() {
 }
 loadProjects();
 
-projectSel.onchange = () => localStorage.setItem("studio.project", projectSel.value);
+projectSel.onchange = () => setProject(projectSel.value);
 
 document.getElementById("new-project").onclick = () => {
   projectForm.hidden = !projectForm.hidden;
@@ -1127,7 +1276,7 @@ document.getElementById("np-create").onclick = async () => {
     });
     if (!res.ok) { sent.textContent = await res.text(); return; }
     const made = await res.json();
-    localStorage.setItem("studio.project", made.id);
+    setProject(made.id);
     await loadProjects();
     projectSel.value = made.id;
     projectForm.hidden = true;
@@ -1162,7 +1311,7 @@ document.getElementById("send").onclick = async () => {
 
   const body = composeMode === "build" ? { prompt: brief, project, ask_above }
     : composeMode === "task" ? { role: picked[0], brief, project }
-    : { kind: "arbitration", participants: picked, topic: brief };
+    : { kind: "arbitration", participants: picked, topic: brief, project, ask_above };
 
   sent.textContent = "sending";
   try {
@@ -1172,7 +1321,8 @@ document.getElementById("send").onclick = async () => {
       body: JSON.stringify(body),
     });
     sent.textContent = res.ok
-      ? (composeMode === "build" ? "the director is planning it" : "queued on the floor")
+      ? (composeMode === "build" ? "the director is planning it"
+        : composeMode === "meeting" ? "convening the room" : "queued on the floor")
       : await res.text();
     if (res.ok) briefBox.value = "";
   } catch (err) {
@@ -1203,9 +1353,16 @@ fetch("/floor").then((r) => r.json()).then((f) => {
   meetingTable = built.meetingTable;
   resize();
   refreshScreens(screenData());
+  setStage({
+    THREE, renderer, scene, camera, orbit, avatars, ambient, world: built.world,
+    deskState, showDetail, updateCamera,
+    focused: () => following,
+    follow: (role) => { following = role; showDetail(role); },
+  });
   animate();
   connect();
 });
 </script>
+<script type="module" src="/panels.js"></script>
 </body>
 </html>

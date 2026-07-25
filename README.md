@@ -12,6 +12,12 @@ The daemon commits for you. After each worker completes, it stages the project a
 
 Nothing runs without a project selected. Earlier builds fell back to the daemon's own working directory, which meant the crew could edit this repo; that fallback is now an error.
 
+## Meetings produce decisions, not transcripts
+
+Convene a room from the floor and the daemon runs it as a real deliberation. Each participant after the first is handed the previous positions **verbatim** and asked to answer them; the chair — the nearest common ancestor in the escalation tree — receives the whole room and is held to a schema, so it returns a rule the studio will follow, the reason it beat the alternative, and the positions it overrules.
+
+The ruling is durable in two places. It goes into the decision store, so `decision_search` can hand it to a worker weeks later, and into `docs/decisions/` in the project repo as an ADR that records the claim, the reasoning, the dissent and the whole room — committed daemon-side, so version control still costs zero tokens. A chair that returns nothing usable adjourns the meeting; the studio never records a decision nobody made.
+
 ## The problem
 
 The original crew packs **49 agents, 73 slash commands, 12 hooks and 11 rule files** into a single Claude Code conversation. Every invocation reloads `CLAUDE.md` and ambient context, subagents inherit bloated prompts, and there is no state store, no summarization, and no handoff between steps. Token burn is enormous, and the studio is invisible while it works.

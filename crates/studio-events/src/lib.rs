@@ -87,6 +87,7 @@ pub enum EventType {
     Escalated,
     CapsuleSubmitted,
     MeetingStarted,
+    MeetingSpoke,
     MeetingEnded,
     DecisionRecorded,
 
@@ -107,10 +108,17 @@ pub enum EventType {
     IndexUpdated,
     CommitRecorded,
     BudgetApprovalNeeded,
+
+    AgentThought,
+    PlanProposed,
+    StepApprovalNeeded,
+    RunInterrupted,
+    GameSummarized,
+    GitAction,
 }
 
 impl EventType {
-    pub const ALL: [EventType; 34] = [
+    pub const ALL: [EventType; 41] = [
         EventType::RunStarted,
         EventType::RunEnded,
         EventType::WorkerSpawned,
@@ -129,6 +137,7 @@ impl EventType {
         EventType::Escalated,
         EventType::CapsuleSubmitted,
         EventType::MeetingStarted,
+        EventType::MeetingSpoke,
         EventType::MeetingEnded,
         EventType::DecisionRecorded,
         EventType::VerifyStarted,
@@ -145,6 +154,12 @@ impl EventType {
         EventType::IndexUpdated,
         EventType::CommitRecorded,
         EventType::BudgetApprovalNeeded,
+        EventType::AgentThought,
+        EventType::PlanProposed,
+        EventType::StepApprovalNeeded,
+        EventType::RunInterrupted,
+        EventType::GameSummarized,
+        EventType::GitAction,
     ];
 
     pub fn wire_name(&self) -> &'static str {
@@ -155,17 +170,22 @@ impl EventType {
         matches!(
             self,
             EventType::RunEnded
+                | EventType::MeetingSpoke
                 | EventType::MeetingEnded
                 | EventType::WorkflowEnded
                 | EventType::DecisionRecorded
                 | EventType::Escalated
                 | EventType::VerifyResult
                 | EventType::BudgetExhausted
+                | EventType::PlanProposed
+                | EventType::StepApprovalNeeded
+                | EventType::RunInterrupted
+                | EventType::GameSummarized
         )
     }
 }
 
-const WIRE_NAMES: [&str; 34] = [
+const WIRE_NAMES: [&str; 41] = [
     "run_started",
     "run_ended",
     "worker_spawned",
@@ -184,6 +204,7 @@ const WIRE_NAMES: [&str; 34] = [
     "escalated",
     "capsule_submitted",
     "meeting_started",
+    "meeting_spoke",
     "meeting_ended",
     "decision_recorded",
     "verify_started",
@@ -200,6 +221,12 @@ const WIRE_NAMES: [&str; 34] = [
     "index_updated",
     "commit_recorded",
     "budget_approval_needed",
+    "agent_thought",
+    "plan_proposed",
+    "step_approval_needed",
+    "run_interrupted",
+    "game_summarized",
+    "git_action",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -261,9 +288,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn enum_has_exactly_the_thirty_four_types_in_doc_05() {
-        assert_eq!(EventType::ALL.len(), 34);
-        assert_eq!(WIRE_NAMES.len(), 34);
+    fn enum_has_exactly_the_forty_one_types_in_doc_05() {
+        assert_eq!(EventType::ALL.len(), 41);
+        assert_eq!(WIRE_NAMES.len(), 41);
+    }
+
+    #[test]
+    fn a_spoken_position_is_never_coalesced_away() {
+        assert!(
+            EventType::MeetingSpoke.never_coalesced(),
+            "each position is unique text; dropping one loses what a worker was paid to say"
+        );
     }
 
     #[test]
@@ -311,6 +346,40 @@ mod tests {
             "type":"index_updated","data":{"paths_changed":3,"future_key":"kept"}}"#;
         let env: Envelope = serde_json::from_str(raw).unwrap();
         assert_eq!(env.data["future_key"], "kept");
+    }
+
+    #[test]
+    fn the_visual_mapping_table_has_one_row_per_event_type() {
+        let doc = include_str!("../../../docs/design/12-visual-workspace.md");
+        let mapped: std::collections::HashSet<&str> = doc
+            .lines()
+            .filter_map(|l| l.strip_prefix("| `"))
+            .filter_map(|l| l.split('`').next())
+            .collect();
+
+        let missing: Vec<&str> = WIRE_NAMES.iter().copied().filter(|n| !mapped.contains(n)).collect();
+        assert!(
+            missing.is_empty(),
+            "doc 12 promises one visual per event type; these have none: {missing:?}"
+        );
+
+        let known: std::collections::HashSet<&str> = WIRE_NAMES.iter().copied().collect();
+        let stale: Vec<&&str> = mapped.iter().filter(|n| !known.contains(**n)).collect();
+        assert!(stale.is_empty(), "doc 12 maps event types that no longer exist: {stale:?}");
+    }
+
+    #[test]
+    fn the_protocol_doc_documents_every_event_type() {
+        let doc = include_str!("../../../docs/design/05-event-protocol.md");
+        let missing: Vec<&str> = WIRE_NAMES
+            .iter()
+            .copied()
+            .filter(|n| !doc.contains(&format!("| `{n}` |")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "doc 05 owns this enum; these types have no row: {missing:?}"
+        );
     }
 
     #[test]

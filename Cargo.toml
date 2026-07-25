@@ -12,6 +12,7 @@ members = [
     "crates/studio-index",
     "crates/studio-mcp",
     "crates/studio-server",
+    "crates/studio-settings",
     "crates/studio-verify",
     "crates/studio-workflow",
     "crates/studiod",
@@ -35,6 +36,7 @@ studio-engine = { path = "crates/studio-engine" }
 studio-index = { path = "crates/studio-index" }
 studio-mcp = { path = "crates/studio-mcp" }
 studio-server = { path = "crates/studio-server" }
+studio-settings = { path = "crates/studio-settings" }
 studio-verify = { path = "crates/studio-verify" }
 studio-workflow = { path = "crates/studio-workflow" }
 

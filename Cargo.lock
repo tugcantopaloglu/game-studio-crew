@@ -1013,11 +1013,22 @@ dependencies = [
  "studio-core",
  "studio-engine",
  "studio-events",
+ "studio-settings",
  "studio-store",
  "studio-workflow",
  "time",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "studio-settings"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "studio-context",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1080,6 +1091,7 @@ dependencies = [
  "studio-index",
  "studio-mcp",
  "studio-server",
+ "studio-settings",
  "studio-store",
  "studio-verify",
  "studio-workflow",

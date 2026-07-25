@@ -10,6 +10,7 @@ studio-agents.workspace = true
 studio-core.workspace = true
 studio-engine.workspace = true
 studio-events.workspace = true
+studio-settings.workspace = true
 studio-store.workspace = true
 studio-workflow.workspace = true
 anyhow.workspace = true

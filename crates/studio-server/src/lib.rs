@@ -11,6 +11,13 @@ use studio_events::{plan_resume, Coalescer, Envelope, ResumePlan};
 use studio_store::Store;
 use tokio::sync::broadcast;
 
+pub mod games;
+pub mod gitapi;
+pub mod health;
+pub mod runplan;
+pub mod settings;
+pub mod web;
+
 pub const FLOOR_HTML: &str = include_str!("../web/floor.html");
 pub const VOXEL_JS: &str = include_str!("../web/voxel.js");
 pub const SCENE_JS: &str = include_str!("../web/scene.js");
@@ -29,6 +36,10 @@ pub struct MeetingRequest {
     pub kind: String,
     pub participants: Vec<String>,
     pub topic: String,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub ask_above: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -61,12 +72,18 @@ pub struct RevertRequest {
     pub sha: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct SummarizeRequest {
+    pub project: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum StudioCommand {
     Task(TaskRequest),
     Meeting(MeetingRequest),
     Workflow(WorkflowRequest),
     Build(BuildRequest),
+    Summarize(SummarizeRequest),
 }
 
 pub type Approvals = Arc<std::sync::Mutex<HashMap<String, std::sync::mpsc::Sender<bool>>>>;
@@ -77,6 +94,14 @@ pub struct AppState {
     pub live: broadcast::Sender<Envelope>,
     pub commands: Option<std::sync::mpsc::Sender<StudioCommand>>,
     pub approvals: Approvals,
+    pub studio_dir: Arc<std::path::PathBuf>,
+}
+
+pub fn default_studio_dir() -> std::path::PathBuf {
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(".studio"),
+        Err(_) => std::path::PathBuf::from(".studio"),
+    }
 }
 
 impl AppState {
@@ -87,7 +112,13 @@ impl AppState {
             live,
             commands: None,
             approvals: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            studio_dir: Arc::new(default_studio_dir()),
         }
+    }
+
+    pub fn with_studio_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.studio_dir = Arc::new(dir);
+        self
     }
 
     pub fn await_approval(&self, id: &str) -> std::sync::mpsc::Receiver<bool> {
@@ -179,6 +210,12 @@ pub fn router(state: AppState) -> Router {
         .route("/qa", get(qa_report))
         .route("/shot", get(latest_shot))
         .route("/revert", post(revert))
+        .merge(web::routes())
+        .merge(settings::routes())
+        .merge(games::routes())
+        .merge(gitapi::routes())
+        .merge(runplan::routes())
+        .merge(health::routes())
         .layer(axum::middleware::from_fn(guard_origin))
         .with_state(state)
 }
@@ -245,6 +282,13 @@ async fn convene_meeting(
         return (
             StatusCode::BAD_REQUEST,
             "a meeting needs at least two participants".to_string(),
+        )
+            .into_response();
+    }
+    if req.topic.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "a meeting needs a topic; it becomes the title of the decision".to_string(),
         )
             .into_response();
     }
@@ -379,7 +423,7 @@ async fn projects(State(state): State<AppState>) -> Result<Response, StatusCode>
     Ok(axum::Json(json).into_response())
 }
 
-fn project_root(state: &AppState, id: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn project_root(state: &AppState, id: &str) -> Option<std::path::PathBuf> {
     state
         .store
         .projects()
@@ -625,7 +669,7 @@ async fn create_project(
     }
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())

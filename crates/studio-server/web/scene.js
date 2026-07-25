@@ -743,39 +743,101 @@ export function buildBoard(parent, table) {
   return g;
 }
 
-export function showBoard(kind, topic, participants, chair) {
-  if (!boardMesh || !boardCtx) return;
+let board = null;
+
+function wrapAt(x, text, left, top, width, lineHeight, maxY) {
+  let line = "", y = top;
+  for (const w of String(text || "").split(/\s+/)) {
+    if (!w) continue;
+    if (line && (line + " " + w).length > width) {
+      x.fillText(line, left, y);
+      y += lineHeight;
+      line = w;
+      if (y > maxY) return y;
+    } else {
+      line = line ? line + " " + w : w;
+    }
+  }
+  if (line && y <= maxY) {
+    x.fillText(line, left, y);
+    y += lineHeight;
+  }
+  return y;
+}
+
+function drawBoard() {
+  if (!boardMesh || !boardCtx || !board) return;
   const x = boardCtx;
+
   x.fillStyle = "#e9ecf2";
   x.fillRect(0, 0, 340, 190);
-  x.fillStyle = "#c9502e";
+  x.fillStyle = board.decided ? "#2aa96b" : "#c9502e";
   x.fillRect(0, 0, 340, 5);
 
   x.fillStyle = "#2b3240";
-  x.font = "700 17px ui-monospace, monospace";
-  x.fillText((kind || "meeting").toUpperCase(), 14, 32);
+  x.font = "700 15px ui-monospace, monospace";
+  x.fillText((board.kind || "meeting").toUpperCase(), 14, 28);
 
-  x.font = "600 14px ui-monospace, monospace";
-  x.fillStyle = "#3d4657";
-  const words = String(topic || "").split(/\s+/);
-  let line = "", y = 60;
-  for (const w of words) {
-    if ((line + " " + w).length > 34) { x.fillText(line, 14, y); y += 20; line = w; }
-    else line = line ? line + " " + w : w;
-    if (y > 132) break;
-  }
-  if (line && y <= 132) x.fillText(line, 14, y);
-
-  x.fillStyle = "#6a7385";
   x.font = "600 12px ui-monospace, monospace";
-  x.fillText((participants || []).join(", ").slice(0, 44), 14, 162);
-  if (chair) { x.fillStyle = "#c9502e"; x.fillText("chair: " + chair, 14, 180); }
+  x.fillStyle = "#3d4657";
+  let y = wrapAt(x, board.topic, 14, 48, 40, 16, 80);
+
+  x.strokeStyle = "#c8cdd8";
+  x.lineWidth = 1;
+  x.beginPath();
+  x.moveTo(14, y);
+  x.lineTo(326, y);
+  x.stroke();
+  y += 18;
+
+  if (board.decided) {
+    x.fillStyle = "#2aa96b";
+    x.font = "700 10px ui-monospace, monospace";
+    x.fillText("DECISION", 14, y);
+    x.fillStyle = "#26303f";
+    x.font = "600 12px ui-monospace, monospace";
+    wrapAt(x, board.decided, 14, y + 17, 40, 15, 158);
+  } else if (board.position) {
+    x.fillStyle = "#c9502e";
+    x.font = "700 10px ui-monospace, monospace";
+    x.fillText(String(board.speaker || "").toUpperCase(), 14, y);
+    x.fillStyle = "#4a5364";
+    x.font = "500 12px ui-monospace, monospace";
+    wrapAt(x, board.position, 14, y + 17, 40, 15, 158);
+  } else {
+    x.fillStyle = "#8a93a4";
+    x.font = "500 12px ui-monospace, monospace";
+    x.fillText("the room is sitting down", 14, y);
+  }
+
+  x.fillStyle = "#8d95a4";
+  x.font = "600 10px ui-monospace, monospace";
+  x.fillText(("chair: " + (board.chair || "-")).slice(0, 46), 14, 182);
 
   boardTex.needsUpdate = true;
   boardMesh.visible = true;
 }
 
+export function showBoard(kind, topic, participants, chair) {
+  board = { kind, topic, participants, chair, speaker: null, position: null, decided: null };
+  drawBoard();
+}
+
+export function boardSays(role, position) {
+  if (!board) return;
+  board.speaker = role;
+  board.position = position;
+  drawBoard();
+}
+
+export function boardDecided(claim) {
+  if (!board) return;
+  board.decided = claim;
+  drawBoard();
+}
+
 export function hideBoard() {
+  board = null;
   if (boardMesh) boardMesh.visible = false;
 }
 

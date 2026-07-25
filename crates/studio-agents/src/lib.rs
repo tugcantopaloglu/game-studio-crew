@@ -1,6 +1,8 @@
 pub mod layout;
+pub mod meeting;
 
 pub use layout::{pack_floor, Desk, Floor, Room, TILE};
+pub use meeting::{decision_schema, Decision, DecisionError};
 
 use serde::{Deserialize, Serialize};
 use studio_context::Model;
