@@ -121,9 +121,14 @@ let painted = 0;
 let t = 0;
 
 const camPos = camera.position;
+let throttled = 0;
+let rigCalls = 0;
 function rigStep(a) {
+  rigCalls++;
   if (!tier.farRigPeriod) return 0;
-  return a.person.position.distanceTo(camPos) > tier.farRigDistance ? tier.farRigPeriod : 0;
+  if (a.person.position.distanceTo(camPos) <= tier.farRigDistance) return 0;
+  throttled++;
+  return tier.farRigPeriod;
 }
 
 function frame(dt) {
@@ -225,6 +230,8 @@ if (globalThis.gc) globalThis.gc();
 const heapBefore = process.memoryUsage().heapUsed;
 const opsBefore = { ...canvasOps };
 painted = 0;
+throttled = 0;
+rigCalls = 0;
 
 for (let i = 0; i < FRAMES; i++) {
   t += 1 / 60;
@@ -275,6 +282,7 @@ console.log("");
 console.log("allocation and 2d canvas work over those frames");
 console.log(`  heap retained after gc ${((heapAfter - heapBefore) / 1024).toFixed(0)} KiB total, ${((heapAfter - heapBefore) / FRAMES).toFixed(1)} B per frame`);
 console.log(`  screen repaints        ${painted} (${(painted / FRAMES).toFixed(2)} per frame, ${surfaces} surfaces)`);
+console.log(`  rigs throttled         ${throttled} of ${rigCalls} rig updates (${((throttled / rigCalls) * 100).toFixed(0)}% ran at the far rate)`);
 console.log(`  canvas fillRect/fill   ${canvasOps.fills - opsBefore.fills} (${((canvasOps.fills - opsBefore.fills) / FRAMES).toFixed(1)} per frame)`);
 console.log(`  canvas fillText        ${canvasOps.texts - opsBefore.texts} (${((canvasOps.texts - opsBefore.texts) / FRAMES).toFixed(1)} per frame)`);
 console.log(`  canvas clearRect       ${canvasOps.clears - opsBefore.clears} (${((canvasOps.clears - opsBefore.clears) / FRAMES).toFixed(1)} per frame)`);

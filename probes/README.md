@@ -246,18 +246,24 @@ the real write path** (`SEED_DB=<path> SEED_EVENTS=50000 cargo test -p studio-st
 | `/scene.js` | 0.34ms | 40412 |
 | `/vendor/three.module.js` | 2.40ms | 1272972 |
 | **`/games`** | **82.37ms** | 614 |
-| `/runs/:run/snapshot` | 151.8ms | 7667 |
-| `/runs/:run/events?since_seq=0` | 152.1ms | 7685 |
-| `/runs/:run/events?since_seq=head` | **139.9ms** | **64** |
+
+The resume paths, before and after the call sites were bounded:
+
+| endpoint | before | after | bytes |
+|---|---|---|---|
+| `/runs/:run/snapshot` | 151.8ms | 146.1ms | 7667 |
+| `/runs/:run/events?since_seq=0` | 152.1ms | 145.0ms | 7685 |
+| `/runs/:run/events?since_seq=head` | 139.9ms | **0.26ms** | 64 |
+| websocket reconnect at `since_seq=49900`, first frame | 139.4ms | **1.5ms** | 100 frames |
+
+The two snapshot rows are meant to be flat: a snapshot legitimately reads the
+whole run, and only its head lookup got cheaper. The other two are the fix.
 
 1369 KiB crosses the wire before the floor can build, 1273 KiB of it `three.js`,
 which is already sent with `max-age=86400`.
 
-Two of those rows are the findings. `/games` is 170x the next slowest endpoint
-because it scans the filesystem on the request path. And 139.9ms to return 64
-bytes saying "nothing new" is the unbounded `events_since(run, 0)` in R14: a
-websocket reconnect on that run gets its first frame at 139.4ms whether it needs
-100 events or none.
+`/games` remains 170x the next slowest endpoint because it scans the filesystem
+on the request path; it is owned elsewhere.
 
 ### Store scale
 
@@ -275,7 +281,7 @@ asking for the whole run was.
 | 10000 | 32.49ms | 0.182ms | 0.051ms |
 | 50000 | 124.08ms | 0.181ms | 0.051ms |
 
-Twenty reconnects against that 50000-event run cost **2892.8ms** read whole-log
+Twenty reconnects against that 50000-event run cost **2622.3ms** read whole-log
 each time and **0.5ms** bounded. Pooling the read connections and caching the
 prepared statements is most of the small numbers: the tail read was 0.925ms and
 the head 0.660ms when every call opened its own SQLite handle.

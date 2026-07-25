@@ -790,11 +790,14 @@ async fn snapshot(
     State(state): State<AppState>,
     Path(run): Path<String>,
 ) -> Result<Response, StatusCode> {
+    let head = state
+        .store
+        .head_seq(&run)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let all = state
         .store
         .events_since(&run, 0)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let head = all.last().map(|e| e.seq).unwrap_or(0);
     let compacted = compact_for_snapshot(all);
     Ok(axum::Json(serde_json::json!({
         "run": run,
@@ -809,22 +812,30 @@ async fn events(
     Path(run): Path<String>,
     Query(q): Query<SinceQuery>,
 ) -> Result<Response, StatusCode> {
-    let all = state
+    let head = state
         .store
-        .events_since(&run, 0)
+        .head_seq(&run)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let head = all.last().map(|e| e.seq).unwrap_or(0);
 
     let body = match plan_resume(q.since_seq, head) {
         ResumePlan::UpToDate => serde_json::json!({
             "run": run, "head": head, "mode": "up_to_date", "events": Vec::<Envelope>::new()
         }),
-        ResumePlan::Snapshot { head } => serde_json::json!({
-            "run": run, "head": head, "mode": "snapshot",
-            "events": compact_for_snapshot(all)
-        }),
+        ResumePlan::Snapshot { head } => {
+            let all = state
+                .store
+                .events_since(&run, 0)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            serde_json::json!({
+                "run": run, "head": head, "mode": "snapshot",
+                "events": compact_for_snapshot(all)
+            })
+        }
         ResumePlan::Replay { from_seq, .. } => {
-            let tail: Vec<Envelope> = all.into_iter().filter(|e| e.seq >= from_seq).collect();
+            let tail = state
+                .store
+                .events_since(&run, from_seq.saturating_sub(1))
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             serde_json::json!({
                 "run": run, "head": head, "mode": "replay", "events": tail
             })
@@ -846,16 +857,17 @@ async fn ws_run(mut socket: WebSocket, state: AppState, q: SinceQuery) {
     let mut rx = state.live.subscribe();
 
     if let Some(run) = &q.run {
-        if let Ok(all) = state.store.events_since(run, 0) {
-            let head = all.last().map(|e| e.seq).unwrap_or(0);
+        if let Ok(head) = state.store.head_seq(run) {
             let backlog = match plan_resume(q.since_seq, head) {
-                ResumePlan::UpToDate => Vec::new(),
-                ResumePlan::Snapshot { .. } => compact_for_snapshot(all),
+                ResumePlan::UpToDate => Ok(Vec::new()),
+                ResumePlan::Snapshot { .. } => {
+                    state.store.events_since(run, 0).map(compact_for_snapshot)
+                }
                 ResumePlan::Replay { from_seq, .. } => {
-                    all.into_iter().filter(|e| e.seq >= from_seq).collect()
+                    state.store.events_since(run, from_seq.saturating_sub(1))
                 }
             };
-            for e in backlog {
+            for e in backlog.unwrap_or_default() {
                 if send_event(&mut socket, &e).await.is_err() {
                     return;
                 }
@@ -1061,5 +1073,114 @@ mod approval_tests {
         let rx = s.await_approval("ask_4");
         s.approvals.lock().unwrap().clear();
         assert!(rx.recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod resume_boundary_tests {
+    use super::*;
+    use std::sync::Arc;
+    use studio_events::{EventType, Scene};
+    use tower::ServiceExt;
+
+    fn state_with(run: &str, events: u64) -> AppState {
+        let dir = std::env::temp_dir().join(format!("studio-resume-{run}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(Store::open(dir.join("s.db")).unwrap());
+        for i in 0..events {
+            store
+                .append_event(
+                    run,
+                    "2026-07-25T09:12:44.118Z",
+                    "gameplay_engineer#1",
+                    EventType::ToolCall,
+                    Scene::daemon(),
+                    serde_json::json!({ "i": i }),
+                )
+                .unwrap();
+        }
+        AppState::new(store)
+    }
+
+    async fn resume(state: AppState, uri: &str) -> serde_json::Value {
+        let res = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn seqs(body: &serde_json::Value) -> Vec<u64> {
+        body["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["seq"].as_u64().unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_replay_contains_the_event_whose_seq_is_from_seq_because_the_store_read_is_exclusive() {
+        let body = resume(state_with("edge", 40), "/runs/edge/events?since_seq=9").await;
+        assert_eq!(body["mode"], "replay");
+        assert_eq!(
+            seqs(&body).first().copied(),
+            Some(10),
+            "plan_resume returns from_seq = since_seq + 1 and the store reads seq > ?2, \
+             so the read must be handed from_seq - 1; handing it from_seq drops event 10 \
+             from every replay and every websocket reconnect"
+        );
+        assert_eq!(seqs(&body).last().copied(), Some(40));
+        assert_eq!(seqs(&body).len(), 31);
+    }
+
+    #[tokio::test]
+    async fn two_resumes_either_side_of_a_cut_reproduce_the_log_with_no_gap_and_no_repeat() {
+        let state = state_with("stitch", 60);
+        let first = resume(state.clone(), "/runs/stitch/events?since_seq=0").await;
+        let second = resume(state, "/runs/stitch/events?since_seq=37").await;
+
+        let mut stitched = seqs(&first);
+        let tail = seqs(&second);
+        let cut = stitched.iter().position(|s| *s > 37).unwrap();
+        stitched.truncate(cut);
+        stitched.extend(tail);
+
+        assert_eq!(stitched, (1..=60).collect::<Vec<u64>>());
+    }
+
+    #[tokio::test]
+    async fn a_resume_from_zero_replays_the_whole_log() {
+        let body = resume(state_with("whole", 12), "/runs/whole/events?since_seq=0").await;
+        assert_eq!(seqs(&body), (1..=12).collect::<Vec<u64>>());
+    }
+
+    #[tokio::test]
+    async fn a_client_that_is_already_current_is_sent_nothing() {
+        let body = resume(state_with("current", 25), "/runs/current/events?since_seq=25").await;
+        assert_eq!(body["mode"], "up_to_date");
+        assert_eq!(body["head"], 25);
+        assert!(seqs(&body).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_head_of_a_run_is_reported_without_replaying_it() {
+        let body = resume(state_with("headline", 31), "/runs/headline/snapshot").await;
+        assert_eq!(body["head"], 31, "the snapshot head must survive being read separately from the log");
+        assert!(!seqs(&body).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_run_nobody_has_written_resumes_as_empty_rather_than_failing() {
+        let body = resume(state_with("blank", 0), "/runs/blank/events?since_seq=0").await;
+        assert_eq!(body["head"], 0);
+        assert!(seqs(&body).is_empty());
     }
 }

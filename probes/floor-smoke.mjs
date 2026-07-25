@@ -95,6 +95,39 @@ sceneMod.setMotion(true);
 const pose = sceneMod.avatarPose(a, "running", 1);
 check("the pose object is reused rather than reallocated", sceneMod.avatarPose(a, "running", 2) === pose);
 
+function rigIsFinite(rig) {
+  const bad = [];
+  for (const name of ["hips", "torso", "head", "armL", "armR", "thighL", "thighR", "shinL", "shinR", "prop"]) {
+    const j = rig[name];
+    if (!j) continue;
+    for (const v of [j.position, j.rotation, j.scale]) {
+      for (const axis of ["x", "y", "z"]) {
+        if (!Number.isFinite(v[axis])) bad.push(`${name}.${axis}`);
+      }
+    }
+  }
+  for (const scalar of ["phase", "yaw", "sit", "lean", "headYaw", "headPitch", "owed"]) {
+    if (!Number.isFinite(rig[scalar])) bad.push(scalar);
+  }
+  return bad;
+}
+
+const skipped = built.ambient[1] || built.ambient[0];
+const step = 1 / 15;
+let ran = 0;
+for (let i = 0; i < 60; i++) {
+  if (skipped.rig.update(sceneMod.avatarPose(skipped, "idle", i / 60), 1 / 60, i / 60, step)) ran++;
+}
+check("a throttled rig still runs, at about the rate it was asked for", ran >= 13 && ran <= 17, `${ran} updates in 60 frames at ${(1 / step).toFixed(0)}Hz`);
+
+const poisoned = rigIsFinite(skipped.rig);
+check(
+  "a throttled rig keeps every joint finite, so an uninitialised frame debt cannot poison it",
+  poisoned.length === 0,
+  poisoned.length ? "not finite: " + poisoned.slice(0, 6).join(", ") : ""
+);
+check("an unthrottled rig runs every frame", built.ambient[0].rig.update(sceneMod.avatarPose(built.ambient[0], "idle", 1), 1 / 60, 1, 0) === true);
+
 sceneMod.refreshScreens({ events: 1, tokens: 2, spend: 3, cacheRead: 4, cacheWrite: 5, history: [], feed: [], crewByDept: {} });
 const firstPass = sceneMod.paintScreens(Infinity);
 const secondPass = sceneMod.paintScreens(Infinity);
