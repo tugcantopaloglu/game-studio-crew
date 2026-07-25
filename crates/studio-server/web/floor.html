@@ -215,6 +215,19 @@
     font: 600 10.5px var(--mono); letter-spacing: .08em; text-transform: uppercase;
     padding: 5px 10px; z-index: 4; }
 
+  #lowspec { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 10px; padding: 9px 11px 9px 14px; z-index: 7;
+    border-color: rgba(224,188,85,.4); max-width: calc(100% - 28px); }
+  #lowspec .txt { display: flex; flex-direction: column; min-width: 0; }
+  #lowspec b { font-size: 12.5px; letter-spacing: .03em; }
+  #lowspec span { color: var(--dim); font-size: 11.5px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  #lowspec button { cursor: pointer; font: 600 11.5px var(--sans); border-radius: 8px;
+    padding: 6px 11px; border: 1px solid var(--line-2); color: var(--text);
+    background: linear-gradient(180deg, #1b212c, #151a23); white-space: nowrap; }
+  #lowspec button:hover { background: linear-gradient(180deg, #222a37, #1a202b); }
+  #lowspec-yes { border-color: rgba(224,188,85,.45) !important; color: var(--warn) !important; }
+
   #done { position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
     display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 14px;
     z-index: 7; border-color: rgba(74,217,145,.4);
@@ -701,25 +714,28 @@ addEventListener("keydown", (e) => {
   if (e.key === "Escape") { following = null; showDetail(null); }
 });
 
+let hovered = null;
+let hoveredKey = "";
+
 function hoverTest(e) {
   const r = el.getBoundingClientRect();
-  ndc.x = ((e.clientX - r.left) / r.width) * 2 - 1;
-  ndc.y = -((e.clientY - r.top) / r.height) * 2 + 1;
-  ray.setFromCamera(ndc, camera);
-
-  let best = null, bestDist = Infinity;
-  for (const [role, a] of avatars) {
-    const hits = ray.intersectObject(a.hit, true);
-    if (hits.length && hits[0].distance < bestDist) { bestDist = hits[0].distance; best = role; }
+  const best = pickAgent(e);
+  if (!best) {
+    if (hovered) { tip.style.display = "none"; hovered = null; hoveredKey = ""; }
+    return;
   }
-  if (!best) { tip.style.display = "none"; return; }
 
   const a = avatars.get(best), st = deskState(best);
-  tip.innerHTML =
-    `<b>${esc(a.title)}</b><div class="s">tier ${esc(a.tier)} &middot; ${esc(a.dept)} &middot; ${esc(st.ring)}</div>` +
-    (st.tool ? `<div class="s">tool: ${esc(st.tool)}</div>` : "") +
-    (st.tokens ? `<div class="s">${esc(st.tokens.toLocaleString())} tokens</div>` : "") +
-    (st.summary ? `<div>${esc(st.summary)}</div>` : "");
+  const key = best + "|" + st.ring + "|" + st.tool + "|" + st.tokens + "|" + st.summary;
+  if (key !== hoveredKey) {
+    hoveredKey = key;
+    tip.innerHTML =
+      `<b>${esc(a.title)}</b><div class="s">tier ${esc(a.tier)} &middot; ${esc(a.dept)} &middot; ${esc(st.ring)}</div>` +
+      (st.tool ? `<div class="s">tool: ${esc(st.tool)}</div>` : "") +
+      (st.tokens ? `<div class="s">${esc(st.tokens.toLocaleString())} tokens</div>` : "") +
+      (st.summary ? `<div>${esc(st.summary)}</div>` : "");
+  }
+  hovered = best;
   tip.style.display = "block";
   tip.style.left = Math.min(e.clientX - r.left + 14, r.width - 300) + "px";
   tip.style.top = (e.clientY - r.top + 14) + "px";
@@ -733,6 +749,62 @@ function resize() {
   updateCamera();
 }
 addEventListener("resize", resize);
+
+const hints = hardwareHints(renderer);
+let offerBox = null;
+
+function dismissOffer() {
+  noteOffered();
+  if (offerBox) { offerBox.remove(); offerBox = null; }
+}
+
+function offerLowSpec() {
+  if (offerBox) return;
+  offerBox = document.createElement("div");
+  offerBox.id = "lowspec";
+  offerBox.className = "overlay";
+  offerBox.innerHTML =
+    `<div class="txt"><b>this machine is struggling</b><span>${esc(reasonForOffer(hints))}</span></div>` +
+    `<button id="lowspec-yes">use low spec</button><button id="lowspec-no">keep it</button>`;
+  stage.appendChild(offerBox);
+  document.getElementById("lowspec-yes").onclick = () => {
+    settings.set("lowSpec", true);
+    settings.save();
+    dismissOffer();
+  };
+  document.getElementById("lowspec-no").onclick = dismissOffer;
+}
+
+function countSceneLights() {
+  let n = 0;
+  scene.traverse((o) => { if (o.isPointLight || o.isSpotLight) n++; });
+  return n;
+}
+
+onTier((b) => {
+  tier = b;
+  renderer.setPixelRatio(Math.min(devicePixelRatio, b.pixelRatio));
+  renderer.shadowMap.enabled = b.shadows;
+  renderer.shadowMap.type = b.softShadows ? THREE.PCFSoftShadowMap : THREE.BasicShadowMap;
+  key.castShadow = b.shadows;
+  key.shadow.mapSize.set(b.shadowMap, b.shadowMap);
+  if (key.shadow.map) { key.shadow.map.dispose(); key.shadow.map = null; }
+
+  const wantLights = b.roomLights || b.deskLights;
+  scene.traverse((o) => { if (o.isPointLight || o.isSpotLight) o.visible = wantLights; });
+  if (wantLights && !countSceneLights()) {
+    sent.textContent = "reload the floor to bring the room lighting back";
+  }
+  screensDirty = true;
+  miniDirty = true;
+  resize();
+});
+
+if (typeof matchMedia === "function") {
+  const calm = matchMedia("(prefers-reduced-motion: reduce)");
+  const followMotion = () => { motionOn = !calm.matches; setMotion(motionOn); };
+  if (calm.addEventListener) calm.addEventListener("change", followMotion);
+}
 
 const BUBBLE_W = 512, BUBBLE_H = 176;
 const bubbleCanvas = document.createElement("canvas");
@@ -937,8 +1009,11 @@ function animate() {
 function setRing(role, name) {
   const a = avatars.get(role);
   if (!a) return;
-  deskState(role).ring = name;
+  const st = deskState(role);
+  if (st.ring === name) return;
+  st.ring = name;
   a.ringMat.color.setHex(RING[name] || RING.idle);
+  miniDirty = true;
 }
 
 const roleOf = (actor) => (actor || "").split("#")[0];
@@ -1530,8 +1605,12 @@ fetch("/floor").then((r) => r.json()).then((f) => {
   avatars = built.avatars;
   ambient = built.ambient || [];
   meetingTable = built.meetingTable;
+  rebuildHitList();
   resize();
   refreshScreens(screenData());
+  paintScreens(Infinity);
+  renderMinimap();
+  miniDirty = false;
   setStage({
     THREE, renderer, scene, camera, orbit, avatars, ambient, world: built.world,
     deskState, showDetail, updateCamera,

@@ -80,15 +80,17 @@ pub fn bring_up(
 
     let exe = locate_daemon()?;
     let home = studio_home()?;
+    let mut group = supervision()?;
 
-    let checked = (exe.clone(), home.clone());
-    std::thread::spawn(move || {
-        if let Err(missing) = check_requirements(&checked.0, &checked.1) {
-            complain(missing);
-        }
-    });
+    if let Some(checking) = start_requirements_check(&exe, &home, &mut group) {
+        std::thread::spawn(move || {
+            if let Err(missing) = read_requirements(checking) {
+                complain(missing);
+            }
+        });
+    }
 
-    let daemon = spawn(&exe, &home)?;
+    let daemon = spawn(&exe, &home, group)?;
     let log = daemon.log.clone();
     park(slot, daemon);
     wait_for_the_floor(slot, &log)
@@ -103,9 +105,18 @@ fn park(slot: &Mutex<Option<Daemon>>, daemon: Daemon) {
 fn attached() -> Result<Daemon, Failure> {
     Ok(Daemon {
         child: None,
-        group: ProcessGroup::new()
-            .map_err(|e| Failure::new("could not set up process supervision", e.to_string(), ""))?,
+        group: supervision()?,
         log: PathBuf::new(),
+    })
+}
+
+fn supervision() -> Result<ProcessGroup, Failure> {
+    ProcessGroup::new().map_err(|e| {
+        Failure::new(
+            "could not set up process supervision",
+            e.to_string(),
+            "Without it, closing the window would leave the daemon and its workers running.",
+        )
     })
 }
 
@@ -199,14 +210,22 @@ fn studio_home() -> Result<PathBuf, Failure> {
     Ok(base)
 }
 
-fn check_requirements(exe: &Path, home: &Path) -> Result<(), Failure> {
-    let checked = Command::new(exe)
-        .arg("doctor")
+fn start_requirements_check(exe: &Path, home: &Path, group: &mut ProcessGroup) -> Option<Child> {
+    let mut cmd = Command::new(exe);
+    cmd.arg("doctor")
         .current_dir(home)
         .stdin(Stdio::null())
-        .output();
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    group.prepare(&mut cmd);
 
-    let checked = match checked {
+    let child = cmd.spawn().ok()?;
+    group.adopt(&child).ok()?;
+    Some(child)
+}
+
+fn read_requirements(checking: Child) -> Result<(), Failure> {
+    let checked = match checking.wait_with_output() {
         Ok(out) => out,
         Err(_) => return Ok(()),
     };
@@ -223,7 +242,7 @@ fn check_requirements(exe: &Path, home: &Path) -> Result<(), Failure> {
     ))
 }
 
-fn spawn(exe: &Path, home: &Path) -> Result<Daemon, Failure> {
+fn spawn(exe: &Path, home: &Path, mut group: ProcessGroup) -> Result<Daemon, Failure> {
     let log = home.join(".studio").join("daemon.log");
     let out = File::create(&log).map_err(|e| {
         Failure::new(
@@ -234,14 +253,6 @@ fn spawn(exe: &Path, home: &Path) -> Result<Daemon, Failure> {
     })?;
     let errors = out.try_clone().map_err(|e| {
         Failure::new("the daemon log could not be opened", e.to_string(), "")
-    })?;
-
-    let mut group = ProcessGroup::new().map_err(|e| {
-        Failure::new(
-            "could not set up process supervision",
-            e.to_string(),
-            "Without it, closing the window would leave workers running.",
-        )
     })?;
 
     let mut cmd = Command::new(exe);

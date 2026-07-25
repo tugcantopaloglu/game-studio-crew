@@ -1,11 +1,14 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
-import { loadFloorModules, percentile, canvasOps } from "./floor-dom.mjs";
+import { loadFloorModules, checkoutWeb, percentile, canvasOps } from "./floor-dom.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "..");
-const webDir = join(repo, "crates", "studio-server", "web");
+const rev = process.env.REV || "";
+const webDir = rev
+  ? checkoutWeb(rev, join(repo, "crates", "studio-server", "web"), repo)
+  : join(repo, "crates", "studio-server", "web");
 const floorPath = process.env.FLOOR_JSON || join(here, "out", "floor.json");
 const FRAMES = Number(process.env.FRAMES || 900);
 const WARMUP = Number(process.env.WARMUP || 120);
@@ -13,7 +16,9 @@ const WARMUP = Number(process.env.WARMUP || 120);
 const RING = { idle: 0x2f3644, running: 0x4ad991, blocked: 0xd9c24a, meeting: 0x6fa8d1, error: 0xd95555 };
 const RINGS = ["idle", "running", "running", "meeting", "blocked", "error", "running", "idle"];
 
-const { THREE, scene: sceneMod, perf } = await loadFloorModules(webDir);
+const lowSpec = process.env.LOW_SPEC === "1";
+const { THREE, scene: sceneMod, perf } = await loadFloorModules(webDir, { lowSpec });
+const tier = perf && perf.budget ? perf.budget() : { name: "high", screensPerFrame: 999, screenPeriod: 0.4, minimapPeriod: 0.25, farRigPeriod: 0, farRigDistance: 34 };
 const floor = JSON.parse(readFileSync(floorPath, "utf8"));
 
 const scene = new THREE.Scene();
@@ -28,6 +33,7 @@ const buildMs = performance.now() - buildStart;
 
 const avatars = built.avatars;
 const ambient = built.ambient || [];
+const surfaces = sceneMod.screenCount ? sceneMod.screenCount() : 0;
 
 const state = new Map();
 [...avatars.keys()].forEach((role, i) => {
@@ -110,7 +116,15 @@ function census() {
 let screensDirty = true;
 let lastScreenPaint = 0;
 let lastMini = 0;
+let miniDirty = true;
+let painted = 0;
 let t = 0;
+
+const camPos = camera.position;
+function rigStep(a) {
+  if (!tier.farRigPeriod) return 0;
+  return a.person.position.distanceTo(camPos) > tier.farRigDistance ? tier.farRigPeriod : 0;
+}
 
 function frame(dt) {
   const marks = {};
@@ -121,17 +135,13 @@ function frame(dt) {
     const stuck = st.ring === "error" || st.ring === "blocked";
     const busy = st.ring === "running" || st.ring === "meeting" || stuck;
     sceneMod.wanderStep(a, busy, dt, t);
-    a.rig.update(sceneMod.avatarPose(a, st.ring, t), dt, t);
+    a.rig.update(sceneMod.avatarPose(a, st.ring, t), dt, t, rigStep(a));
 
-    if (stuck) {
-      a.ringMat.opacity = 0.55 + Math.sin(t * 7 + a.seed) * 0.45;
-    } else {
-      a.ringMat.opacity = st.ring === "idle" ? 0.28 : 0.7 + Math.sin(t * 4 + a.seed) * 0.3;
-    }
-    if (a.alarm) {
-      a.alarm.visible = stuck;
-      if (stuck) a.alarm.intensity = 2.6 + Math.sin(t * 7 + a.seed) * 2.0;
-    }
+    a.ringMat.opacity = stuck
+      ? 0.55 + Math.sin(t * 7 + a.seed) * 0.45
+      : st.ring === "idle" ? 0.28 : 0.7 + Math.sin(t * 4 + a.seed) * 0.3;
+    if (a.alarm) a.alarm.intensity = stuck ? 2.6 + Math.sin(t * 7 + a.seed) * 2.0 : 0;
+
     const lit = st.ring === "running" || st.ring === "meeting";
     if (a.lamp) {
       a.lamp.visible = lit || stuck;
@@ -140,14 +150,17 @@ function frame(dt) {
         a.bulb.material.color.setHex(tint);
         a.cone.material.color.setHex(tint);
         a.pool.material.color.setHex(tint);
-        a.spot.color.setHex(tint);
-        const pulse = stuck ? 7 : 3.4;
-        const w = 0.5 + Math.sin(t * pulse + a.seed) * 0.5;
+        const w = 0.5 + Math.sin(t * (stuck ? 7 : 3.4) + a.seed) * 0.5;
         a.bulb.material.opacity = 0.6 + w * 0.4;
         a.bulb.scale.setScalar(1 + w * 0.2);
         a.cone.material.opacity = 0.11 + w * 0.10;
         a.pool.material.opacity = 0.14 + w * 0.12;
-        a.spot.intensity = 22 + w * 22;
+        if (a.spot) {
+          a.spot.color.setHex(tint);
+          a.spot.intensity = 22 + w * 22;
+        }
+      } else if (a.spot) {
+        a.spot.intensity = 0;
       }
     }
   }
@@ -156,24 +169,30 @@ function frame(dt) {
 
   for (const a of ambient) {
     sceneMod.wanderStep(a, false, dt, t);
-    a.rig.update(sceneMod.avatarPose(a, "idle", t), dt, t);
+    a.rig.update(sceneMod.avatarPose(a, "idle", t), dt, t, rigStep(a));
   }
   marks.ambient = performance.now() - mark;
   mark = performance.now();
 
-  if (t - lastMini > 0.25) { renderMinimap(); lastMini = t; }
+  if (miniDirty && t - lastMini > tier.minimapPeriod) {
+    renderMinimap();
+    miniDirty = false;
+    lastMini = t;
+  }
   marks.minimap = performance.now() - mark;
   mark = performance.now();
 
-  if (screensDirty && t - lastScreenPaint > 0.4) {
-    sceneMod.refreshScreens(screenData());
+  if (screensDirty && t - lastScreenPaint > tier.screenPeriod) {
+    const marked = sceneMod.refreshScreens(screenData());
+    if (!sceneMod.paintScreens) painted += marked || surfaces;
     screensDirty = false;
     lastScreenPaint = t;
   }
+  if (sceneMod.paintScreens) painted += sceneMod.paintScreens(tier.screensPerFrame);
   marks.screens = performance.now() - mark;
   mark = performance.now();
 
-  scene.updateMatrixWorld(true);
+  scene.updateMatrixWorld();
   marks.matrices = performance.now() - mark;
 
   return marks;
@@ -183,25 +202,40 @@ const PHASES = ["crew", "ambient", "minimap", "screens", "matrices"];
 const samples = { total: [] };
 for (const p of PHASES) samples[p] = [];
 
+function churn(i) {
+  stats.events++;
+  stats.tokens += 137;
+  stats.spend += 0.0012;
+  screensDirty = true;
+  if (i % 40 === 0) {
+    const roles = [...avatars.keys()];
+    const role = roles[i % roles.length];
+    state.get(role).ring = RINGS[(i / 40 + 3) % RINGS.length | 0];
+    miniDirty = true;
+  }
+}
+
 for (let i = 0; i < WARMUP; i++) {
   t += 1 / 60;
-  screensDirty = true;
+  churn(i);
   frame(1 / 60);
 }
 
 if (globalThis.gc) globalThis.gc();
 const heapBefore = process.memoryUsage().heapUsed;
 const opsBefore = { ...canvasOps };
+painted = 0;
 
 for (let i = 0; i < FRAMES; i++) {
   t += 1 / 60;
-  screensDirty = true;
+  churn(i);
   const start = performance.now();
   const marks = frame(1 / 60);
   samples.total.push(performance.now() - start);
   for (const p of PHASES) samples[p].push(marks[p]);
 }
 
+if (globalThis.gc) globalThis.gc();
 const heapAfter = process.memoryUsage().heapUsed;
 const c = census();
 
@@ -239,7 +273,8 @@ console.log(
 );
 console.log("");
 console.log("allocation and 2d canvas work over those frames");
-console.log(`  heap growth            ${((heapAfter - heapBefore) / 1024).toFixed(0)} KiB total, ${((heapAfter - heapBefore) / FRAMES).toFixed(0)} B per frame`);
+console.log(`  heap retained after gc ${((heapAfter - heapBefore) / 1024).toFixed(0)} KiB total, ${((heapAfter - heapBefore) / FRAMES).toFixed(1)} B per frame`);
+console.log(`  screen repaints        ${painted} (${(painted / FRAMES).toFixed(2)} per frame, ${surfaces} surfaces)`);
 console.log(`  canvas fillRect/fill   ${canvasOps.fills - opsBefore.fills} (${((canvasOps.fills - opsBefore.fills) / FRAMES).toFixed(1)} per frame)`);
 console.log(`  canvas fillText        ${canvasOps.texts - opsBefore.texts} (${((canvasOps.texts - opsBefore.texts) / FRAMES).toFixed(1)} per frame)`);
 console.log(`  canvas clearRect       ${canvasOps.clears - opsBefore.clears} (${((canvasOps.clears - opsBefore.clears) / FRAMES).toFixed(1)} per frame)`);

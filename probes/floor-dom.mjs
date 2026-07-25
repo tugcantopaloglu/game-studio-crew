@@ -1,4 +1,5 @@
-import { mkdtempSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -86,6 +87,21 @@ export function installDom() {
   return documentStub;
 }
 
+export function checkoutWeb(rev, webDir, repo) {
+  const listed = execFileSync("git", ["ls-tree", "--name-only", "-r", rev, "crates/studio-server/web/"], {
+    cwd: repo, encoding: "utf8",
+  }).trim().split(/\r?\n/);
+  const dir = mkdtempSync(join(tmpdir(), "floor-rev-"));
+  mkdirSync(join(dir, "vendor"), { recursive: true });
+  for (const path of listed) {
+    if (!path.endsWith(".js") && !path.endsWith(".html")) continue;
+    const name = path.slice("crates/studio-server/web/".length);
+    const body = execFileSync("git", ["show", `${rev}:${path}`], { cwd: repo, maxBuffer: 1 << 28 });
+    writeFileSync(join(dir, name), body);
+  }
+  return dir;
+}
+
 export function stageModules(webDir) {
   const dir = mkdtempSync(join(tmpdir(), "floor-probe-"));
   for (const name of readdirSync(webDir)) {
@@ -103,8 +119,9 @@ export function stageModules(webDir) {
   return dir;
 }
 
-export async function loadFloorModules(webDir) {
+export async function loadFloorModules(webDir, prefs) {
   installDom();
+  if (prefs) globalThis.localStorage.setItem("studio.settings", JSON.stringify(prefs));
   const dir = stageModules(webDir);
   const url = (n) => pathToFileURL(join(dir, n)).href;
   const THREE = await import(url("vendor-three.module.js"));

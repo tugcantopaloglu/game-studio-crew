@@ -761,7 +761,10 @@ export function buildOffice(floor, scene) {
   const ambient = buildAmbient(world, floor, cx, cz, tier.ambientCrew);
   buildBoard(fixtures, table);
 
-  world.updateMatrixWorld(true);
+  scene.updateMatrixWorld(true);
+  scene.matrixAutoUpdate = false;
+  world.matrixAutoUpdate = false;
+  fixtures.matrixAutoUpdate = false;
   fixtures.matrixWorldAutoUpdate = false;
 
   return { world, fixtures, avatars, ambient, meetingTable: table };

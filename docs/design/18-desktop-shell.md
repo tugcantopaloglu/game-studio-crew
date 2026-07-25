@@ -19,7 +19,7 @@ It could have been a library linked into the window. It is not, for four reasons
 
 - **The daemon outlives and predates the window.** `studiod studio` from a terminal is still the primary way to run the studio, and the M-proofs depend on it. A shell that only works when linked in would fork the product in two.
 - **A GUI crash must not take the crew with it.** WebView2 lives in the window process. Keeping the orchestrator out of that process means a renderer fault loses a view, not a run.
-- **Killing the tree is already solved for a child process.** `ProcessGroup` assigns the daemon to a Job object with `KILL_ON_JOB_CLOSE`; the daemon's workers are its own children and inherit the job. Closing the window is therefore a guaranteed full stop, including a `claude` that is mid-turn.
+- **Killing the tree is already solved for a child process.** `ProcessGroup` assigns the daemon to a Job object with `KILL_ON_JOB_CLOSE`; the daemon's workers are its own children and inherit the job. Closing the window is therefore a guaranteed full stop, including a `claude` that is mid-turn. **Every** process the shell starts goes into that one job, the requirements check included — the first live run orphaned the doctor process on close and it panicked on a stdout pipe nobody was reading any more, which is exactly the class of mess the job exists to prevent.
 - **One window is not the only client.** The floor is reachable from an ordinary browser at the same time, which is how you watch a run from a second screen.
 
 ### Startup, in order
@@ -81,6 +81,8 @@ It does not contain: **any absolute path from the machine that produced it**, th
 
 **The daemon's stdout is deliberately not tailed into the report.** `studiod studio` prints task briefs, decision claims and worker output as it works; no redaction pass can reliably tell a project's plot summary from a log line, so the safe move is to not read that file at all. The report's tail comes only from `crash::note`, which records lifecycle lines and truncates each to 200 characters. Today that is the invocation line; anything the daemon later chooses to record goes through the same cap and the same redaction.
 
+The redaction was confirmed by an accident rather than only by its tests. The first live run of the shell orphaned the doctor process, which panicked writing to a closed pipe, and the hook wrote a real report unprompted. It carried the version, `Microsoft Windows [Version 10.0.26200.8875]`, `subcommand: studiod doctor`, the backtrace and the lifecycle line — and **no path from this machine**. The one path in it was rustc's own virtual sysroot, which is not user data. It also showed a limit worth naming: the release binary carries no debug info, so most backtrace frames read `<unknown>`. The report still identifies the panic and where it came from, but symbol names are a `debug = 1` build away and are not there today.
+
 **Filing is a question, never an action.** Nothing is posted anywhere. There is no token, no API key, and no silent upload. On a terminal the hook asks; on `y` it opens a prefilled GitHub issue URL in the browser, and on anything else the file simply stays on disk. When stdin is not a terminal it prints the issue URL and returns. The target repository defaults to `tugcantopaloglu/game-studio-crew` and is overridable with `STUDIO_CRASH_REPO`.
 
 ## Measured on this machine
@@ -89,16 +91,16 @@ Windows 11 Pro 26200, rustc 1.97.1, MSVC.
 
 | Thing | Measured |
 |---|---|
-| shell binary, tuned release | **576 KB** (590,336 bytes) |
+| shell binary, tuned release | **576 KB** (589,824 bytes) |
 | Tauri v2 equivalent, default release | 7.90 MB (8,284,160 bytes) |
 | `studiod.exe`, workspace release profile | 18.4 MB (19,344,384 bytes) |
 | installer | 4.8 MB |
 | installed footprint | **23.26 MB** (24,394,759 bytes, uninstaller included) |
 | `studiod doctor`, serial probes | 17.8 s |
 | `studiod doctor`, parallel probes | 4.2 s |
-| shell launch to the floor answering | **1.60 s** |
+| shell launch to the floor answering | **1.60 s and 1.70 s**, two runs |
 
-That 1.60 s is from process start to `127.0.0.1:7878` accepting a connection, with the requirements check running beside it as a second child rather than in front of it — both children were visible under the shell's PID during the run. The window is up and showing the splash for most of it.
+That is from process start to `127.0.0.1:7878` accepting a connection, with the requirements check running beside it as a second child rather than in front of it — both children were visible under the shell's PID during the run, and both were gone with the port free within seconds of the window closing. The window is up and showing the splash for most of it.
 
 One operational note the run turned up: the daemon inherits the shell's environment, so launching the app from inside a Claude Code session makes `guard_nested_session` refuse to start and the window shows that refusal verbatim. That is the guard working, not the shell failing; started normally from the Start Menu there is no such variable.
 
