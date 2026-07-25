@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join, resolve } from "node:path";
-import { loadFloorModules, stageModules, installDom, floorLayout } from "./floor-dom.mjs";
+import { loadFloorModules, stageModules, installDom, floorLayout, glRequests } from "./floor-dom.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "..");
@@ -62,7 +62,8 @@ if (!module) {
   }
 }
 
-const { scene: sceneMod, perf } = await loadFloorModules(webDir);
+const { THREE, scene: sceneMod, perf, bus } = await loadFloorModules(webDir);
+const settings = bus.settings;
 const floor = await floorLayout(join(here, "out", "floor.json"), process.env.FLOOR_URL);
 const { Scene } = await import(pathToFileURL(join(stageModules(webDir), "vendor-three.module.js")).href);
 
@@ -135,6 +136,61 @@ check("a screen with unchanged content is not repainted", firstPass > 0 && secon
 
 sceneMod.refreshScreens({ events: 9, tokens: 9, spend: 9, cacheRead: 9, cacheWrite: 9, history: [], feed: [], crewByDept: {} });
 check("a screen budget of 2 paints at most 2 in a frame", sceneMod.paintScreens(2) <= 2);
+
+glRequests.length = 0;
+try {
+  new THREE.WebGLRenderer({ powerPreference: "high-performance", failIfMajorPerformanceCaveat: true });
+} catch (err) {
+  void err;
+}
+const asked = glRequests.find((r) => r.attrs);
+check(
+  "the real three.js forwards powerPreference into canvas.getContext",
+  Boolean(asked) && asked.attrs.powerPreference === "high-performance",
+  asked ? `${asked.kind} powerPreference=${asked.attrs.powerPreference} failIfMajorPerformanceCaveat=${asked.attrs.failIfMajorPerformanceCaveat}` : "no context request recorded"
+);
+
+function fakeThree(failFirst) {
+  const seen = [];
+  return {
+    seen,
+    WebGLRenderer: class {
+      constructor(attrs) {
+        seen.push(attrs);
+        if (failFirst && attrs.failIfMajorPerformanceCaveat) {
+          throw new Error("Error creating WebGL context with your selected attributes.");
+        }
+      }
+    },
+  };
+}
+
+const tierNow = perf.budget();
+
+const granted = fakeThree(false);
+const grantedState = perf.createRenderer(granted, tierNow);
+check("acceleration on asks for a high-performance context first", granted.seen[0].powerPreference === "high-performance" && granted.seen[0].failIfMajorPerformanceCaveat === true);
+check("a granted context is reported as accelerated with no caveat", grantedState.caveat === false && grantedState.tries === 1);
+check("a granted context reads back as accelerated", perf.hardwareHints(null).accelerated === true);
+
+const refused = fakeThree(true);
+const refusedState = perf.createRenderer(refused, tierNow);
+check(
+  "a refused high-performance context retries without the caveat flag rather than failing",
+  refused.seen.length === 2 && refused.seen[1].failIfMajorPerformanceCaveat === false && refusedState.renderer !== null,
+  `${refused.seen.length} attempts`
+);
+check("a refused context is reported as a software fallback", refusedState.caveat === true && perf.hardwareHints(null).software === true);
+check("a software fallback offers low spec immediately rather than after 240 frames", perf.shouldOfferLowSpec(perf.hardwareHints(null)) === true);
+
+settings.set("gpu.acceleration", false);
+check("turning acceleration off asks for low power", perf.contextAttempts(perf.gpuWanted())[0].powerPreference === "low-power");
+check("turning acceleration off makes exactly one attempt", perf.contextAttempts(perf.gpuWanted()).length === 1);
+check("flipping the setting after the renderer exists asks for a reload", perf.gpuNeedsReload() === true);
+const offState = perf.createRenderer(fakeThree(false), tierNow);
+check("acceleration off is not reported as accelerated", offState.wantGpu === false && perf.hardwareHints(null).accelerated === false);
+check("a rebuilt renderer no longer asks for a reload", perf.gpuNeedsReload() === false);
+settings.set("gpu.acceleration", true);
 
 console.log("");
 if (failures.length) {

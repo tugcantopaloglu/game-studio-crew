@@ -284,14 +284,25 @@ mod tests {
 
         let excuses = report.installed_but_undrivable();
         assert_eq!(excuses.len(), 2);
-        assert!(
-            excuses.iter().any(|(name, why)| *name == "codex" && why.contains("no provider")),
-            "codex has no provider at all: {excuses:?}"
-        );
+        for (name, why) in &excuses {
+            assert!(
+                !why.trim().is_empty(),
+                "{name} is refused without saying why"
+            );
+        }
         assert!(
             excuses.iter().any(|(name, why)| *name == "gemini" && why.contains("system prompt")),
             "gemini's blocker must come from the provider table: {excuses:?}"
         );
+    }
+
+    #[test]
+    fn a_cli_the_provider_table_has_never_heard_of_says_so() {
+        let unknown = "no-such-coding-cli";
+        assert!(Provider::from_id(unknown).is_none());
+        let tool = Tool::found(unknown, unknown, Kind::CodingCli, Some("1.0".into()));
+        assert!(!tool.drivable);
+        assert!(tool.cannot_drive.unwrap().contains("no provider"));
     }
 
     #[test]

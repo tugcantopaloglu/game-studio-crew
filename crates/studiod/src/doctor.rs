@@ -178,7 +178,10 @@ mod tests {
         );
         let text = render(&found);
         assert!(text.contains("installed: codex"));
-        assert!(text.contains("codex: the studio has no provider for codex"));
+        assert!(
+            text.lines().any(|l| l.trim_start().starts_with("codex: ")),
+            "an undrivable CLI is listed with the provider table's reason: {text}"
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@
 #define AppUrl "https://github.com/tugcantopaloglu/game-studio-crew"
 #define ShellExe "game-studio.exe"
 #define DaemonExe "studiod.exe"
+#define DaemonPdb "studiod.pdb"
 #define WebView2Client "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 
 [Setup]
@@ -37,6 +38,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Files]
 Source: "..\desktop\target\release\{#ShellExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\{#DaemonExe}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\target\release\{#DaemonPdb}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#ShellExe}"; Comment: "Open the studio floor"

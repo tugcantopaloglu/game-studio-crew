@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export const canvasOps = { contexts: 0, fills: 0, texts: 0, strokes: 0, clears: 0 };
+export const glRequests = [];
 
 function ctx2d() {
   canvasOps.contexts++;
@@ -34,7 +35,11 @@ function element(tag) {
     tagName: String(tag).toUpperCase(),
     width: 300, height: 150, style: {}, children: [],
     nodeType: 1, className: "", id: "", textContent: "", innerHTML: "",
-    getContext: (kind) => (kind === "2d" ? ctx2d() : null),
+    getContext: (kind, attrs) => {
+      if (kind === "2d") return ctx2d();
+      glRequests.push({ kind, attrs });
+      return null;
+    },
     setAttribute: noop2, getAttribute: () => null, removeAttribute: noop2,
     addEventListener: noop2, removeEventListener: noop2, dispatchEvent: () => true,
     appendChild: (c) => { node.children.push(c); return c; },
@@ -139,7 +144,8 @@ export async function loadFloorModules(webDir, prefs) {
   } catch (err) {
     perf = null;
   }
-  return { THREE, scene, avatar, voxel, perf, dir };
+  const bus = await import(url("bus.js"));
+  return { THREE, scene, avatar, voxel, perf, bus, dir };
 }
 
 export async function floorLayout(path, url) {

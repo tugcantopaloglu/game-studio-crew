@@ -1,6 +1,6 @@
 # 18: Desktop Shell, Install and Crash Reporting
 
-> **Status:** v0.3, 2026-07-25. Built, run and measured on Windows 11: the shell starts its own daemon and serves the floor **1.60 s** after launch, kills the daemon on window close, attaches to a daemon that is already running, and the installer was compiled, installed and uninstalled on this machine. `studiod doctor` reports against the real toolchain and separates *installed* from *the studio can drive it*; the panic hook writes a redacted report. **Not exercised here:** any platform other than Windows.
+> **Status:** v0.4, 2026-07-25. Built, run and measured on Windows 11: the shell starts its own daemon and serves the floor **1.60 s** after launch, kills the daemon on window close, attaches to a daemon that is already running, and the installer was compiled, installed and uninstalled on this machine, `studiod.pdb` included, so a crash report names real functions rather than `<unknown>` — reproduced both with the pdb and without it on a real panic. `studiod doctor` reports against the real toolchain and separates *installed* from *the studio can drive it*; the panic hook writes a redacted report. **Not exercised here:** any platform other than Windows.
 > **Consumes** the studio server ([12](12-visual-workspace.md)) and the process group from `studio-core` ([01](01-orchestrator-core.md)). Owns `desktop/`, `installer/`, `crates/studio-server/src/health.rs`, `crates/studiod/src/doctor.rs` and `crates/studiod/src/crash.rs`.
 
 ## What the shell is
@@ -63,9 +63,11 @@ The verdict is **not this module's opinion**. `drivable` is `studio_core::Provid
 
 It is a **per-user install** — `PrivilegesRequired=lowest` — which means no UAC prompt, no admin, and nothing written outside the user's own profile:
 
-- `%LOCALAPPDATA%\Programs\Game Studio Crew\` — `game-studio.exe`, `studiod.exe`, the uninstaller.
+- `%LOCALAPPDATA%\Programs\Game Studio Crew\` — `game-studio.exe`, `studiod.exe`, **`studiod.pdb`**, the uninstaller.
 - `%APPDATA%\...\Start Menu\Programs\Game Studio Crew.lnk`.
 - One uninstall key under `HKCU\...\Uninstall`.
+
+**`studiod.pdb` is 29 MB of the install and it is not optional.** Windows resolves a backtrace from the pdb *at runtime*, so a crash report from a machine without that file beside the binary names no functions at all ([below](#what-a-crash-report-contains-and-what-it-must-not)). It is listed in `[Files]` with no `skipifsourcedoesntexist`, deliberately: if someone builds with a profile that does not emit it, the installer build fails loudly rather than quietly shipping an app whose crash reports are useless. **Anyone tempted to drop this file to halve the download should read that section first.** The shell's own pdb is *not* shipped, because the shell installs no panic hook and writes no crash reports, so its debug info would buy nothing.
 
 It does **not** touch `PATH`, register a service, install a scheduled task, associate a file type, or write to `HKLM`. Before installing it checks for the WebView2 runtime and says plainly what an empty window would mean if it is missing.
 
@@ -81,7 +83,18 @@ It does not contain: **any absolute path from the machine that produced it**, th
 
 **The daemon's stdout is deliberately not tailed into the report.** `studiod studio` prints task briefs, decision claims and worker output as it works; no redaction pass can reliably tell a project's plot summary from a log line, so the safe move is to not read that file at all. The report's tail comes only from `crash::note`, which records lifecycle lines and truncates each to 200 characters. Today that is the invocation line; anything the daemon later chooses to record goes through the same cap and the same redaction.
 
-The redaction was confirmed by an accident rather than only by its tests. The first live run of the shell orphaned the doctor process, which panicked writing to a closed pipe, and the hook wrote a real report unprompted. It carried the version, `Microsoft Windows [Version 10.0.26200.8875]`, `subcommand: studiod doctor`, the backtrace and the lifecycle line — and **no path from this machine**. The one path in it was rustc's own virtual sysroot, which is not user data. It also showed a limit worth naming: the release binary carries no debug info, so most backtrace frames read `<unknown>`. The report still identifies the panic and where it came from, but symbol names are a `debug = 1` build away and are not there today.
+The redaction was confirmed by an accident rather than only by its tests. The first live run of the shell orphaned the doctor process, which panicked writing to a closed pipe, and the hook wrote a real report unprompted. It carried the version, `Microsoft Windows [Version 10.0.26200.8875]`, `subcommand: studiod doctor`, the backtrace and the lifecycle line — and **no path from this machine**. The one path in it was rustc's own virtual sysroot, which is not user data.
+
+### The backtrace needs the pdb, and says so when it is missing
+
+That accidental report also showed every frame as `<unknown>`, because the release profile stripped the debug info. The profile now keeps it (`debug = "line-tables-only"`, `strip = "none"`), and a test in `crash.rs` pins that so a later size optimisation cannot quietly undo it. **The other half of the fix is the installer**, because Windows symbolizes from `studiod.pdb` at runtime, not at build time.
+
+Both directions were reproduced on this machine by making the doctor print into a pipe nobody reads, which is the same broken-pipe panic the orphan hit:
+
+- **pdb beside the binary** — real names, and the redaction still applies to them: `12: studiod::doctor::report at <path>/doctor.rs:8`, `13: studiod::main at <path>/main.rs:556`. No absolute path from this machine survived, and the report says nothing about missing symbols.
+- **pdb moved away, same binary** — 14 frames of `<unknown>`, and the report ends with *the frames above have no names because studiod.pdb was not beside the binary*.
+
+That last line is the signal that an installer changed its file list. A report that carries it is not a broken build; it is a broken *install*.
 
 **Filing is a question, never an action.** Nothing is posted anywhere. There is no token, no API key, and no silent upload. On a terminal the hook asks; on `y` it opens a prefilled GitHub issue URL in the browser, and on anything else the file simply stays on disk. When stdin is not a terminal it prints the issue URL and returns. The target repository defaults to `tugcantopaloglu/game-studio-crew` and is overridable with `STUDIO_CRASH_REPO`.
 
@@ -93,9 +106,10 @@ Windows 11 Pro 26200, rustc 1.97.1, MSVC.
 |---|---|
 | shell binary, tuned release | **576 KB** (589,824 bytes) |
 | Tauri v2 equivalent, default release | 7.90 MB (8,284,160 bytes) |
-| `studiod.exe`, workspace release profile | 18.4 MB (19,344,384 bytes) |
-| installer | 4.8 MB |
-| installed footprint | **23.26 MB** (24,394,759 bytes, uninstaller included) |
+| `studiod.exe`, workspace release profile | 18.90 MB (19,824,128 bytes) |
+| `studiod.pdb`, shipped for symbolized crash reports | 29.46 MB (30,887,936 bytes) |
+| installer | **10.0 MB** (10,494,331 bytes) |
+| installed footprint | **53.18 MB** (55,762,765 bytes, pdb and uninstaller included) |
 | `studiod doctor`, serial probes | 17.8 s |
 | `studiod doctor`, parallel probes | 4.2 s |
 | shell launch to the floor answering | **1.60 s and 1.70 s**, two runs |
@@ -104,7 +118,9 @@ That is from process start to `127.0.0.1:7878` accepting a connection, with the 
 
 One operational note the run turned up: the daemon inherits the shell's environment, so launching the app from inside a Claude Code session makes `guard_nested_session` refuse to start and the window shows that refusal verbatim. That is the guard working, not the shell failing; started normally from the Start Menu there is no such variable.
 
-The daemon is thirty times the size of the shell because it carries SQLite, tree-sitter grammars and tokio, and because the root workspace's release profile is untuned — deliberately not changed here, since every crate in the repo shares it.
+The daemon is thirty times the size of the shell because it carries SQLite, tree-sitter grammars and tokio, and because the root workspace's release profile is otherwise untuned — deliberately not changed here beyond the debug info, since every crate in the repo shares it.
+
+**The pdb more than doubled the download.** Before shipping it the installer was 4.8 MB and the install 23.26 MB; the same build with `studiod.pdb` is 10.0 MB and 53.18 MB. That is the price of a crash report that names functions, and it was accepted deliberately rather than discovered later. The exe itself grew by only 479,744 bytes for the line tables; the 29 MB is all pdb, and it is never loaded unless something panics.
 
 ## What is not built
 

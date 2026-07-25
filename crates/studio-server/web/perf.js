@@ -43,12 +43,16 @@ const LOW = {
 const STRUGGLE_P95 = 26;
 const STRUGGLE_FRAMES = 240;
 const SAMPLE_CAP = 180;
+const SOFTWARE = /swiftshader|basic render|llvmpipe|software|microsoft basic/i;
 
 const tierTaps = new Set();
+const gpuTaps = new Set();
 const samples = [];
 let cursor = 0;
 let counted = 0;
 let offered = false;
+let render = null;
+let builtWithGpu = null;
 
 export function budget() {
   return settings.get("lowSpec") ? LOW : HIGH;
@@ -72,16 +76,24 @@ export function onTier(fn) {
   return () => tierTaps.delete(fn);
 }
 
-settings.onChange((key) => {
-  if (key !== null && key !== "lowSpec") return;
-  const b = budget();
-  for (const fn of tierTaps) {
+export function onGpu(fn) {
+  gpuTaps.add(fn);
+  return () => gpuTaps.delete(fn);
+}
+
+function fanout(taps, arg) {
+  for (const fn of taps) {
     try {
-      fn(b);
+      fn(arg);
     } catch (err) {
       continue;
     }
   }
+}
+
+settings.onChange((key) => {
+  if (key === null || key === "lowSpec") fanout(tierTaps, budget());
+  if (key === null || key === "gpu.acceleration") fanout(gpuTaps, gpuNeedsReload());
 });
 
 export function sampleFrame(ms) {
@@ -102,6 +114,59 @@ export function frameMean() {
   return samples.reduce((a, b) => a + b, 0) / samples.length;
 }
 
+export function gpuWanted() {
+  return settings.get("gpu.acceleration", true) !== false;
+}
+
+export function contextAttempts(wantGpu) {
+  if (!wantGpu) {
+    return [{ powerPreference: "low-power", failIfMajorPerformanceCaveat: false }];
+  }
+  return [
+    { powerPreference: "high-performance", failIfMajorPerformanceCaveat: true },
+    { powerPreference: "high-performance", failIfMajorPerformanceCaveat: false },
+  ];
+}
+
+export function createRenderer(THREE, tier) {
+  const wantGpu = gpuWanted();
+  const attempts = contextAttempts(wantGpu);
+  let failure = null;
+
+  for (let i = 0; i < attempts.length; i++) {
+    try {
+      const renderer = new THREE.WebGLRenderer({
+        antialias: tier.pixelRatio > 1,
+        powerPreference: attempts[i].powerPreference,
+        failIfMajorPerformanceCaveat: attempts[i].failIfMajorPerformanceCaveat,
+      });
+      builtWithGpu = wantGpu;
+      render = {
+        renderer,
+        wantGpu,
+        powerPreference: attempts[i].powerPreference,
+        caveat: i > 0,
+        tries: i + 1,
+      };
+      return render;
+    } catch (err) {
+      failure = err;
+    }
+  }
+
+  builtWithGpu = wantGpu;
+  render = { renderer: null, wantGpu, powerPreference: null, caveat: true, tries: attempts.length };
+  throw failure || new Error("no WebGL context");
+}
+
+export function renderState() {
+  return render;
+}
+
+export function gpuNeedsReload() {
+  return builtWithGpu !== null && builtWithGpu !== gpuWanted();
+}
+
 export function hardwareHints(renderer) {
   const cores = Number(navigator.hardwareConcurrency) || 0;
   const memory = Number(navigator.deviceMemory) || 0;
@@ -113,9 +178,19 @@ export function hardwareHints(renderer) {
   } catch (err) {
     gpu = "";
   }
-  const software = /swiftshader|basic render|llvmpipe|software/i.test(gpu);
+  const caveat = Boolean(render && render.caveat);
+  const software = SOFTWARE.test(gpu) || (caveat && !gpu);
+  const accelerated = Boolean(render && render.wantGpu && !render.caveat);
   const weak = software || (cores > 0 && cores <= 4) || (memory > 0 && memory <= 4);
-  return { cores, memory, gpu, software, weak };
+  return { cores, memory, gpu, software, caveat, accelerated, weak };
+}
+
+export function describeRenderer(hints) {
+  if (!render) return "no renderer";
+  if (!render.wantGpu) return "hardware acceleration off, asking for low power";
+  const where = hints && hints.gpu ? hints.gpu.slice(0, 46) : "an unnamed device";
+  if (render.caveat) return `the browser refused a high-performance context and fell back to ${where}`;
+  return `high-performance context granted on ${where}`;
 }
 
 export function struggling() {
@@ -123,9 +198,10 @@ export function struggling() {
   return frameP95() > STRUGGLE_P95;
 }
 
-export function shouldOfferLowSpec() {
+export function shouldOfferLowSpec(hints) {
   if (offered || settings.get("lowSpec")) return false;
-  if (!struggling()) return false;
+  const knownSoftware = Boolean(hints && hints.software);
+  if (!knownSoftware && !struggling()) return false;
   offered = true;
   return true;
 }
@@ -135,8 +211,12 @@ export function noteOffered() {
 }
 
 export function reasonForOffer(hints) {
+  if (hints && hints.software) {
+    return hints.gpu
+      ? `the browser is drawing this on ${hints.gpu.slice(0, 40)}, which is software rendering`
+      : "the browser refused a hardware-accelerated context, so this is being drawn in software";
+  }
   const p95 = frameP95().toFixed(0);
-  if (hints && hints.software) return `the browser is drawing this in software and a frame is taking ${p95}ms`;
   if (hints && hints.gpu) return `frames are taking ${p95}ms on ${hints.gpu.slice(0, 46)}`;
   return `frames are taking ${p95}ms, so the floor is running under 40fps`;
 }

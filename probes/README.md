@@ -225,6 +225,35 @@ renderable meshes, 472098 triangles, 361 shadow casters and 450816 triangles per
 shadow pass** so the shape of the GPU problem is on the record, but no frame has
 been timed on a GPU. See R15 in [13](../docs/design/13-risks.md).
 
+### Hardware acceleration
+
+`gpu.acceleration` (default **true**) asks the browser for
+`powerPreference: "high-performance"` and, on a hybrid-graphics laptop, that is
+what decides whether the floor gets the discrete GPU or the integrated one. It
+also asks with `failIfMajorPerformanceCaveat: true` first, because a refusal is a
+definitive answer at context-creation time that the browser would render in
+software, which beats inferring it from frame times a few seconds later.
+
+**Whether it makes a frame faster is not measured, and cannot be measured here.**
+There is no GPU, no display, and no connected browser in this environment, and the
+frame harness never rasterises. `floor-smoke.mjs` verifies the parts that *are*
+checkable without one:
+
+| what | how |
+|---|---|
+| three.js really forwards the flag | a canvas stub records the attributes `canvas.getContext` is called with, so this is observed rather than read off the source |
+| acceleration on asks high-performance first, with the caveat flag | `contextAttempts` inspected directly |
+| a refused context retries without the flag instead of failing | a fake renderer that throws three.js's exact "with your selected attributes" error |
+| a refusal is reported as a software fallback | `hardwareHints().software` |
+| a software fallback offers low spec at once, not after 240 frames | `shouldOfferLowSpec(hints)` |
+| off asks for low power, in exactly one attempt | `contextAttempts(false)` |
+| flipping the setting asks for a reload, and stops asking once rebuilt | `gpuNeedsReload()` |
+
+To settle the speed question in about a minute on a real machine: open the floor
+and read the line under the help text in the sidebar. It names the context that
+was granted, the device it landed on, and the live 95th-percentile frame time.
+Toggle the setting there, reload, and compare the two numbers.
+
 ### Endpoint latency
 
 `floor-latency.mjs` times each floor endpoint 40 times against a running daemon
