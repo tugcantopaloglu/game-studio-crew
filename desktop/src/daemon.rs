@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -13,6 +13,10 @@ const FLOOR_TIMEOUT: Duration = Duration::from_secs(45);
 const POLL: Duration = Duration::from_millis(100);
 const NOTHING_TO_CODE_WITH: i32 = 2;
 const LOG_TAIL: usize = 24;
+const SILENCES_BEFORE_GIVING_UP: u32 = 6;
+const NO_LOG_IN_REACH: &str = "there is no daemon log in reach; this window attached to a daemon \
+                               that was already running, and its output went wherever it was started from";
+const AN_EMPTY_LOG: &str = "the daemon wrote nothing before it stopped";
 
 #[derive(Debug)]
 pub struct Failure {
@@ -35,9 +39,21 @@ pub struct Daemon {
     child: Option<Child>,
     group: ProcessGroup,
     log: PathBuf,
+    silences: u32,
+    exit: Option<ExitStatus>,
 }
 
 impl Daemon {
+    fn new(child: Option<Child>, group: ProcessGroup, log: PathBuf) -> Self {
+        Self {
+            child,
+            group,
+            log,
+            silences: 0,
+            exit: None,
+        }
+    }
+
     pub fn shutdown(&mut self) {
         if self.child.is_none() {
             return;
@@ -49,19 +65,45 @@ impl Daemon {
     }
 
     pub fn stopped(&mut self) -> bool {
-        match self.child.as_mut() {
-            Some(child) => matches!(child.try_wait(), Ok(Some(_))),
-            None => !floor_answers(),
+        if let Some(child) = self.child.as_mut() {
+            if let Ok(Some(status)) = child.try_wait() {
+                self.exit = Some(status);
+                return true;
+            }
+            return false;
         }
+
+        if floor_answers() {
+            self.silences = 0;
+            return false;
+        }
+        self.silences += 1;
+        self.silences >= SILENCES_BEFORE_GIVING_UP
     }
 
     pub fn death_notice(&self) -> Failure {
+        let mut detail = String::new();
+        if let Some(status) = self.exit {
+            detail.push_str(&format!("{}\n\n", how_it_ended(status)));
+        }
+        detail.push_str(&tail_of(&self.log));
+
         Failure::new(
             "the studio daemon stopped",
-            tail_of(&self.log),
+            detail,
             "Close this window and start it again. The last lines of daemon output are above; \
              the full log is in daemon.log inside your studio directory.",
         )
+    }
+}
+
+fn how_it_ended(status: ExitStatus) -> String {
+    match status.code() {
+        Some(NOTHING_TO_CODE_WITH) => {
+            "it exited because it found no coding CLI to spawn workers with".into()
+        }
+        Some(code) => format!("it exited with code {code}"),
+        None => "it was killed before it could exit on its own".into(),
     }
 }
 
@@ -103,11 +145,13 @@ fn park(slot: &Mutex<Option<Daemon>>, daemon: Daemon) {
 }
 
 fn attached() -> Result<Daemon, Failure> {
-    Ok(Daemon {
-        child: None,
-        group: supervision()?,
-        log: PathBuf::new(),
-    })
+    Ok(Daemon::new(None, supervision()?, log_in_the_studio_home()))
+}
+
+fn log_in_the_studio_home() -> PathBuf {
+    studio_home()
+        .map(|home| home.join(".studio").join("daemon.log"))
+        .unwrap_or_default()
 }
 
 fn supervision() -> Result<ProcessGroup, Failure> {
@@ -279,21 +323,20 @@ fn spawn(exe: &Path, home: &Path, mut group: ProcessGroup) -> Result<Daemon, Fai
         )
     })?;
 
-    Ok(Daemon {
-        child: Some(child),
-        group,
-        log,
-    })
+    Ok(Daemon::new(Some(child), group, log))
 }
 
 fn tail_of(log: &Path) -> String {
+    if log.as_os_str().is_empty() {
+        return NO_LOG_IN_REACH.into();
+    }
     let text = match std::fs::read_to_string(log) {
         Ok(text) => text,
-        Err(_) => return "the daemon wrote nothing before it stopped".into(),
+        Err(e) => return format!("{} could not be read: {e}", log.display()),
     };
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     if lines.is_empty() {
-        return "the daemon wrote nothing before it stopped".into();
+        return AN_EMPTY_LOG.into();
     }
     lines[lines.len().saturating_sub(LOG_TAIL)..].join("\n")
 }
@@ -308,8 +351,72 @@ mod tests {
     }
 
     #[test]
-    fn a_log_that_was_never_written_still_produces_a_readable_notice() {
-        assert!(tail_of(Path::new("no-such-daemon.log")).contains("wrote nothing"));
+    fn a_log_that_was_never_written_names_the_file_it_looked_for() {
+        let notice = tail_of(Path::new("no-such-daemon.log"));
+        assert!(notice.contains("no-such-daemon.log"), "{notice}");
+        assert!(
+            !notice.contains("wrote nothing"),
+            "a log that is not there is a different fact from a daemon that said nothing: {notice}"
+        );
+    }
+
+    #[test]
+    fn a_log_that_exists_but_is_blank_is_the_one_case_that_says_nothing_was_written() {
+        let dir = std::env::temp_dir().join("game-studio-shell-blank-log");
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("daemon.log");
+        std::fs::write(&log, "\n  \n").unwrap();
+        assert_eq!(tail_of(&log), AN_EMPTY_LOG);
+    }
+
+    #[test]
+    fn a_daemon_we_attached_to_still_reads_the_log_the_running_one_writes() {
+        let attached = attached().unwrap();
+        let expected = log_in_the_studio_home();
+        assert_eq!(attached.log, expected);
+        assert!(
+            !expected.as_os_str().is_empty(),
+            "this machine has a studio home, so the notice must never fall back to a blank path"
+        );
+        assert!(
+            !attached.death_notice().detail.contains(NO_LOG_IN_REACH),
+            "attaching to a running daemon used to throw its log away and report nothing at all"
+        );
+    }
+
+    #[test]
+    fn one_missed_connection_is_not_a_dead_daemon() {
+        let mut attached = attached().unwrap();
+        let answers = floor_answers();
+        for _ in 1..SILENCES_BEFORE_GIVING_UP {
+            assert!(
+                !attached.stopped(),
+                "a single refused connect is a busy port, not a stopped daemon"
+            );
+        }
+        assert_eq!(
+            attached.stopped(),
+            !answers,
+            "after {SILENCES_BEFORE_GIVING_UP} silences in a row the daemon really is gone"
+        );
+    }
+
+    #[test]
+    fn a_notice_says_how_the_daemon_ended_when_the_shell_owned_it() {
+        assert!(how_it_ended(exit_status(NOTHING_TO_CODE_WITH)).contains("no coding CLI"));
+        assert!(how_it_ended(exit_status(1)).contains("code 1"));
+    }
+
+    #[cfg(windows)]
+    fn exit_status(code: i32) -> ExitStatus {
+        use std::os::windows::process::ExitStatusExt;
+        ExitStatus::from_raw(code as u32)
+    }
+
+    #[cfg(not(windows))]
+    fn exit_status(code: i32) -> ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+        ExitStatus::from_raw(code << 8)
     }
 
     #[test]
