@@ -22,4 +22,5 @@ axum = { version = "0.7", features = ["ws"] }
 futures-util = "0.3"
 
 [dev-dependencies]
+tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

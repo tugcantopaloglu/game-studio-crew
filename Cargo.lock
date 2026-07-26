@@ -1017,6 +1017,7 @@ dependencies = [
  "studio-settings",
  "studio-store",
  "studio-workflow",
+ "tempfile",
  "time",
  "tokio",
  "tower",

@@ -65,6 +65,7 @@ export function mount(root) {
   const where = el("div", { class: "field" });
   const roles = el("div");
   const planBox = el("div", { class: "field" });
+  const unfinished = el("div", { class: "field" });
   const steer = el("div", { class: "field" });
   const log = el("div", { class: "hint" });
 
@@ -169,7 +170,56 @@ export function mount(root) {
   picked.onchange = () => setProject(picked.value);
   onProject((id) => {
     if (picked.value !== id) picked.value = id || "";
+    drawUnfinished();
   });
+
+  async function drawUnfinished() {
+    unfinished.replaceChildren();
+    const id = project();
+    if (!id) return;
+
+    let held;
+    try {
+      held = await api("/resumable?project=" + encodeURIComponent(id));
+    } catch (err) {
+      return;
+    }
+    if (!held.resumable || project() !== id) return;
+
+    const card = el("div", { class: "card" });
+    card.append(
+      el("b", { text: held.title || "a run that stopped part way" }),
+      el("div", {
+        class: "k",
+        text: `${held.done} of ${held.steps} step(s) done, ${held.left.length} never ran`,
+      }),
+    );
+    if (held.why) card.append(el("div", { class: "warn", text: "it stopped because " + held.why }));
+    for (const step of held.say) {
+      card.append(el("div", { class: "k", text: `${step.id}  ${step.role}  ${step.say}` }));
+    }
+
+    const go_on = el("button", { text: `pick up the remaining ${held.left.length} step(s)` });
+    go_on.onclick = async () => {
+      go_on.disabled = true;
+      try {
+        await api("/resume", { body: { project: id, step_confirm: confirm.checked } });
+        toast("picking the run up where it stopped");
+        unfinished.replaceChildren();
+      } catch (err) {
+        toast(err.message);
+        go_on.disabled = false;
+      }
+    };
+    card.append(go_on);
+    card.append(
+      el("div", {
+        class: "hint",
+        text: "the steps that finished are already committed; only the ones above are paid for again",
+      }),
+    );
+    unfinished.append(card);
+  }
 
   go.onclick = async () => {
     if (!project()) return toast("pick where the game lives first");
@@ -365,7 +415,7 @@ export function mount(root) {
     go,
   );
 
-  root.append(where, roles, planBox, steer, log);
+  root.append(where, roles, unfinished, planBox, steer, log);
 
   api("/roles")
     .then((rows) => {
@@ -376,7 +426,7 @@ export function mount(root) {
   drawWhere();
   drawPlan();
   drawSteer();
-  drawProjects();
+  drawProjects().then(drawUnfinished);
   browse(state.root);
 
   onEvent((ev) => {
@@ -402,6 +452,7 @@ export function mount(root) {
     if (ev.type === "workflow_ended") {
       state.approval = null;
       drawSteer();
+      drawUnfinished();
       log.innerHTML = esc("the run " + (ev.data.outcome || "ended"));
     }
   });

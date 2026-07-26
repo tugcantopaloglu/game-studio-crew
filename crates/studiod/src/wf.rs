@@ -45,6 +45,11 @@ pub struct Host<'a> {
     pub notes: Mutex<Vec<String>>,
     pub tiers_done: AtomicUsize,
     pub redos_at_step: AtomicUsize,
+    pub unfinished: Option<Mutex<studio_server::resume::Unfinished>>,
+}
+
+pub fn capsule_name(node_id: &str) -> String {
+    format!("cap_{node_id}")
 }
 
 pub fn redos_left(used: usize) -> usize {
@@ -130,6 +135,24 @@ pub fn tier_summary(lines: &[(String, String)]) -> String {
 }
 
 impl<'a> Host<'a> {
+    fn record_progress(&self, completed: &[&Node]) {
+        let Some(held) = &self.unfinished else {
+            return;
+        };
+        let Ok(mut held) = held.lock() else {
+            return;
+        };
+        for node in completed {
+            if !held.done.contains(&node.id) {
+                held.done.push(node.id.clone());
+            }
+        }
+        held.left_at = crate::now();
+        if let Err(e) = studio_server::resume::write(&self.em.state.studio_dir, &held) {
+            println!("  the run could not record where it got to: {e}");
+        }
+    }
+
     fn say_for(&self, id: &str) -> String {
         self.plan
             .as_ref()
@@ -414,6 +437,10 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
         }
     }
 
+    fn capsule_of(&self, node_id: &str) -> Option<String> {
+        Some(capsule_name(node_id))
+    }
+
     fn wave_done(&self, completed: &[&Node]) {
         let entries: Vec<(&str, String)> = completed
             .iter()
@@ -427,6 +454,7 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
             })
             .collect();
         crate::m4::commit_wave(self.em, &entries);
+        self.record_progress(completed);
     }
 
     fn gate(&self, gate: &Gate, node: &Node) -> GateOutcome {
@@ -575,7 +603,7 @@ pub fn run_workflow(
     seq: &mut usize,
     ask_above: Option<u64>,
 ) -> Result<RunOutcome> {
-    run_planned(em, workflow, brief, project, seq, None, ask_above, false)
+    run_planned(em, workflow, brief, project, seq, None, ask_above, false, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -588,12 +616,42 @@ pub fn run_planned(
     plan: Option<studio_workflow::Plan>,
     ask_above: Option<u64>,
     step_confirm: bool,
+    resuming: Option<studio_server::resume::Unfinished>,
 ) -> Result<RunOutcome> {
     let base_sha = project
         .as_deref()
         .and_then(studio_core::git::head_sha);
     if let Some(sha) = &base_sha {
         println!("  base commit {sha}; a bad run can be reverted from the floor");
+    }
+
+    let already_done: BTreeSet<String> =
+        resuming.as_ref().map(|r| r.done_set()).unwrap_or_default();
+    if !already_done.is_empty() {
+        println!(
+            "  resuming: {} step(s) already done, {} left",
+            already_done.len(),
+            workflow.nodes.len().saturating_sub(already_done.len())
+        );
+    }
+
+    let unfinished = match (&resuming, &plan, &em.project_id) {
+        (Some(held), _, _) => Some(held.clone()),
+        (None, Some(plan), Some(id)) => Some(studio_server::resume::Unfinished {
+            project: id.clone(),
+            title: plan.title.clone(),
+            brief: brief.to_string(),
+            plan: plan.clone(),
+            done: Vec::new(),
+            left_at: crate::now(),
+            why: String::new(),
+        }),
+        _ => None,
+    };
+    if let Some(held) = &unfinished {
+        if let Err(e) = studio_server::resume::write(&em.state.studio_dir, held) {
+            println!("  this run cannot be resumed if it stops: {e}");
+        }
     }
 
     em.emit(
@@ -698,6 +756,7 @@ pub fn run_planned(
         notes: Mutex::new(Vec::new()),
         tiers_done: AtomicUsize::new(0),
         redos_at_step: AtomicUsize::new(0),
+        unfinished: unfinished.map(Mutex::new),
     };
 
     if step_confirm {
@@ -707,7 +766,7 @@ pub fn run_planned(
 
     let width = parallel_workers();
     println!("  running up to {width} workers in parallel");
-    let report = execute_parallel(workflow, &host, &BTreeSet::new(), width)
+    let report = execute_parallel(workflow, &host, &already_done, width)
         .map_err(|e| anyhow::anyhow!("workflow failed to execute: {e}"))?;
     *seq = host.seq.load(Ordering::SeqCst);
 
@@ -774,7 +833,40 @@ pub fn run_planned(
         RunOutcome::Completed => {}
     }
 
+    settle_the_resume_point(&host, &outcome);
     Ok(outcome)
+}
+
+fn settle_the_resume_point(host: &Host, outcome: &RunOutcome) {
+    let Some(held) = &host.unfinished else {
+        return;
+    };
+    let Ok(mut held) = held.lock() else {
+        return;
+    };
+
+    let studio_dir = &host.em.state.studio_dir;
+    if held.finished() || outcome.is_clean() {
+        studio_server::resume::clear(studio_dir, &held.project);
+        return;
+    }
+
+    held.why = match outcome {
+        RunOutcome::Blocked { reason, .. }
+        | RunOutcome::Escalated { reason, .. }
+        | RunOutcome::RoutedToInfra { reason, .. }
+        | RunOutcome::Refused { reason, .. }
+        | RunOutcome::Interrupted { reason, .. }
+        | RunOutcome::Halted { reason, .. } => reason.clone(),
+        RunOutcome::Completed => String::new(),
+    };
+    held.left_at = crate::now();
+    let _ = studio_server::resume::write(studio_dir, &held);
+
+    println!(
+        "    {} step(s) never ran; the floor can pick this run up where it stopped",
+        held.left().len()
+    );
 }
 
 #[cfg(test)]

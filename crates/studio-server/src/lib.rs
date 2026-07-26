@@ -16,6 +16,7 @@ pub mod fsapi;
 pub mod games;
 pub mod gitapi;
 pub mod health;
+pub mod resume;
 pub mod runplan;
 pub mod settings;
 pub mod web;
@@ -73,6 +74,15 @@ pub struct PlayRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct ResumeRequest {
+    pub project: String,
+    #[serde(default)]
+    pub ask_above: Option<u64>,
+    #[serde(default)]
+    pub step_confirm: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct RevertRequest {
     pub project: String,
     pub sha: String,
@@ -90,6 +100,7 @@ pub enum StudioCommand {
     Workflow(WorkflowRequest),
     Build(BuildRequest),
     Summarize(SummarizeRequest),
+    Resume(ResumeRequest),
 }
 
 pub type Approvals = Arc<std::sync::Mutex<HashMap<String, std::sync::mpsc::Sender<bool>>>>;
@@ -285,6 +296,8 @@ pub fn router(state: AppState) -> Router {
         .route("/workflows", get(workflows))
         .route("/workflow", post(start_workflow))
         .route("/build", post(start_build))
+        .route("/resume", post(start_resume))
+        .route("/resumable", get(resumable))
         .route("/play", post(play))
         .route("/qa", get(qa_report))
         .route("/shot", get(latest_shot))
@@ -436,6 +449,54 @@ async fn start_build(
     }
     match state.dispatch(StudioCommand::Build(req)) {
         Ok(()) => (StatusCode::ACCEPTED, "planning".to_string()).into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WhichProject {
+    pub project: String,
+}
+
+async fn resumable(
+    State(state): State<AppState>,
+    Query(q): Query<WhichProject>,
+) -> Response {
+    let held = resume::read(&state.studio_dir, &q.project);
+    axum::Json(match held {
+        None => serde_json::json!({"resumable": false}),
+        Some(held) => serde_json::json!({
+            "resumable": true,
+            "title": held.title,
+            "done": held.done.len(),
+            "left": held.left(),
+            "steps": held.plan.tasks.len(),
+            "left_at": held.left_at,
+            "why": held.why,
+            "say": held
+                .left()
+                .iter()
+                .filter_map(|id| held.plan.tasks.iter().find(|t| &t.id == id))
+                .map(|t| serde_json::json!({"id": t.id, "role": t.role, "say": t.say()}))
+                .collect::<Vec<_>>(),
+        }),
+    })
+    .into_response()
+}
+
+async fn start_resume(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<ResumeRequest>,
+) -> Response {
+    if resume::read(&state.studio_dir, &req.project).is_none() {
+        return (
+            StatusCode::CONFLICT,
+            "there is no stopped run to pick up for this project".to_string(),
+        )
+            .into_response();
+    }
+    match state.dispatch(StudioCommand::Resume(req)) {
+        Ok(()) => (StatusCode::ACCEPTED, "resuming".to_string()).into_response(),
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
     }
 }
@@ -1079,6 +1140,119 @@ mod tests {
             "serve.mjs binds 8765; starting a second one without stopping the first leaves a \
              server nobody can reach and nobody kills"
         );
+    }
+
+    fn a_run_that_stopped(dir: &std::path::Path) -> resume::Unfinished {
+        use studio_workflow::{Plan, PlanTask};
+        let task = |id: &str, say: &str| PlanTask {
+            id: id.into(),
+            role: "artist".into(),
+            brief: format!("brief for {id}"),
+            depends_on: Vec::new(),
+            say: say.into(),
+        };
+        let held = resume::Unfinished {
+            project: "proj_flappy".into(),
+            title: "3D Flappy Bird".into(),
+            brief: "build a 3d flappy bird".into(),
+            plan: Plan {
+                title: "3D Flappy Bird".into(),
+                tasks: vec![
+                    task("t1", "Pin down how the bird flies"),
+                    task("t2", "Draw the bird and the pipes"),
+                    task("t3", "Make the flap thump"),
+                ],
+            },
+            done: vec!["t1".into()],
+            left_at: "2026-07-26T19:40:00Z".into(),
+            why: "the account is out of allowance until 7:40pm".into(),
+        };
+        resume::write(dir, &held).unwrap();
+        held
+    }
+
+    async fn get(state: AppState, uri: &str) -> (StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+        let req = axum::http::Request::builder()
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let res = router(state).oneshot(req).await.unwrap();
+        let status = res.status();
+        let raw = axum::body::to_bytes(res.into_body(), 1_000_000).await.unwrap();
+        (status, serde_json::from_slice(&raw).unwrap_or(serde_json::Value::Null))
+    }
+
+    fn state_for_resume(slug: &str) -> (AppState, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("studio-resume-route-{slug}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(Store::open(dir.join("s.db")).unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::mem::forget(rx);
+        (
+            AppState::new(store).with_commands(tx).with_studio_dir(dir.clone()),
+            dir,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_project_with_nothing_stopped_offers_no_resume() {
+        let (state, _dir) = state_for_resume("nothing");
+        let (status, body) = get(state, "/resumable?project=proj_flappy").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["resumable"], false);
+    }
+
+    #[tokio::test]
+    async fn a_stopped_run_offers_exactly_the_steps_that_never_ran() {
+        let (state, dir) = state_for_resume("offers");
+        a_run_that_stopped(&dir);
+
+        let (status, body) = get(state, "/resumable?project=proj_flappy").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["resumable"], true);
+        assert_eq!(body["done"], 1);
+        assert_eq!(body["steps"], 3);
+        assert_eq!(body["left"], serde_json::json!(["t2", "t3"]));
+        assert!(
+            body["why"].as_str().unwrap().contains("7:40pm"),
+            "the floor has to say why it stopped, or picking it up is a guess"
+        );
+        assert_eq!(
+            body["say"][0]["say"], "Draw the bird and the pipes",
+            "the button names the work in the player's terms, not t2"
+        );
+    }
+
+    #[tokio::test]
+    async fn resuming_a_project_that_finished_is_refused_rather_than_queued() {
+        use tower::ServiceExt;
+        let (state, _dir) = state_for_resume("refused");
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/resume")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"project":"proj_flappy"}"#))
+            .unwrap();
+        let res = router(state).oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn a_stopped_run_can_be_picked_up() {
+        use tower::ServiceExt;
+        let (state, dir) = state_for_resume("accepted");
+        a_run_that_stopped(&dir);
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/resume")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"project":"proj_flappy"}"#))
+            .unwrap();
+        let res = router(state).oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
     }
 
     fn ev(seq: u64, actor: &str, ty: EventType) -> Envelope {

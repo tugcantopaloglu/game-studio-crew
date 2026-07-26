@@ -43,6 +43,9 @@ pub trait ParallelWorkflowHost: Sync {
     fn gate(&self, gate: &Gate, node: &Node) -> GateOutcome;
     fn repair(&self, node: &Node, gate: &Gate, round: u32) -> GateOutcome;
     fn skip(&self, _node: &Node) {}
+    fn capsule_of(&self, _node_id: &str) -> Option<String> {
+        None
+    }
     fn nothing_further_can_run(&self, _failure: &str) -> Option<String> {
         None
     }
@@ -170,6 +173,12 @@ pub fn execute_parallel<H: ParallelWorkflowHost>(
     let order = wf.resume_from(already_done)?;
     let width = max_parallel.max(1);
     let mut report = RunReport::default();
+
+    for id in already_done {
+        if let Some(capsule) = host.capsule_of(id) {
+            report.capsules.insert(id.clone(), capsule);
+        }
+    }
 
     let mut deps: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for id in &order {
@@ -714,6 +723,10 @@ mod tests {
                 NodeOutcome::Completed { capsule: format!("cap_{}", node.id) }
             }
 
+            fn capsule_of(&self, node_id: &str) -> Option<String> {
+                Some(format!("cap_{node_id}"))
+            }
+
             fn nothing_further_can_run(&self, failure: &str) -> Option<String> {
                 failure
                     .contains("no allowance left")
@@ -846,6 +859,58 @@ mod tests {
             assert!(
                 h.waves.lock().unwrap().iter().any(|w| w.contains(&"t1".to_string())),
                 "t1 finished and was paid for; halting must not throw its commit away"
+            );
+        }
+
+        #[test]
+        fn a_resumed_run_skips_what_finished_and_runs_only_what_is_left() {
+            let wf = diamond();
+            let h = ParHost::default();
+            let done: BTreeSet<String> = ["t1", "t2"].iter().map(|s| s.to_string()).collect();
+
+            let r = execute_parallel(&wf, &h, &done, 4).unwrap();
+            assert_eq!(r.outcome, Some(RunOutcome::Completed));
+
+            let entered = h.entered.lock().unwrap();
+            assert!(
+                !entered.contains(&"t1".to_string()) && !entered.contains(&"t2".to_string()),
+                "a finished step is paid for once: {entered:?}"
+            );
+            assert_eq!(entered.len(), 3, "t3, t4 and t5 are what is left: {entered:?}");
+        }
+
+        #[test]
+        fn a_resumed_node_still_knows_what_its_finished_dependencies_produced() {
+            let wf = diamond();
+            let h = ParHost::default();
+            let done: BTreeSet<String> = ["t1", "t2", "t3"].iter().map(|s| s.to_string()).collect();
+
+            let r = execute_parallel(&wf, &h, &done, 4).unwrap();
+            assert_eq!(
+                r.capsules.get("t2").map(String::as_str),
+                Some("cap_t2"),
+                "t5 reads t2, t3 and t4; without the capsules of the two that already ran it \
+                 would be briefed as though they never happened"
+            );
+            assert!(r.entered.contains(&"t5".to_string()));
+        }
+
+        #[test]
+        fn an_optional_node_whose_dependency_finished_last_time_is_not_skipped_on_resume() {
+            let mut wf = diamond();
+            for n in wf.nodes.iter_mut().filter(|n| n.id == "t5") {
+                n.optional = true;
+            }
+            let h = ParHost::default();
+            let done: BTreeSet<String> =
+                ["t1", "t2", "t3", "t4"].iter().map(|s| s.to_string()).collect();
+
+            let r = execute_parallel(&wf, &h, &done, 4).unwrap();
+            assert!(
+                r.entered.contains(&"t5".to_string()),
+                "its inputs all landed in the previous run; dropping it as unsatisfied would \
+                 silently lose the last step of every resumed plan: {:?}",
+                r.skipped
             );
         }
 

@@ -17,6 +17,7 @@ pub struct Emitter {
     pub state: AppState,
     pub run: String,
     pub project: Option<std::path::PathBuf>,
+    pub project_id: Option<String>,
 }
 
 impl Emitter {

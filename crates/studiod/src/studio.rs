@@ -4,8 +4,8 @@ use std::sync::Arc;
 use studio_agents::{nearest_common_ancestor, role};
 use studio_events::{EventType, Scene};
 use studio_server::{
-    AppState, BuildRequest, MeetingRequest, PlanVerdict, StudioCommand, TaskRequest,
-    WorkflowRequest,
+    AppState, BuildRequest, MeetingRequest, PlanVerdict, ResumeRequest, StudioCommand,
+    TaskRequest, WorkflowRequest,
 };
 use studio_store::Store;
 
@@ -65,6 +65,7 @@ pub fn run_command(em: &Emitter, cmd: StudioCommand, seq: &mut usize) -> Result<
         StudioCommand::Workflow(w) => run_flow(em, w, seq),
         StudioCommand::Build(b) => run_build(em, b, seq),
         StudioCommand::Summarize(s) => crate::games::summarize(em, &s, seq),
+        StudioCommand::Resume(r) => run_resume(em, r, seq),
     }
 }
 
@@ -156,6 +157,66 @@ fn run_build(em: &Emitter, req: BuildRequest, seq: &mut usize) -> Result<()> {
         Some(plan),
         req.ask_above,
         req.step_confirm,
+        None,
+    )?;
+    Ok(())
+}
+
+fn run_resume(em: &Emitter, req: ResumeRequest, seq: &mut usize) -> Result<()> {
+    let project = em
+        .project_id
+        .clone()
+        .context("resuming needs a project; pick one on the floor first")?;
+
+    let held = studio_server::resume::read(&em.state.studio_dir, &project)
+        .context("there is no stopped run to pick up for this project")?;
+
+    println!(
+        "  resume '{}': {} of {} step(s) already done",
+        held.title,
+        held.done.len(),
+        held.plan.tasks.len()
+    );
+    if !held.why.trim().is_empty() {
+        println!("  it stopped because {}", held.why);
+    }
+    for id in held.left() {
+        let say = held
+            .plan
+            .tasks
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.say())
+            .unwrap_or_default();
+        println!("    {id:<6} {say}");
+    }
+
+    let mut wf = held
+        .plan
+        .to_workflow()
+        .map_err(|e| anyhow::anyhow!("the stopped run's plan will not convert: {e}"))?;
+
+    if let Some(profile) = engine_for(em.project.as_deref()) {
+        for scope in [studio_engine::VerifyScope::Compile, studio_engine::VerifyScope::Runtime] {
+            if let Some(gate) = verify_gate(&profile, &wf, scope) {
+                println!("  gate: {} after {}", scope.key(), gate.after);
+                wf.gates.push(gate);
+            }
+        }
+    }
+
+    let brief = held.brief.clone();
+    let plan = held.plan.clone();
+    crate::wf::run_planned(
+        em,
+        &wf,
+        &brief,
+        em.project.clone(),
+        seq,
+        Some(plan),
+        req.ask_above,
+        req.step_confirm,
+        Some(held),
     )?;
     Ok(())
 }
@@ -776,6 +837,7 @@ pub fn serve_studio(store: Arc<Store>, run: String, port: u16) -> Result<()> {
         state: state.clone(),
         run: run.clone(),
         project: None,
+        project_id: None,
     };
     bare.emit(
         "daemon",
@@ -814,6 +876,7 @@ pub fn serve_studio(store: Arc<Store>, run: String, port: u16) -> Result<()> {
             state: state.clone(),
             run: run.clone(),
             project: selected.as_ref().map(|p| PathBuf::from(&p.root)),
+            project_id: selected.as_ref().map(|p| p.id.clone()),
         };
 
         if let Some(p) = &selected {
@@ -862,6 +925,7 @@ fn project_of(cmd: &StudioCommand) -> Option<&str> {
         StudioCommand::Build(b) => b.project.as_deref(),
         StudioCommand::Meeting(m) => m.project.as_deref(),
         StudioCommand::Summarize(s) => Some(s.project.as_str()),
+        StudioCommand::Resume(r) => Some(r.project.as_str()),
     }
 }
 
@@ -911,6 +975,7 @@ mod index_tests {
             state: AppState::new(store.clone()),
             run: run.clone(),
             project: Some(project_dir.path().to_path_buf()),
+            project_id: None,
         };
 
         let project = ProjectIndex::open(

@@ -660,6 +660,7 @@ fn m4_proof() -> Result<()> {
         state: state.clone(),
         run: run.clone(),
         project: None,
+        project_id: None,
     };
 
     em.emit(
