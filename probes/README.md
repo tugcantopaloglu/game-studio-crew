@@ -180,7 +180,17 @@ LOW_SPEC=1 node --expose-gc probes/floor-cost.mjs  # the low-spec tier
 REV=<sha> node --expose-gc probes/floor-cost.mjs   # the same harness against an older revision
 node probes/floor-smoke.mjs                        # does the floor still hold together
 node probes/floor-latency.mjs                      # endpoint latency against a running daemon
+node probes/settings-repaint.mjs                   # does a model check leave the rest of the panel alone
+node probes/settings-repaint.mjs <web-dir>         # the same harness against another revision's web/
 ```
+
+`settings-repaint.mjs` mounts the real `settings.js` against a stubbed bus and
+daemon, ticks a model, presses check, and compares the panel's nodes by identity
+either side of the answer. It is the guard on a specific regression: checking one
+model used to call `redraw()`, which tore down and rebuilt the whole right-hand
+panel — losing the ticks, the scroll position, the limits timer and the music
+player, and re-fetching `/roles`, `/providers`, `/limits` and `/music` for a fact
+none of them carry. Run it against `HEAD~1`'s `web/` to watch the four checks fail.
 
 `FRAMES` and `WARMUP` set the sample size; 3000 and 600 are enough for the 95th
 percentile to settle, 900 is not. The layout comes from `probes/out/floor.json`,

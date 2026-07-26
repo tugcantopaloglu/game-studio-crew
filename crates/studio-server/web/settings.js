@@ -30,6 +30,15 @@ function store(key, value) {
   }, 250);
 }
 
+function storeNow(key, value) {
+  settings.set(key, value);
+  clearTimeout(saveTimer);
+  return settings.save().then((saved) => {
+    toast("settings saved");
+    return saved;
+  });
+}
+
 function read(key, fallback) {
   const value = settings.get(key, fallback);
   return value === undefined || value === null ? fallback : value;
@@ -72,6 +81,15 @@ function mark(ok) {
 
 let catalogue = { providers: [], probe: {} };
 let listCounter = 0;
+let verdictWatchers = [];
+const panes = {};
+const ticked = new Map();
+const probeStatus = new Map();
+
+function tickedIn(providerId) {
+  if (!ticked.has(providerId)) ticked.set(providerId, new Set());
+  return ticked.get(providerId);
+}
 
 function catalogueFor(providerId) {
   return catalogue.providers.find((p) => p.provider === providerId) || null;
@@ -141,13 +159,15 @@ function modelField(label, providerId, scope) {
   }
 
   const effortKey = `effort.${scope}`;
-  const badge = el("div", { class: "hint" }, verdictOf(providerId, read(key, "")));
+  const badge = el("div", { class: "hint" });
   const levels = el("div", { class: "hint" });
-  const showLevels = (named) => {
+  const showVerdict = (named) => {
+    badge.replaceChildren(verdictOf(providerId, named));
     const note = effortNote(providerId, named, read(effortKey, ""));
     levels.replaceChildren(...(note ? [note] : []));
   };
-  showLevels(read(key, ""));
+  showVerdict(read(key, ""));
+  verdictWatchers.push(() => showVerdict(read(key, "")));
 
   const box = el("div", { class: "field" });
   const input = el("input", {
@@ -158,8 +178,7 @@ function modelField(label, providerId, scope) {
     onchange: (e) => {
       const named = e.target.value.trim();
       store(key, named);
-      badge.replaceChildren(verdictOf(providerId, named));
-      showLevels(named);
+      showVerdict(named);
     },
   });
 
@@ -305,102 +324,125 @@ function providerSection(root, providers) {
   }
 }
 
-function modelsSection(root) {
-  root.append(
+function providerModelsCard(row) {
+  const card = el("div", { class: "card" });
+  card.append(el("b", { text: row.title }));
+  card.append(el("div", { class: "k", text: row.provenance }));
+  card.append(
+    el("div", {
+      class: row.has_catalogue ? "ok" : "hint",
+      text: row.has_catalogue
+        ? row.catalogue_read
+          ? "read from its own catalogue, at no cost"
+          : "it has a catalogue but the studio could not read it"
+        : `discovery here costs ${row.discovery}`,
+    })
+  );
+
+  if (!row.installed) {
+    card.append(el("div", { class: "warn", text: `${row.program} is not on PATH, so nothing here can be checked` }));
+    return card;
+  }
+  if (!row.probeable) {
+    card.append(el("div", { class: "warn", text: "the studio has never read this CLI's flags, so it will not invent a command to check it with" }));
+    return card;
+  }
+  if (!row.candidates.length) {
+    card.append(el("div", { class: "hint", text: "no name to offer yet; type one in a picker above and check it here" }));
+    return card;
+  }
+
+  const chosen = tickedIn(row.provider);
+  for (const id of [...chosen]) {
+    if (!row.candidates.some((c) => c.id === id)) chosen.delete(id);
+  }
+
+  const status = el("div", { class: "hint", text: probeStatus.get(row.provider) || "" });
+  const button = el("button");
+  const label = () => {
+    button.textContent = chosen.size
+      ? `check ${chosen.size} model${chosen.size === 1 ? "" : "s"}`
+      : "check the ticked models";
+  };
+  label();
+
+  for (const c of row.candidates) {
+    const tick = el("input", { type: "checkbox" });
+    tick.checked = chosen.has(c.id);
+    tick.onchange = () => {
+      if (tick.checked) chosen.add(c.id);
+      else chosen.delete(c.id);
+      label();
+    };
+
+    const line = el("div", { class: "field" });
+    line.append(
+      el("label", { class: "check" }, tick, el("span", { text: c.id })),
+      el("div", { class: "k", text: c.label || c.sources.map((s) => s.explain).join("; ") }),
+      el("div", { class: "hint" }, verdictOf(row.provider, c.id))
+    );
+    if (c.efforts && c.efforts.length) {
+      line.append(
+        el("div", {
+          class: "k",
+          text: `reasoning: ${c.efforts.join(", ")}${
+            c.default_effort ? ` (its default is ${c.default_effort})` : ""
+          }`,
+        })
+      );
+    }
+    card.append(line);
+  }
+
+  card.append(el("div", { class: "warn", text: catalogue.probe.cost }));
+  button.onclick = () => {
+    if (!chosen.size) {
+      note(row.provider, status, "tick a model first; nothing is checked without being asked");
+      return;
+    }
+    const asked = [...chosen];
+    button.disabled = true;
+    note(
+      row.provider,
+      status,
+      `asking ${row.title} about ${asked.length} model${asked.length === 1 ? "" : "s"}; this can take a few minutes`
+    );
+    api("/models/probe", { body: { provider: row.provider, models: asked } })
+      .then((done) => {
+        const worked = done.checked.filter((r) => r.verdict === "working").length;
+        note(row.provider, status, `${worked} of ${done.checked.length} answered`);
+        return reloadCatalogue();
+      })
+      .then(() => {
+        paintModels();
+        for (const refresh of verdictWatchers) refresh();
+      })
+      .catch((err) => {
+        button.disabled = false;
+        note(row.provider, status, `the check did not finish: ${err.message}`);
+      });
+  };
+  card.append(button);
+  card.append(status);
+  return card;
+}
+
+function note(providerId, status, text) {
+  probeStatus.set(providerId, text);
+  status.textContent = text;
+}
+
+function paintModels() {
+  const root = panes.models;
+  if (!root) return;
+  root.replaceChildren(
     ...section(
       "models",
       "no CLI here has a subcommand that lists its models, so the studio checks them by asking one"
     )
   );
-
   for (const row of catalogue.providers) {
-    const card = el("div", { class: "card" });
-    card.append(el("b", { text: row.title }));
-    card.append(el("div", { class: "k", text: row.provenance }));
-    card.append(
-      el("div", {
-        class: row.has_catalogue ? "ok" : "hint",
-        text: row.has_catalogue
-          ? row.catalogue_read
-            ? "read from its own catalogue, at no cost"
-            : "it has a catalogue but the studio could not read it"
-          : `discovery here costs ${row.discovery}`,
-      })
-    );
-
-    if (!row.installed) {
-      card.append(el("div", { class: "warn", text: `${row.program} is not on PATH, so nothing here can be checked` }));
-      root.append(card);
-      continue;
-    }
-    if (!row.probeable) {
-      card.append(el("div", { class: "warn", text: "the studio has never read this CLI's flags, so it will not invent a command to check it with" }));
-      root.append(card);
-      continue;
-    }
-    if (!row.candidates.length) {
-      card.append(el("div", { class: "hint", text: "no name to offer yet; type one in a picker above and check it here" }));
-      root.append(card);
-      continue;
-    }
-
-    const chosen = new Set();
-    const status = el("div", { class: "hint", text: "" });
-    const button = el("button", { text: "check the ticked models" });
-
-    for (const c of row.candidates) {
-      const tick = el("input", { type: "checkbox" });
-      tick.onchange = () => {
-        if (tick.checked) chosen.add(c.id);
-        else chosen.delete(c.id);
-        button.textContent = chosen.size
-          ? `check ${chosen.size} model${chosen.size === 1 ? "" : "s"}`
-          : "check the ticked models";
-      };
-
-      const line = el("div", { class: "field" });
-      line.append(
-        el("label", { class: "check" }, tick, el("span", { text: c.id })),
-        el("div", { class: "k", text: c.label || c.sources.map((s) => s.explain).join("; ") }),
-        el("div", { class: "hint" }, verdictOf(row.provider, c.id))
-      );
-      if (c.efforts && c.efforts.length) {
-        line.append(
-          el("div", {
-            class: "k",
-            text: `reasoning: ${c.efforts.join(", ")}${
-              c.default_effort ? ` (its default is ${c.default_effort})` : ""
-            }`,
-          })
-        );
-      }
-      card.append(line);
-    }
-
-    card.append(el("div", { class: "warn", text: catalogue.probe.cost }));
-    button.onclick = () => {
-      if (!chosen.size) {
-        status.textContent = "tick a model first; nothing is checked without being asked";
-        return;
-      }
-      const asked = [...chosen];
-      button.disabled = true;
-      status.textContent = `asking ${row.title} about ${asked.length} model${asked.length === 1 ? "" : "s"}; this can take a few minutes`;
-      api("/models/probe", { body: { provider: row.provider, models: asked } })
-        .then((done) => {
-          const worked = done.checked.filter((r) => r.verdict === "working").length;
-          status.textContent = `${worked} of ${done.checked.length} answered`;
-          return reloadCatalogue();
-        })
-        .then(redraw)
-        .catch((err) => {
-          button.disabled = false;
-          status.textContent = `the check did not finish: ${err.message}`;
-        });
-    };
-    card.append(button);
-    card.append(status);
-    root.append(card);
+    root.append(providerModelsCard(row));
   }
 }
 
@@ -648,6 +690,61 @@ function musicSection(root) {
   load();
 }
 
+function engineCard(row, repaint) {
+  const card = el("div", { class: "card" });
+  card.append(el("b", { text: row.title }));
+
+  if (row.found) {
+    card.append(el("div", { class: "ok", text: `${row.path} (${row.how})` }));
+    card.append(
+      el("div", {
+        class: "k",
+        text: row.verifies.length
+          ? `gates it can run: ${row.verifies.join(", ")}`
+          : "no verification gate is defined for this engine yet",
+      })
+    );
+  } else {
+    card.append(
+      el("div", {
+        class: "warn",
+        text: "not found, so every gate that needs it is skipped and nothing the crew writes gets compiled",
+      })
+    );
+    for (const place of row.looked_in) {
+      card.append(el("div", { class: "k", text: `looked in ${place}` }));
+    }
+  }
+
+  const input = el("input", {
+    type: "text",
+    value: row.named || "",
+    placeholder: `full path to the ${row.title} binary`,
+    onchange: (e) => storeNow(row.key, e.target.value.trim()).then(repaint),
+  });
+  card.append(el("label", { text: `where ${row.title} lives` }), input);
+  card.append(
+    el("div", { class: "k", text: `leave it blank to search PATH and ${row.env}` })
+  );
+  return card;
+}
+
+function enginesSection(root) {
+  const paint = () => {
+    root.replaceChildren(
+      ...section("engines", "what the studio compiles and runs the crew's work with")
+    );
+    api("/engines")
+      .then((rows) => {
+        for (const row of rows) root.append(engineCard(row, paint));
+      })
+      .catch((err) => {
+        root.append(el("div", { class: "bad", text: `could not read engines: ${err.message}` }));
+      });
+  };
+  paint();
+}
+
 function floorSection(root) {
   root.append(...section("floor"));
   root.append(check("low spec mode", "lowSpec", false));
@@ -693,22 +790,32 @@ export function reloadCatalogue() {
     .catch(() => catalogue);
 }
 
+function pane(name) {
+  const box = el("div");
+  panes[name] = box;
+  host.append(box);
+  return box;
+}
+
 function redraw() {
   if (!host) return;
   for (const t of timers) clearInterval(t);
   timers = [];
+  verdictWatchers = [];
   host.replaceChildren(el("div", { class: "hint", text: "reading the studio settings" }));
 
   Promise.all([api("/roles"), api("/providers"), reloadCatalogue()])
     .then(([roles, providers]) => {
       host.replaceChildren();
-      crewSection(host, roles, providers);
-      modelsSection(host);
-      providerSection(host, providers);
-      limitsSection(host);
-      musicSection(host);
-      floorSection(host);
-      aboutSection(host);
+      crewSection(pane("crew"), roles, providers);
+      pane("models");
+      paintModels();
+      providerSection(pane("providers"), providers);
+      enginesSection(pane("engines"));
+      limitsSection(pane("limits"));
+      musicSection(pane("music"));
+      floorSection(pane("floor"));
+      aboutSection(pane("about"));
     })
     .catch((err) => {
       host.replaceChildren(

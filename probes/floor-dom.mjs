@@ -31,27 +31,60 @@ function ctx2d() {
 }
 
 function element(tag) {
+  const listeners = new Map();
   const node = {
     tagName: String(tag).toUpperCase(),
     width: 300, height: 150, style: {}, children: [],
     nodeType: 1, className: "", id: "", textContent: "", innerHTML: "",
+    hidden: false, value: "", checked: false, disabled: false, listeners,
     getContext: (kind, attrs) => {
       if (kind === "2d") return ctx2d();
       glRequests.push({ kind, attrs });
       return null;
     },
     setAttribute: noop2, getAttribute: () => null, removeAttribute: noop2,
-    addEventListener: noop2, removeEventListener: noop2, dispatchEvent: () => true,
+    addEventListener: (kind, fn) => {
+      if (!listeners.has(kind)) listeners.set(kind, []);
+      listeners.get(kind).push(fn);
+    },
+    removeEventListener: (kind, fn) => {
+      const held = listeners.get(kind) || [];
+      const at = held.indexOf(fn);
+      if (at >= 0) held.splice(at, 1);
+    },
+    dispatchEvent: (event) => {
+      const kind = typeof event === "string" ? event : event.type;
+      const payload = typeof event === "string" ? { type: kind } : event;
+      payload.target = payload.target || node;
+      const inline = node["on" + kind];
+      if (typeof inline === "function") inline(payload);
+      for (const fn of listeners.get(kind) || []) fn(payload);
+      return true;
+    },
     appendChild: (c) => { node.children.push(c); return c; },
     append: (...c) => { node.children.push(...c); },
+    replaceChildren: (...c) => { node.children = [...c]; },
     removeChild: (c) => c, insertBefore: (c) => c, remove: noop2,
     querySelector: () => null, querySelectorAll: () => [],
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 1600, height: 900, right: 1600, bottom: 900 }),
     classList: { add: noop2, remove: noop2, toggle: noop2, contains: () => false },
-    focus: noop2, blur: noop2, click: noop2,
+    focus: noop2, blur: noop2,
+    click: () => node.dispatchEvent({ type: "click" }),
     toDataURL: () => "data:,",
   };
   return node;
+}
+
+export function descendants(node, out = []) {
+  for (const child of node.children || []) {
+    out.push(child);
+    descendants(child, out);
+  }
+  return out;
+}
+
+export function findNode(node, matches) {
+  return descendants(node).find(matches) || null;
 }
 
 function noop2() {}
