@@ -82,7 +82,7 @@ fn recent_commits(root: &Path, n: usize) -> Option<String> {
     if !studio_core::git::is_repo(root) {
         return None;
     }
-    let out = std::process::Command::new("git")
+    let out = studio_core::command("git")
         .args(["log", &format!("-{n}"), "--format=  %h %s"])
         .current_dir(root)
         .output()

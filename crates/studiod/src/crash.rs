@@ -185,7 +185,7 @@ fn open_in_browser(url: &str) -> bool {
     } else {
         ("xdg-open", Vec::new())
     };
-    std::process::Command::new(program)
+    studio_core::command(program)
         .args(args)
         .arg(url)
         .stdin(std::process::Stdio::null())
@@ -202,7 +202,7 @@ fn os_build() -> String {
     } else {
         ("uname", vec!["-sr"])
     };
-    let probed = std::process::Command::new(program)
+    let probed = studio_core::command(program)
         .args(args)
         .stdin(std::process::Stdio::null())
         .output()

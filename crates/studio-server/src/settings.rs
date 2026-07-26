@@ -596,7 +596,13 @@ fn ask_the_cli_who_is_logged_in() -> Value {
         });
     }
 
-    let out = std::process::Command::new("claude")
+    let Some(claude) = on_path("claude") else {
+        return serde_json::json!({
+            "known": false,
+            "reason": "claude is not on PATH as anything this OS can execute",
+        });
+    };
+    let out = studio_core::command(claude)
         .args(["auth", "status", "--json"])
         .output();
 

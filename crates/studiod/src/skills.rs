@@ -14,7 +14,7 @@ pub fn ensure_img2threejs(project: &Path) -> Result<bool> {
     if !cache.join("SKILL.md").exists() {
         let _ = std::fs::remove_dir_all(&cache);
         std::fs::create_dir_all(cache.parent().unwrap())?;
-        let status = std::process::Command::new("git")
+        let status = studio_core::command("git")
             .args([
                 "clone",
                 "--depth",

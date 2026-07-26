@@ -182,17 +182,25 @@ mod tests {
     }
 
     #[test]
-    fn no_background_git_call_spawns_a_bare_command_and_flashes_a_console() {
-        let source = include_str!("git.rs");
-        let production = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("git.rs has a production half");
-        assert!(
-            !production.contains("Command::new("),
-            "a bare Command::new on Windows gives the child its own console, and git runs after \
-             every worker — the window flashes on screen each time. Use launcher::command."
-        );
+    fn nothing_the_daemon_runs_in_the_background_spawns_a_bare_command() {
+        let sources = [
+            ("git.rs", include_str!("git.rs")),
+            (
+                "studio-verify/driver.rs",
+                include_str!("../../studio-verify/src/driver.rs"),
+            ),
+            ("studiod/skills.rs", include_str!("../../studiod/src/skills.rs")),
+            ("studiod/survey.rs", include_str!("../../studiod/src/survey.rs")),
+            ("studiod/crash.rs", include_str!("../../studiod/src/crash.rs")),
+        ];
+
+        for (name, source) in sources {
+            let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+            assert!(
+                !production.contains("Command::new("),
+                "{name} spawns a bare Command. On Windows the daemon has no console of its own,                  so every child started this way is handed a brand new console window that                  flashes on screen. Use studio_core::command."
+            );
+        }
     }
 
     #[test]

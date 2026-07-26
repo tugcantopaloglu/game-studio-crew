@@ -1061,6 +1061,7 @@ dependencies = [
  "quick-xml",
  "serde",
  "serde_json",
+ "studio-core",
  "studio-engine",
  "tempfile",
  "thiserror 2.0.19",
