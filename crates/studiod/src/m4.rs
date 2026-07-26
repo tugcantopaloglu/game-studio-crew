@@ -348,6 +348,43 @@ pub fn prefix_tokens_for(role: &Role, acting: bool) -> u64 {
         .unwrap_or(8_000)
 }
 
+struct Desk<'a> {
+    em: &'a Emitter,
+    task: String,
+    actor: String,
+    scene: Scene,
+    lit: bool,
+    settled: bool,
+}
+
+impl Desk<'_> {
+    fn settle(&mut self) {
+        self.settled = true;
+    }
+}
+
+impl Drop for Desk<'_> {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let _ = self.em.store.update_task_state(
+            &self.task,
+            WorkerState::Reaped,
+            Some(Outcome::Crashed),
+            crate::now(),
+        );
+        if self.lit {
+            let _ = self.em.emit(
+                &self.actor,
+                EventType::WorkerExited,
+                self.scene.clone(),
+                serde_json::json!({"outcome": "crashed", "exit_code": null}),
+            );
+        }
+    }
+}
+
 fn run_worker_inner(
     em: &Emitter,
     role: &Role,
@@ -395,6 +432,15 @@ fn run_worker_inner(
         crate::now(),
     )?;
 
+    let mut desk = Desk {
+        em,
+        task: task_id.clone(),
+        actor: actor.clone(),
+        scene: Scene::desk(role.department.id(), &actor),
+        lit: false,
+        settled: false,
+    };
+
     let charter = charter_for(role, acting);
     let tools = role.tools();
     let prefix = freeze(&charter, &tools, seat.model)
@@ -421,6 +467,7 @@ fn run_worker_inner(
             "prefix_hash": prefix.prefix_hash,
         }),
     )?;
+    desk.lit = true;
     em.store.update_task_state(&task_id, WorkerState::Running, None, crate::now())?;
     em.emit(
         &actor,
@@ -564,6 +611,7 @@ fn run_worker_inner(
         }),
     )?;
 
+    desk.settle();
     em.store.update_task_state(&task_id, WorkerState::Reaped, Some(report.outcome), crate::now())?;
     em.emit(
         &actor,
@@ -863,5 +911,113 @@ mod limit_tests {
             acting.stall_timeout > advisory.stall_timeout,
             "a worker thinking between tool calls must not read as hung"
         );
+    }
+}
+
+#[cfg(test)]
+mod desk_tests {
+    use super::*;
+    use std::sync::Arc;
+    use studio_server::AppState;
+
+    fn emitter(tag: &str) -> (tempfile::TempDir, Emitter) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(studio_store::Store::open(dir.path().join("s.db")).unwrap());
+        register_roles(&store).unwrap();
+        let state = AppState::new(store.clone()).with_studio_dir(dir.path().to_path_buf());
+        let em = Emitter {
+            store,
+            state,
+            run: format!("run_{tag}"),
+            project: None,
+            project_id: None,
+        };
+        (dir, em)
+    }
+
+    fn queued(em: &Emitter, task: &str) {
+        em.store
+            .insert_task(
+                studio_store::TaskRow {
+                    id: task.into(),
+                    run: em.run.clone(),
+                    role: "artist".into(),
+                    parent_task: None,
+                    workflow_node: None,
+                    state: WorkerState::Queued,
+                    outcome: None,
+                },
+                crate::now(),
+            )
+            .unwrap();
+    }
+
+    fn exits_in(em: &Emitter) -> usize {
+        em.store
+            .events_between(&em.run, 0, 100)
+            .unwrap()
+            .iter()
+            .filter(|e| e.event_type == EventType::WorkerExited)
+            .count()
+    }
+
+    #[test]
+    fn a_worker_that_never_started_still_lets_go_of_its_desk() {
+        let (_d, em) = emitter("unlit");
+        queued(&em, "task_unlit");
+        {
+            let _desk = Desk {
+                em: &em,
+                task: "task_unlit".into(),
+                actor: "artist#1".into(),
+                scene: Scene::desk("art", "artist#1"),
+                lit: false,
+                settled: false,
+            };
+        }
+        assert_eq!(
+            exits_in(&em),
+            0,
+            "the floor never drew this worker, so telling it the worker exited would light a              desk that was never lit"
+        );
+    }
+
+    #[test]
+    fn a_spawn_that_fails_after_the_floor_drew_the_worker_clears_it_again() {
+        let (_d, em) = emitter("lit");
+        queued(&em, "task_lit");
+        {
+            let _desk = Desk {
+                em: &em,
+                task: "task_lit".into(),
+                actor: "artist#1".into(),
+                scene: Scene::desk("art", "artist#1"),
+                lit: true,
+                settled: false,
+            };
+        }
+        assert_eq!(
+            exits_in(&em),
+            1,
+            "worker_spawned lights the desk and only worker_exited clears it; an error between              the two used to leave that crew member working for the rest of the session"
+        );
+    }
+
+    #[test]
+    fn a_worker_that_reported_its_own_outcome_is_not_reported_twice() {
+        let (_d, em) = emitter("settled");
+        queued(&em, "task_settled");
+        {
+            let mut desk = Desk {
+                em: &em,
+                task: "task_settled".into(),
+                actor: "artist#1".into(),
+                scene: Scene::desk("art", "artist#1"),
+                lit: true,
+                settled: false,
+            };
+            desk.settle();
+        }
+        assert_eq!(exits_in(&em), 0);
     }
 }
