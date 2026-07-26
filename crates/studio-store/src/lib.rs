@@ -147,6 +147,7 @@ enum Cmd {
         reply: Reply<Envelope>,
     },
     RecordUsage(LedgerEntry, String, Reply<()>),
+    Checkpoint(Reply<u64>),
     Shutdown,
 }
 
@@ -209,12 +210,15 @@ impl Store {
                     }
                 }
 
+                let _ = fold_the_wal_back_in(&conn);
+
                 for cmd in rx {
                     match cmd {
                         Cmd::Shutdown => break,
                         other => handle_cmd(&conn, &mut seq_by_run, other),
                     }
                 }
+                let _ = fold_the_wal_back_in(&conn);
             })
             .expect("spawn store writer");
 
@@ -223,6 +227,10 @@ impl Store {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn checkpoint(&self) -> Result<u64> {
+        self.send(Cmd::Checkpoint)
     }
 
     fn send<T>(&self, make: impl FnOnce(Reply<T>) -> Cmd) -> Result<T> {
@@ -525,6 +533,9 @@ impl Store {
 
 impl Drop for Store {
     fn drop(&mut self) {
+        if let Ok(mut pool) = self.readers.lock() {
+            pool.clear();
+        }
         let _ = self.tx.send(Cmd::Shutdown);
         if let Some(h) = self.handle.take() {
             let _ = h.join();
@@ -569,9 +580,19 @@ fn project_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
     })
 }
 
+pub fn fold_the_wal_back_in(conn: &Connection) -> rusqlite::Result<u64> {
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+        r.get::<_, i64>(1).map(|pages| pages.max(0) as u64)
+    })
+}
+
 fn handle_cmd(conn: &Connection, seq_by_run: &mut HashMap<String, u64>, cmd: Cmd) {
     match cmd {
         Cmd::Shutdown => {}
+
+        Cmd::Checkpoint(reply) => {
+            let _ = reply.send(fold_the_wal_back_in(conn).map_err(StoreError::from));
+        }
 
         Cmd::InsertProject(p, ts, reply) => {
             let res = conn
@@ -812,6 +833,124 @@ mod tests {
             cost_usd: usd,
             model: "opus".into(),
         }
+    }
+
+    fn wal_bytes(path: &Path) -> u64 {
+        let wal = path.with_extension("db-wal");
+        std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0)
+    }
+
+    #[test]
+    fn a_checkpoint_folds_the_write_ahead_log_back_into_the_database_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let store = Store::open(&path).unwrap();
+
+        for i in 0..2000 {
+            store
+                .append_event(
+                    "run_wal",
+                    "2026-07-26T00:00:00Z",
+                    "daemon",
+                    EventType::WorkerSpawned,
+                    Scene::daemon(),
+                    serde_json::json!({"i": i, "padding": "x".repeat(200)}),
+                )
+                .unwrap();
+        }
+
+        let before = wal_bytes(&path);
+        assert!(before > 0, "these writes are supposed to have gone through a wal");
+
+        store.checkpoint().unwrap();
+        assert_eq!(
+            wal_bytes(&path),
+            0,
+            "the daemon is killed rather than closed, so a wal that is only folded in on a clean \
+             close is a wal that survives every run: {before} bytes were left behind"
+        );
+
+        assert_eq!(
+            store.events_between("run_wal", 0, 5000).unwrap().len(),
+            2000,
+            "a checkpoint must move the events into the file, not drop them"
+        );
+    }
+
+    #[test]
+    fn a_store_that_is_dropped_leaves_no_write_ahead_log_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        {
+            let store = Store::open(&path).unwrap();
+            for i in 0..500 {
+                store
+                    .append_event(
+                        "run_drop",
+                        "2026-07-26T00:00:00Z",
+                        "daemon",
+                        EventType::WorkerSpawned,
+                        Scene::daemon(),
+                        serde_json::json!({"i": i}),
+                    )
+                    .unwrap();
+            }
+            let _ = store.events_between("run_drop", 0, 10).unwrap();
+        }
+        assert_eq!(wal_bytes(&path), 0);
+    }
+
+    #[test]
+    fn a_freshly_migrated_store_puts_its_schema_in_the_file_rather_than_the_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let store = Store::open(&path).unwrap();
+        store.checkpoint().unwrap();
+
+        assert_eq!(
+            wal_bytes(&path),
+            0,
+            "a daemon that starts and is then killed used to leave its whole schema in a wal \
+             beside a database file that was still one page long"
+        );
+        assert!(
+            std::fs::metadata(&path).unwrap().len() > 4096,
+            "the schema has to have landed somewhere, and the file is the only place left"
+        );
+    }
+
+    #[test]
+    fn a_warm_reader_pool_does_not_stop_the_log_being_folded_back_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let store = Store::open(&path).unwrap();
+
+        for i in 0..READER_POOL * 2 {
+            store
+                .append_event(
+                    "run_pool",
+                    "2026-07-26T00:00:00Z",
+                    "daemon",
+                    EventType::WorkerSpawned,
+                    Scene::daemon(),
+                    serde_json::json!({"i": i}),
+                )
+                .unwrap();
+            let _ = store.events_between("run_pool", 0, 10).unwrap();
+        }
+        assert!(!store.readers.lock().unwrap().is_empty(), "the pool must be warm");
+
+        store.checkpoint().unwrap();
+        assert_eq!(
+            wal_bytes(&path),
+            0,
+            "an idle pooled reader holds no snapshot, so throwing the pool away to checkpoint \
+             would pay 0.9ms a read for nothing"
+        );
+        assert!(
+            !store.readers.lock().unwrap().is_empty(),
+            "the checkpoint must leave the pool it did not need to clear"
+        );
     }
 
     #[test]
