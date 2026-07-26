@@ -77,6 +77,42 @@ pub fn probe_answered(output: &str) -> bool {
     output.replace(PROBE_QUESTION, " ").contains(PROBE_ANSWER)
 }
 
+const OUT_OF_ALLOWANCE: [&str; 5] = [
+    "session limit",
+    "usage limit",
+    "rate limit",
+    "quota",
+    "limit reached",
+];
+
+const AND_SAYS_SO: [&str; 6] = [
+    "resets",
+    "reached",
+    "hit your",
+    "try again",
+    "upgrade",
+    "exceeded",
+];
+
+pub fn account_is_out_of_allowance(message: &str) -> Option<String> {
+    let text = message.to_lowercase();
+    let named = OUT_OF_ALLOWANCE.iter().any(|m| text.contains(m));
+    let confirmed = AND_SAYS_SO.iter().any(|m| text.contains(m));
+    if !named || !confirmed {
+        return None;
+    }
+
+    let line = message
+        .lines()
+        .map(str::trim)
+        .find(|l| {
+            let lower = l.to_lowercase();
+            OUT_OF_ALLOWANCE.iter().any(|m| lower.contains(m))
+        })
+        .unwrap_or(message.trim());
+    Some(line.chars().take(200).collect())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
     pub streaming_events: bool,
@@ -795,5 +831,39 @@ mod tests {
         assert_eq!(Effort::Medium.downshift(Effort::Medium), Effort::Medium);
         assert_eq!(Effort::Low.downshift(Effort::Low), Effort::Low);
         assert_eq!(Effort::High.downshift(Effort::High), Effort::High);
+    }
+
+    #[test]
+    fn the_cli_running_out_of_allowance_is_recognised_from_its_own_words() {
+        let said = account_is_out_of_allowance(
+            "You've hit your session limit · resets 7:40pm (Europe/Istanbul)",
+        )
+        .expect("the refusal that stopped a run must be recognised");
+        assert!(said.contains("7:40pm"), "the reset time is the only actionable part: {said}");
+
+        assert!(account_is_out_of_allowance("Claude usage limit reached").is_some());
+        assert!(account_is_out_of_allowance("rate limit exceeded, try again later").is_some());
+        assert!(account_is_out_of_allowance("quota exceeded for this account").is_some());
+    }
+
+    #[test]
+    fn an_ordinary_failure_is_not_read_as_an_exhausted_account() {
+        assert!(account_is_out_of_allowance("Not logged in").is_none());
+        assert!(account_is_out_of_allowance("the file could not be written").is_none());
+        assert!(
+            account_is_out_of_allowance("add a rate limit to the boss fight spawner").is_none(),
+            "a brief about a game mechanic must not stop the whole run"
+        );
+    }
+
+    #[test]
+    fn the_quoted_line_is_the_one_naming_the_limit_not_whatever_came_first() {
+        let said = account_is_out_of_allowance(
+            "the worker stopped
+You have hit your usage limit; resets at 9pm
+trailing noise",
+        )
+        .unwrap();
+        assert!(said.starts_with("You have hit your usage limit"), "{said}");
     }
 }

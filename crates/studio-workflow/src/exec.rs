@@ -43,6 +43,9 @@ pub trait ParallelWorkflowHost: Sync {
     fn gate(&self, gate: &Gate, node: &Node) -> GateOutcome;
     fn repair(&self, node: &Node, gate: &Gate, round: u32) -> GateOutcome;
     fn skip(&self, _node: &Node) {}
+    fn nothing_further_can_run(&self, _failure: &str) -> Option<String> {
+        None
+    }
     fn wave_done(&self, _completed: &[&Node]) {}
     fn before_wave(&self, _ready: &[&Node]) -> WaveVerdict {
         WaveVerdict::Continue
@@ -62,6 +65,7 @@ pub enum RunOutcome {
     RoutedToInfra { node: String, reason: String },
     Refused { node: String, reason: String },
     Interrupted { node: String, reason: String },
+    Halted { node: String, reason: String },
 }
 
 impl RunOutcome {
@@ -77,6 +81,7 @@ impl RunOutcome {
             RunOutcome::RoutedToInfra { .. } => "inconclusive",
             RunOutcome::Refused { .. } => "refused",
             RunOutcome::Interrupted { .. } => "interrupted",
+            RunOutcome::Halted { .. } => "halted",
         }
     }
 }
@@ -235,6 +240,7 @@ pub fn execute_parallel<H: ParallelWorkflowHost>(
         }
 
         let mut outcomes: Vec<(&Node, NodeOutcome)> = Vec::new();
+        let mut halted: Option<(String, String)> = None;
         for chunk in wave.chunks(width) {
             let batch = std::thread::scope(|scope| {
                 let handles: Vec<_> = chunk
@@ -244,6 +250,16 @@ pub fn execute_parallel<H: ParallelWorkflowHost>(
                 handles.into_iter().map(|h| h.join().expect("worker thread panicked")).collect::<Vec<_>>()
             });
             outcomes.extend(batch);
+
+            halted = outcomes.iter().find_map(|(node, outcome)| match outcome {
+                NodeOutcome::Failed { reason } => host
+                    .nothing_further_can_run(reason)
+                    .map(|why| (node.id.clone(), why)),
+                _ => None,
+            });
+            if halted.is_some() {
+                break;
+            }
         }
 
         let mut completed: Vec<&Node> = Vec::new();
@@ -259,7 +275,7 @@ pub fn execute_parallel<H: ParallelWorkflowHost>(
                     completed.push(node);
                 }
                 NodeOutcome::Failed { reason } => {
-                    if node.optional {
+                    if node.optional && halted.is_none() {
                         report.entered.retain(|id| id != &node.id);
                         report.skipped.push(node.id.clone());
                     } else if stop.is_none() {
@@ -267,6 +283,10 @@ pub fn execute_parallel<H: ParallelWorkflowHost>(
                     }
                 }
             }
+        }
+
+        if let Some((node, reason)) = halted {
+            stop = Some(RunOutcome::Halted { node, reason });
         }
 
         if !completed.is_empty() {
@@ -669,6 +689,7 @@ mod tests {
             redone: AtomicUsize,
             notes: Mutex<Vec<String>>,
             briefs: Mutex<Vec<String>>,
+            out_of_allowance_at: Option<String>,
         }
 
         impl ParallelWorkflowHost for ParHost {
@@ -684,10 +705,19 @@ mod tests {
                 self.entered.lock().unwrap().push(node.id.clone());
                 let notes = self.notes.lock().unwrap().join(" ");
                 self.briefs.lock().unwrap().push(format!("{} {notes}", node.id));
+                if self.out_of_allowance_at.as_deref() == Some(node.id.as_str()) {
+                    return NodeOutcome::Failed { reason: "no allowance left".into() };
+                }
                 if self.fail_node.as_deref() == Some(node.id.as_str()) {
                     return NodeOutcome::Failed { reason: "worker crashed".into() };
                 }
                 NodeOutcome::Completed { capsule: format!("cap_{}", node.id) }
+            }
+
+            fn nothing_further_can_run(&self, failure: &str) -> Option<String> {
+                failure
+                    .contains("no allowance left")
+                    .then(|| "the account is out of allowance until 7:40pm".to_string())
             }
 
             fn before_wave(&self, ready: &[&Node]) -> WaveVerdict {
@@ -774,6 +804,60 @@ mod tests {
             assert!(
                 h.peak.load(Ordering::SeqCst) >= 2,
                 "t2, t3 and t4 share no dependency and must run at the same time"
+            );
+        }
+
+        #[test]
+        fn an_exhausted_account_stops_the_run_rather_than_spending_the_rest_of_the_wave() {
+            let wf = diamond();
+            let h = ParHost {
+                out_of_allowance_at: Some("t2".into()),
+                ..Default::default()
+            };
+            let r = execute_parallel(&wf, &h, &BTreeSet::new(), 1).unwrap();
+
+            match r.outcome {
+                Some(RunOutcome::Halted { ref node, ref reason }) => {
+                    assert_eq!(node, "t2");
+                    assert!(reason.contains("7:40pm"), "the reset time is the point: {reason}");
+                }
+                other => panic!("a refused allowance is not an ordinary block: {other:?}"),
+            }
+
+            let entered = h.entered.lock().unwrap();
+            assert!(entered.contains(&"t2".to_string()));
+            assert!(
+                !entered.contains(&"t3".to_string()) && !entered.contains(&"t4".to_string()),
+                "t3 and t4 were dispatched after the account had already refused, and every one \
+                 of them can only refuse too: {entered:?}"
+            );
+        }
+
+        #[test]
+        fn work_that_landed_before_the_account_ran_out_is_still_committed() {
+            let wf = diamond();
+            let h = ParHost {
+                out_of_allowance_at: Some("t3".into()),
+                ..Default::default()
+            };
+            let r = execute_parallel(&wf, &h, &BTreeSet::new(), 4).unwrap();
+
+            assert!(matches!(r.outcome, Some(RunOutcome::Halted { .. })));
+            assert!(
+                h.waves.lock().unwrap().iter().any(|w| w.contains(&"t1".to_string())),
+                "t1 finished and was paid for; halting must not throw its commit away"
+            );
+        }
+
+        #[test]
+        fn an_ordinary_worker_crash_is_still_a_block_and_not_a_halt() {
+            let wf = diamond();
+            let h = ParHost { fail_node: Some("t2".into()), ..Default::default() };
+            let r = execute_parallel(&wf, &h, &BTreeSet::new(), 4).unwrap();
+            assert!(
+                matches!(r.outcome, Some(RunOutcome::Blocked { .. })),
+                "only the host may decide a failure means nothing else can run: {:?}",
+                r.outcome
             );
         }
 

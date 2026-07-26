@@ -275,6 +275,27 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
         }
     }
 
+    fn nothing_further_can_run(&self, failure: &str) -> Option<String> {
+        let said = studio_core::account_is_out_of_allowance(failure)?;
+        let reason = format!(
+            "the coding CLI refused on the account's own limit, so every worker after it \
+             would refuse too: {said}"
+        );
+        println!("  {reason}");
+        println!("  nothing further is spawned; start the run again once the window resets");
+        let _ = self.em.emit(
+            "daemon",
+            EventType::RunInterrupted,
+            Scene::daemon(),
+            serde_json::json!({
+                "reason": "out of allowance",
+                "note": said,
+                "step": null,
+            }),
+        );
+        Some(reason)
+    }
+
     fn before_wave(&self, ready: &[&Node]) -> WaveVerdict {
         let landing = ready.first().map(|n| self.say_for(&n.id));
 
@@ -746,7 +767,8 @@ pub fn run_planned(
         | RunOutcome::Escalated { node, reason }
         | RunOutcome::RoutedToInfra { node, reason }
         | RunOutcome::Refused { node, reason }
-        | RunOutcome::Interrupted { node, reason } => {
+        | RunOutcome::Interrupted { node, reason }
+        | RunOutcome::Halted { node, reason } => {
             println!("    stopped at {node}: {reason}");
         }
         RunOutcome::Completed => {}

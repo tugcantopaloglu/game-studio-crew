@@ -7,8 +7,8 @@ mod stream;
 pub use launcher::{command, launcher_for, on_path, quiet, resolve, spawnable};
 pub use proc::ProcessGroup;
 pub use spec::{
-    probe_answered, BriefDelivery, Capabilities, Effort, Provider, RoleNeeds, SessionMode,
-    WorkerSpec, PROBE_ANSWER, PROBE_QUESTION,
+    account_is_out_of_allowance, probe_answered, BriefDelivery, Capabilities, Effort, Provider,
+    RoleNeeds, SessionMode, WorkerSpec, PROBE_ANSWER, PROBE_QUESTION,
 };
 pub use stream::{map_cli_event, CliEvent, McpServer, StreamState};
 
