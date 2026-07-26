@@ -591,6 +591,107 @@ fn windowed_binary(bin: std::path::PathBuf) -> std::path::PathBuf {
     bin
 }
 
+pub const WEB_PLAY_URL: &str = "http://127.0.0.1:8765/";
+
+struct Playing {
+    group: Option<studio_core::ProcessGroup>,
+    child: std::process::Child,
+}
+
+static PLAYING: std::sync::Mutex<std::collections::BTreeMap<String, Playing>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+pub fn stop_playing(project: &str) -> bool {
+    let taken = PLAYING.lock().ok().and_then(|mut held| held.remove(project));
+    let Some(mut was) = taken else {
+        return false;
+    };
+    match was.group.as_mut() {
+        Some(group) => {
+            let _ = group.kill_tree();
+        }
+        None => {
+            let _ = was.child.kill();
+        }
+    }
+    let _ = was.child.wait();
+    true
+}
+
+pub fn stop_playing_everything() {
+    let ids: Vec<String> = PLAYING
+        .lock()
+        .map(|held| held.keys().cloned().collect())
+        .unwrap_or_default();
+    for id in ids {
+        stop_playing(&id);
+    }
+}
+
+fn hold(project: &str, group: Option<studio_core::ProcessGroup>, child: std::process::Child) {
+    if let Ok(mut held) = PLAYING.lock() {
+        held.insert(project.to_string(), Playing { group, child });
+    }
+}
+
+fn start_supervised(
+    mut cmd: std::process::Command,
+) -> std::io::Result<(studio_core::ProcessGroup, std::process::Child)> {
+    let mut group = studio_core::ProcessGroup::new()?;
+    group.prepare(&mut cmd);
+    let child = cmd.spawn()?;
+    group.adopt(&child)?;
+    Ok((group, child))
+}
+
+fn open_in_browser(url: &str, cwd: &str) -> std::io::Result<()> {
+    let (program, args): (&str, Vec<&str>) = if cfg!(windows) {
+        ("cmd", vec!["/C", "start", ""])
+    } else if cfg!(target_os = "macos") {
+        ("open", Vec::new())
+    } else {
+        ("xdg-open", Vec::new())
+    };
+    studio_core::command(program)
+        .args(args)
+        .arg(url)
+        .current_dir(cwd)
+        .spawn()
+        .map(|_| ())
+}
+
+fn start_playing(p: &studio_store::ProjectRow, bin: &std::path::Path) -> std::io::Result<()> {
+    stop_playing(&p.id);
+
+    match p.engine.as_str() {
+        "web" => {
+            let mut cmd = std::process::Command::new(bin);
+            cmd.arg("tools/serve.mjs").current_dir(&p.root);
+            let (group, child) = start_supervised(cmd)?;
+            hold(&p.id, Some(group), child);
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            open_in_browser(WEB_PLAY_URL, &p.root)
+        }
+        "python" => {
+            let mut cmd = studio_core::command("cmd");
+            cmd.args(["/C", "start", ""])
+                .arg(bin)
+                .arg("main.py")
+                .current_dir(&p.root);
+            let child = cmd.spawn()?;
+            hold(&p.id, None, child);
+            Ok(())
+        }
+        _ => {
+            let mut cmd = studio_core::command(bin);
+            cmd.arg("--path").arg(&p.root).current_dir(&p.root);
+            let child = cmd.spawn()?;
+            hold(&p.id, None, child);
+            Ok(())
+        }
+    }
+}
+
 async fn play(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<PlayRequest>,
@@ -615,36 +716,20 @@ async fn play(
         Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
     };
 
-    let launched = match p.engine.as_str() {
-        "web" => std::process::Command::new(&bin)
-            .arg("tools/serve.mjs")
-            .current_dir(&p.root)
-            .spawn()
-            .and_then(|_| {
-                std::thread::sleep(std::time::Duration::from_millis(400));
-                std::process::Command::new("cmd")
-                    .args(["/C", "start", "", "http://127.0.0.1:8765/"])
-                    .current_dir(&p.root)
-                    .spawn()
-            }),
-        "python" => std::process::Command::new("cmd")
-            .args(["/C", "start", ""])
-            .arg(&bin)
-            .arg("main.py")
-            .current_dir(&p.root)
-            .spawn(),
-        _ => std::process::Command::new(&bin)
-            .arg("--path")
-            .arg(&p.root)
-            .current_dir(&p.root)
-            .spawn(),
-    };
+    let name = p.name.clone();
+    let started = tokio::task::spawn_blocking(move || start_playing(&p, &bin).map_err(|e| (e, bin)))
+        .await;
 
-    match launched {
-        Ok(_) => (StatusCode::OK, format!("{} is starting", p.name)).into_response(),
-        Err(e) => (
+    match started {
+        Ok(Ok(())) => (StatusCode::OK, format!("{name} is starting")).into_response(),
+        Ok(Err((e, bin))) => (
             StatusCode::BAD_GATEWAY,
             format!("could not start {}: {e}", bin.display()),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the launch thread died".to_string(),
         )
             .into_response(),
     }
@@ -915,6 +1000,86 @@ pub async fn serve(state: AppState, port: u16) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use studio_events::{EventType, Scene};
+
+    #[test]
+    fn nothing_on_the_play_path_spawns_a_bare_command_and_flashes_a_console() {
+        let source = include_str!("lib.rs");
+        let play = source
+            .split("pub const WEB_PLAY_URL")
+            .nth(1)
+            .and_then(|rest| rest.split("#[cfg(test)]").next())
+            .expect("the play path is between the url constant and the tests");
+        assert!(
+            !play.contains("std::process::Command::new(\"cmd\")"),
+            "a bare Command::new on Windows gives the child its own console; pressing play \
+             would flash a black window every time. Use studio_core::command."
+        );
+        assert!(
+            play.contains("studio_core::command"),
+            "the play path must go through the launcher that sets CREATE_NO_WINDOW"
+        );
+    }
+
+    #[test]
+    fn a_server_the_studio_starts_for_a_game_is_supervised_so_it_cannot_outlive_the_daemon() {
+        let mut cmd = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        cmd.args(if cfg!(windows) {
+            ["/C", "ping -n 30 127.0.0.1 >NUL"]
+        } else {
+            ["-c", "sleep 30"]
+        });
+        let (mut group, mut child) = start_supervised(cmd).expect("a shell always spawns");
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the child must still be running for this to prove anything"
+        );
+
+        group.kill_tree().unwrap();
+        let died = std::time::Instant::now();
+        while child.try_wait().unwrap().is_none() {
+            assert!(
+                died.elapsed() < std::time::Duration::from_secs(5),
+                "killing the group left the serve.mjs the studio started running forever"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn playing_a_project_stops_whatever_the_last_play_left_running() {
+        let mut cmd = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        cmd.args(if cfg!(windows) {
+            ["/C", "ping -n 30 127.0.0.1 >NUL"]
+        } else {
+            ["-c", "sleep 30"]
+        });
+        let (group, child) = start_supervised(cmd).unwrap();
+
+        let project = "proj_test_replacing";
+        hold(project, Some(group), child);
+        assert!(
+            stop_playing(project),
+            "a second play must reclaim the port the first one is holding"
+        );
+        assert!(!stop_playing(project), "there is nothing left to stop twice");
+        assert!(PLAYING.lock().unwrap().get(project).is_none());
+    }
+
+    #[test]
+    fn the_launch_path_reclaims_the_port_before_it_binds_it_again() {
+        let source = include_str!("lib.rs");
+        let launch = source
+            .split("fn start_playing(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nasync fn play(").next())
+            .expect("start_playing sits just above the route");
+        assert!(
+            launch.trim_start().starts_with("p: &studio_store::ProjectRow")
+                && launch.contains("stop_playing(&p.id)"),
+            "serve.mjs binds 8765; starting a second one without stopping the first leaves a \
+             server nobody can reach and nobody kills"
+        );
+    }
 
     fn ev(seq: u64, actor: &str, ty: EventType) -> Envelope {
         Envelope::new(seq, "t", "run_1", actor, Scene::daemon(), ty, serde_json::json!({}))

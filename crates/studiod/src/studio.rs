@@ -53,6 +53,7 @@ impl ProjectIndex {
             report.changed_paths.len(),
             report.symbols_delta
         );
+        let _ = self.index.checkpoint();
         Ok(())
     }
 }
@@ -793,6 +794,7 @@ pub fn serve_studio(store: Arc<Store>, run: String, port: u16) -> Result<()> {
     }
     println!("waiting for tasks and meetings from the floor");
     println!();
+    let _ = store.checkpoint();
 
     let mut indexes: std::collections::HashMap<String, ProjectIndex> =
         std::collections::HashMap::new();
@@ -843,7 +845,13 @@ pub fn serve_studio(store: Arc<Store>, run: String, port: u16) -> Result<()> {
                 idx.refresh_quietly(&em);
             }
         }
+
+        if let Err(e) = store.checkpoint() {
+            println!("  the event log could not be folded back into its file: {e}");
+        }
     }
+
+    studio_server::stop_playing_everything();
     Ok(())
 }
 
