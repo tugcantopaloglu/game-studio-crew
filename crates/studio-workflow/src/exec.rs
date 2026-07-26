@@ -164,6 +164,27 @@ pub fn execute<H: WorkflowHost>(
     Ok(report)
 }
 
+fn what_it_said(panic: Box<dyn std::any::Any + Send>) -> String {
+    let said = panic
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic with no message".into());
+    format!("the step panicked: {said}")
+}
+
+fn enter_without_unwinding<H: ParallelWorkflowHost>(
+    host: &H,
+    node: &Node,
+    inputs: &[String],
+) -> NodeOutcome {
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| host.enter(node, inputs)));
+    match ran {
+        Ok(outcome) => outcome,
+        Err(panic) => NodeOutcome::Failed { reason: what_it_said(panic) },
+    }
+}
+
 pub fn execute_parallel<H: ParallelWorkflowHost>(
     wf: &Workflow,
     host: &H,
@@ -254,9 +275,19 @@ pub fn execute_parallel<H: ParallelWorkflowHost>(
             let batch = std::thread::scope(|scope| {
                 let handles: Vec<_> = chunk
                     .iter()
-                    .map(|(node, inputs)| scope.spawn(move || (*node, host.enter(node, inputs))))
+                    .map(|(node, inputs)| {
+                        (*node, scope.spawn(move || enter_without_unwinding(host, node, inputs)))
+                    })
                     .collect();
-                handles.into_iter().map(|h| h.join().expect("worker thread panicked")).collect::<Vec<_>>()
+                handles
+                    .into_iter()
+                    .map(|(node, h)| {
+                        let outcome = h.join().unwrap_or_else(|panic| NodeOutcome::Failed {
+                            reason: what_it_said(panic),
+                        });
+                        (node, outcome)
+                    })
+                    .collect::<Vec<_>>()
             });
             outcomes.extend(batch);
 
@@ -699,6 +730,7 @@ mod tests {
             notes: Mutex<Vec<String>>,
             briefs: Mutex<Vec<String>>,
             out_of_allowance_at: Option<String>,
+            panic_at: Option<String>,
         }
 
         impl ParallelWorkflowHost for ParHost {
@@ -714,6 +746,9 @@ mod tests {
                 self.entered.lock().unwrap().push(node.id.clone());
                 let notes = self.notes.lock().unwrap().join(" ");
                 self.briefs.lock().unwrap().push(format!("{} {notes}", node.id));
+                if self.panic_at.as_deref() == Some(node.id.as_str()) {
+                    panic!("the pipes are on fire");
+                }
                 if self.out_of_allowance_at.as_deref() == Some(node.id.as_str()) {
                     return NodeOutcome::Failed { reason: "no allowance left".into() };
                 }
@@ -860,6 +895,45 @@ mod tests {
                 h.waves.lock().unwrap().iter().any(|w| w.contains(&"t1".to_string())),
                 "t1 finished and was paid for; halting must not throw its commit away"
             );
+        }
+
+        #[test]
+        fn a_step_that_panics_fails_that_step_and_leaves_the_run_standing() {
+            let wf = diamond();
+            let h = ParHost { panic_at: Some("t3".into()), ..Default::default() };
+
+            let r = execute_parallel(&wf, &h, &BTreeSet::new(), 4).unwrap();
+
+            match r.outcome {
+                Some(RunOutcome::Blocked { ref node, ref reason }) => {
+                    assert_eq!(node, "t3");
+                    assert!(
+                        reason.contains("the pipes are on fire"),
+                        "the panic message is the only clue anyone gets: {reason}"
+                    );
+                }
+                other => panic!("a panicking step must be a blocked run, not a dead process: {other:?}"),
+            }
+
+            assert!(
+                h.entered.lock().unwrap().contains(&"t2".to_string()),
+                "a sibling in the same wave must still have been run and reported"
+            );
+        }
+
+        #[test]
+        fn a_panic_in_one_step_does_not_take_its_wave_down_with_it() {
+            let wf = diamond();
+            let h = ParHost { panic_at: Some("t2".into()), ..Default::default() };
+
+            let r = execute_parallel(&wf, &h, &BTreeSet::new(), 4).unwrap();
+            let entered = h.entered.lock().unwrap();
+            assert!(
+                entered.contains(&"t3".to_string()) && entered.contains(&"t4".to_string()),
+                "t2, t3 and t4 share a wave; one of them panicking used to abort the scope and \
+                 unwind the whole daemon: {entered:?}"
+            );
+            assert_eq!(r.entered.len(), 4, "t5 depends on t2, so it cannot run: {:?}", r.entered);
         }
 
         #[test]
