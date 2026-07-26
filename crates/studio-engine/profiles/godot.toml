@@ -10,7 +10,19 @@ precedence = 5
 [tooling]
 resolver = "path"
 binary_env = "GODOT_BIN"
-binary_names = ["godot", "godot4"]
+binary_names = ["godot", "godot4", "Godot"]
+search = [
+  "{localappdata}/Microsoft/WinGet/Links/godot.exe",
+  "{localappdata}/Microsoft/WinGet/Packages/GodotEngine.GodotEngine*/Godot_v*_win64.exe",
+  "{localappdata}/Programs/Godot/Godot*.exe",
+  "{programfiles}/Godot/Godot*.exe",
+  "{programfiles86}/Steam/steamapps/common/Godot Engine/Godot*.exe",
+  "{programdata}/chocolatey/bin/godot.exe",
+  "{home}/scoop/shims/godot.exe",
+  "/Applications/Godot.app/Contents/MacOS/Godot",
+  "{home}/Applications/Godot.app/Contents/MacOS/Godot",
+  "/usr/local/bin/godot",
+]
 
 [commands]
 compile   = "{engine} --headless --path {project} -s addons/studio/studio_ci.gd"

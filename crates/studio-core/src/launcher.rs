@@ -27,6 +27,11 @@ pub fn launcher_for(found: &Path) -> (PathBuf, Vec<String>) {
     (found.to_path_buf(), Vec::new())
 }
 
+pub fn carries_an_executable_extension(program: &str) -> bool {
+    let lower = program.to_lowercase();
+    path_extensions().iter().any(|ext| lower.ends_with(ext))
+}
+
 pub fn resolve(program: &str) -> Option<PathBuf> {
     if program.contains('/') || program.contains('\\') {
         let direct = PathBuf::from(program);
@@ -35,17 +40,18 @@ pub fn resolve(program: &str) -> Option<PathBuf> {
 
     let raw = std::env::var_os("PATH")?;
     let extensions = path_extensions();
+    let named_outright = !cfg!(windows) || carries_an_executable_extension(program);
     for dir in std::env::split_paths(&raw) {
+        if named_outright {
+            let bare = dir.join(program);
+            if bare.is_file() {
+                return Some(bare);
+            }
+        }
         for ext in &extensions {
             let candidate = dir.join(format!("{program}{ext}"));
             if candidate.is_file() {
                 return Some(candidate);
-            }
-        }
-        if !cfg!(windows) {
-            let bare = dir.join(program);
-            if bare.is_file() {
-                return Some(bare);
             }
         }
     }
@@ -129,6 +135,38 @@ mod tests {
             ext, "cmd",
             "claude resolving to a shim would mean every worker spawn now goes through a shell \
              that re-parses the argument vector, and the frozen prefix travels in that vector"
+        );
+    }
+
+    #[test]
+    fn a_name_that_already_carries_its_extension_is_still_found_on_path() {
+        if !cfg!(windows) {
+            return;
+        }
+        let Some(bare) = resolve("cargo") else {
+            return;
+        };
+        let named = bare
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        assert!(
+            resolve(&named).is_some(),
+            "settings and engine profiles both hand this function names like {named}; \
+             appending PATHEXT to a name that already ends in one finds nothing"
+        );
+    }
+
+    #[test]
+    fn only_a_real_extension_counts_as_one_already_being_there() {
+        if !cfg!(windows) {
+            return;
+        }
+        assert!(carries_an_executable_extension("godot.exe"));
+        assert!(carries_an_executable_extension("Godot_v4.7.1-stable_win64.EXE"));
+        assert!(
+            !carries_an_executable_extension("Godot_v4.7.1-stable_win64"),
+            "a version number is not an extension"
         );
     }
 

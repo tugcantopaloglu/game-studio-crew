@@ -137,10 +137,12 @@ fn run_build(em: &Emitter, req: BuildRequest, seq: &mut usize) -> Result<()> {
         .to_workflow()
         .map_err(|e| anyhow::anyhow!("plan did not convert to a workflow: {e}"))?;
 
-    for scope in [studio_engine::VerifyScope::Compile, studio_engine::VerifyScope::Runtime] {
-        if let Some(gate) = verify_gate(em.project.as_deref(), &wf, scope) {
-            println!("  gate: {} after {}", scope.key(), gate.after);
-            wf.gates.push(gate);
+    if let Some(profile) = engine_for(em.project.as_deref()) {
+        for scope in [studio_engine::VerifyScope::Compile, studio_engine::VerifyScope::Runtime] {
+            if let Some(gate) = verify_gate(&profile, &wf, scope) {
+                println!("  gate: {} after {}", scope.key(), gate.after);
+                wf.gates.push(gate);
+            }
         }
     }
 
@@ -223,21 +225,46 @@ fn propose(
     }
 }
 
-fn verify_gate(
-    project: Option<&std::path::Path>,
-    wf: &studio_workflow::Workflow,
-    scope: studio_engine::VerifyScope,
-) -> Option<studio_workflow::Gate> {
+fn engine_for(project: Option<&std::path::Path>) -> Option<studio_engine::EngineProfile> {
     let root = project?;
     let profiles = studio_engine::EngineProfile::builtin();
     let detected = studio_engine::detect(root, &profiles);
     let first = detected.first()?;
-    let profile = profiles.iter().find(|p| p.id == first.id)?;
-    if profile.command(scope).is_err() {
-        return None;
+    let profile = profiles.iter().find(|p| p.id == first.id)?.clone();
+
+    match studio_engine::find_binary(&profile) {
+        Some(found) => {
+            println!(
+                "  engine: {} at {} ({})",
+                profile.id,
+                found.path.display(),
+                found.how
+            );
+            Some(profile)
+        }
+        None => {
+            println!(
+                "  gate: nothing to verify {} with; every gate is skipped this run",
+                profile.id
+            );
+            for place in studio_engine::places_searched(&profile) {
+                println!("        looked in {place}");
+            }
+            println!(
+                "        point the studio at it under settings, or set {}",
+                profile.tooling.binary_env
+            );
+            None
+        }
     }
-    if let Err(e) = studio_engine::resolve_binary(profile) {
-        println!("  gate: skipping {} verification ({e})", scope.key());
+}
+
+fn verify_gate(
+    profile: &studio_engine::EngineProfile,
+    wf: &studio_workflow::Workflow,
+    scope: studio_engine::VerifyScope,
+) -> Option<studio_workflow::Gate> {
+    if profile.command(scope).is_err() {
         return None;
     }
 
@@ -732,6 +759,7 @@ fn first_line(s: &str) -> String {
 
 pub fn serve_studio(store: Arc<Store>, run: String, port: u16) -> Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<StudioCommand>();
+    studio_server::settings::apply_engine_paths_from(&crate::studio_dir());
     let state = AppState::new(store.clone())
         .with_studio_dir(crate::studio_dir())
         .with_commands(tx);

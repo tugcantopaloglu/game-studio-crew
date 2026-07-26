@@ -187,22 +187,41 @@ fn version_of(path: &Path) -> Option<String> {
         .spawn()
         .ok()?;
 
+    let out_pump = drain(child.stdout.take());
+    let err_pump = drain(child.stderr.take());
+
     let deadline = Instant::now() + PROBE_TIMEOUT;
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
-                return None;
+                break;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
             Err(_) => return None,
         }
     }
 
-    let out = child.wait_with_output().ok()?;
-    let text = if out.stdout.is_empty() { out.stderr } else { out.stdout };
-    first_useful_line(&String::from_utf8_lossy(&text))
+    let stdout = out_pump.join().unwrap_or_default();
+    let text = if stdout.trim().is_empty() {
+        err_pump.join().unwrap_or_default()
+    } else {
+        stdout
+    };
+    first_useful_line(&text)
+}
+
+fn drain<R: std::io::Read + Send + 'static>(
+    pipe: Option<R>,
+) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut raw = Vec::new();
+        if let Some(mut p) = pipe {
+            let _ = p.read_to_end(&mut raw);
+        }
+        String::from_utf8_lossy(&raw).into_owned()
+    })
 }
 
 fn first_useful_line(text: &str) -> Option<String> {
@@ -395,6 +414,33 @@ mod tests {
         let text = String::from_utf8_lossy(&body);
         assert!(text.contains("\"ready\""), "{text}");
         assert!(text.contains("\"claude\""), "{text}");
+    }
+
+    #[test]
+    fn a_tool_that_only_exits_once_its_output_is_read_still_reports_a_version() {
+        let script = "process.stdout.write('probe 9.9\\n'.repeat(20000));";
+        let node = match which("node") {
+            Some(n) => n,
+            None => return,
+        };
+        let mut child = studio_core::command(&node)
+            .args(["-e", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let pump = drain(child.stdout.take());
+        let _ = child.wait();
+        let text = pump.join().unwrap();
+        assert!(
+            text.len() > 64 * 1024,
+            "a probe that waits for exit before reading fills the pipe buffer and both sides \
+             stop; godot never exits until its output is taken, so the doctor called it nameless"
+        );
+        assert_eq!(first_useful_line(&text).unwrap(), "probe 9.9");
+        drop(child.stderr.take());
     }
 
     #[test]

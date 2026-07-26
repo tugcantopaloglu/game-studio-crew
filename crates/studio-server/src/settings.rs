@@ -20,6 +20,7 @@ pub fn routes() -> Router<AppState> {
         .route("/providers", get(providers))
         .route("/models", get(model_catalogue))
         .route("/models/probe", axum::routing::post(probe_models))
+        .route("/engines", get(engines))
         .route("/limits", get(limits))
         .route("/music", get(music_list))
         .route("/music/track", get(music_track))
@@ -66,13 +67,59 @@ async fn write_settings(State(state): State<AppState>, body: String) -> Response
     stored.merge(&incoming);
 
     match stored.save(&path) {
-        Ok(()) => axum::Json(stored.to_value()).into_response(),
+        Ok(()) => {
+            apply_engine_paths(&stored);
+            axum::Json(stored.to_value()).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("could not write {}: {e}", path.display()),
         )
             .into_response(),
     }
+}
+
+pub fn engine_key(engine_id: &str) -> String {
+    format!("engine.{engine_id}")
+}
+
+pub fn apply_engine_paths(settings: &Settings) {
+    for profile in studio_engine::EngineProfile::builtin() {
+        studio_engine::name_the_binary(&profile.id, settings.string(&engine_key(&profile.id)));
+    }
+}
+
+pub fn apply_engine_paths_from(studio_dir: &Path) {
+    apply_engine_paths(&Settings::load(&Settings::path_in(studio_dir)).unwrap_or_default());
+}
+
+fn engine_row(profile: &studio_engine::EngineProfile, named: Option<&str>) -> Value {
+    let found = studio_engine::find_binary(profile);
+    serde_json::json!({
+        "id": profile.id,
+        "title": profile.display_name,
+        "key": engine_key(&profile.id),
+        "named": named.unwrap_or(""),
+        "found": found.is_some(),
+        "path": found.as_ref().map(|f| f.path.to_string_lossy().into_owned()),
+        "how": found.as_ref().map(|f| f.how),
+        "env": profile.tooling.binary_env,
+        "looked_in": studio_engine::places_searched(profile),
+        "verifies": studio_engine::VerifyScope::ALL
+            .iter()
+            .filter(|s| profile.command(**s).is_ok())
+            .map(|s| s.key())
+            .collect::<Vec<_>>(),
+    })
+}
+
+async fn engines(State(state): State<AppState>) -> Response {
+    let stored = Settings::load(&settings_path(&state)).unwrap_or_default();
+    let rows: Vec<Value> = studio_engine::EngineProfile::builtin()
+        .iter()
+        .map(|p| engine_row(p, stored.string(&engine_key(&p.id))))
+        .collect();
+    axum::Json(rows).into_response()
 }
 
 pub fn on_path(program: &str) -> Option<PathBuf> {
@@ -1337,6 +1384,45 @@ mod tests {
             "a second command ran, so the name was parsed as shell rather than passed as one \
              argument; names come from a config file and from the CLI's own catalogue, so they \
              are not ours to trust: {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn every_engine_row_says_where_it_looked_when_it_found_nothing() {
+        for profile in studio_engine::EngineProfile::builtin() {
+            let row = engine_row(&profile, None);
+            assert_eq!(row["key"], format!("engine.{}", profile.id));
+            if row["found"] == Value::Bool(true) {
+                assert!(row["path"].as_str().is_some_and(|p| !p.is_empty()));
+                assert!(row["how"].as_str().is_some());
+                continue;
+            }
+            let looked = row["looked_in"].as_array().expect("an array of places");
+            assert!(
+                !looked.is_empty(),
+                "{} reports nothing found and gives no way to fix it",
+                profile.id
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_named_in_settings_reaches_the_resolver() {
+        let dir = std::env::temp_dir().join("studio-engine-path-setting");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("pretend-godot.exe");
+        std::fs::write(&fake, "").unwrap();
+
+        let mut stored = Settings::new();
+        stored.set(&engine_key("godot"), Value::String(fake.to_string_lossy().into()));
+        apply_engine_paths(&stored);
+        assert_eq!(studio_engine::binary_named_in_settings("godot"), Some(fake));
+
+        apply_engine_paths(&Settings::new());
+        assert_eq!(
+            studio_engine::binary_named_in_settings("godot"),
+            None,
+            "clearing the field must hand the engine back to PATH"
         );
     }
 
