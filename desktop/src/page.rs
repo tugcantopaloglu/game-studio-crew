@@ -21,6 +21,10 @@ pre { background: var(--panel); border: 1px solid var(--line); border-radius: 8p
   padding: 14px 16px; margin: 0 0 18px; max-height: 46vh; overflow: auto;
   font: 11.5px/1.5 var(--mono); color: var(--dim); white-space: pre-wrap; }
 .hint { color: var(--faint); font-size: 12px; }
+button { font: 13px var(--sans); color: var(--text); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 7px; padding: 8px 16px;
+  margin: 0 0 18px; cursor: pointer; }
+button:hover { border-color: var(--dim); }
 .mark { display: block; height: 46px; width: auto; margin: 0 0 22px; opacity: .9; }
 .dots::after { content: ""; animation: dots 1.4s steps(4, end) infinite; }
 @keyframes dots { 0% { content: ""; } 25% { content: "."; } 50% { content: ".."; } 75% { content: "..."; } }
@@ -44,6 +48,8 @@ pub fn starting() -> String {
     )
 }
 
+pub const RESTART: &str = "restart";
+
 pub fn failure(failure: &Failure) -> String {
     let mut body = format!("<h1 class=\"bad\">{}</h1>", escape(&failure.headline));
     if !failure.what_to_do.is_empty() {
@@ -52,6 +58,10 @@ pub fn failure(failure: &Failure) -> String {
     if !failure.detail.trim().is_empty() {
         body.push_str(&format!("<pre>{}</pre>", escape(failure.detail.trim())));
     }
+    body.push_str(&format!(
+        "<button onclick=\"this.disabled=true;this.textContent='Starting the studio\u{2026}';\
+         window.ipc.postMessage('{RESTART}')\">Start the studio again</button>"
+    ));
     body.push_str(
         "<div class=\"hint\">Closing this window stops the daemon and every worker it started.</div>",
     );
@@ -98,6 +108,33 @@ mod tests {
         });
         assert!(html.contains("Install one coding CLI."));
         assert!(!html.contains("<pre>"), "an empty detail leaves no empty box");
+    }
+
+    #[test]
+    fn a_failure_page_offers_a_way_back_rather_than_only_telling_you_to_close_the_window() {
+        let html = failure(&Failure {
+            headline: "the studio daemon stopped".into(),
+            detail: "it exited with code 1".into(),
+            what_to_do: "Close this window and start it again.".into(),
+        });
+        assert!(html.contains("Start the studio again"));
+        assert!(
+            html.contains(&format!("window.ipc.postMessage('{RESTART}')")),
+            "the button has to reach the shell; there is no server behind this page"
+        );
+        assert!(
+            html.contains("this.disabled=true"),
+            "a second press would start a second daemon racing the first"
+        );
+    }
+
+    #[test]
+    fn the_shell_acts_on_the_restart_message_the_page_actually_sends() {
+        let main = include_str!("main.rs");
+        assert!(
+            main.contains("request.body() == page::RESTART"),
+            "the page posts page::RESTART; nothing else in the shell may define that string"
+        );
     }
 
     #[test]

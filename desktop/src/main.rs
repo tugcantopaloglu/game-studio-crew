@@ -21,6 +21,7 @@ const ICON_RESOURCE: u16 = 1;
 enum Signal {
     Ready,
     Broken(Failure),
+    Restart,
 }
 
 type Slot = Arc<Mutex<Option<Daemon>>>;
@@ -36,31 +37,20 @@ fn main() -> wry::Result<()> {
     .build(&event_loop)
     .expect("the studio window could not be created");
 
+    let asked = event_loop.create_proxy();
     let webview = WebViewBuilder::new()
         .with_html(page::starting())
+        .with_ipc_handler(move |request| {
+            if request.body() == page::RESTART {
+                let _ = asked.send_event(Signal::Restart);
+            }
+        })
         .build(&window)?;
 
     let slot: Slot = Arc::new(Mutex::new(None));
-    let starter = event_loop.create_proxy();
-    let watcher = event_loop.create_proxy();
-    let doctor = event_loop.create_proxy();
-    let supervised = slot.clone();
+    bring_the_studio_up(&slot, event_loop.create_proxy());
 
-    std::thread::spawn(move || {
-        let complain = move |missing| {
-            let _ = doctor.send_event(Signal::Broken(missing));
-        };
-        match daemon::bring_up(&supervised, complain) {
-            Err(failure) => {
-                let _ = starter.send_event(Signal::Broken(failure));
-            }
-            Ok(()) => {
-                let _ = starter.send_event(Signal::Ready);
-                watch(&supervised, watcher);
-            }
-        }
-    });
-
+    let restarter = event_loop.create_proxy();
     let mut broken = false;
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -71,6 +61,13 @@ fn main() -> wry::Result<()> {
             Event::UserEvent(Signal::Broken(failure)) => {
                 broken = true;
                 let _ = webview.load_html(&page::failure(&failure));
+            }
+            Event::UserEvent(Signal::Restart) if broken => {
+                broken = false;
+                let _ = webview.load_html(&page::starting());
+                shut_the_studio_down(&slot);
+                empty_the_slot(&slot);
+                bring_the_studio_up(&slot, restarter.clone());
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -83,6 +80,33 @@ fn main() -> wry::Result<()> {
             _ => {}
         }
     });
+}
+
+fn bring_the_studio_up(slot: &Slot, proxy: EventLoopProxy<Signal>) {
+    let supervised = slot.clone();
+    let starter = proxy.clone();
+    let watcher = proxy.clone();
+
+    std::thread::spawn(move || {
+        let complain = move |missing| {
+            let _ = proxy.send_event(Signal::Broken(missing));
+        };
+        match daemon::bring_up(&supervised, complain) {
+            Err(failure) => {
+                let _ = starter.send_event(Signal::Broken(failure));
+            }
+            Ok(()) => {
+                let _ = starter.send_event(Signal::Ready);
+                watch(&supervised, watcher);
+            }
+        }
+    });
+}
+
+fn empty_the_slot(slot: &Slot) {
+    if let Ok(mut held) = slot.lock() {
+        *held = None;
+    }
 }
 
 #[cfg(windows)]
