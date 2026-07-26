@@ -257,6 +257,20 @@ impl AppState {
     }
 }
 
+pub async fn off_the_runtime<T, F>(work: F) -> Result<T, Response>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the thread doing that work died".to_string(),
+        )
+            .into_response()
+    })
+}
+
 pub fn compact_for_snapshot(events: Vec<Envelope>) -> Vec<Envelope> {
     let mut c = Coalescer::new();
     for e in events {
@@ -278,15 +292,31 @@ fn origin_is_local(origin: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1")
 }
 
+fn changes_something(method: &axum::http::Method) -> bool {
+    !matches!(
+        *method,
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    )
+}
+
 async fn guard_origin(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<Response, StatusCode> {
-    if let Some(origin) = req.headers().get(header::ORIGIN) {
-        let ok = origin.to_str().map(origin_is_local).unwrap_or(false);
-        if !ok {
-            return Err(StatusCode::FORBIDDEN);
+    match req.headers().get(header::ORIGIN) {
+        Some(origin) => {
+            if !origin.to_str().map(origin_is_local).unwrap_or(false) {
+                return Err(StatusCode::FORBIDDEN);
+            }
         }
+        None if changes_something(req.method()) => {
+            if req.headers().contains_key("sec-fetch-site")
+                || req.headers().contains_key(header::REFERER)
+            {
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+        None => {}
     }
     Ok(next.run(req).await)
 }
@@ -1313,6 +1343,37 @@ mod tests {
             post_with_origin(Some("http://127.0.0.1:7878")).await,
             StatusCode::FORBIDDEN
         );
+    }
+
+    #[tokio::test]
+    async fn a_browser_post_that_carries_no_origin_is_still_refused() {
+        use tower::ServiceExt;
+        let dir = std::env::temp_dir().join("studio-origin-fetchsite");
+        let _ = std::fs::create_dir_all(&dir);
+        let store = Arc::new(Store::open(dir.join("s.db")).unwrap());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let app = router(AppState::new(store).with_commands(tx));
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/task")
+            .header("content-type", "application/json")
+            .header("sec-fetch-site", "cross-site")
+            .body(axum::body::Body::from(
+                r#"{"role":"gameplay_engineer","brief":"x"}"#,
+            ))
+            .unwrap();
+
+        assert_eq!(
+            app.oneshot(req).await.unwrap().status(),
+            StatusCode::FORBIDDEN,
+            "a request a browser sent is a request a page can forge; only a real client with              no fetch metadata at all is trusted without an origin"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plain_client_with_no_browser_headers_is_still_served() {
+        assert_ne!(post_with_origin(None).await, StatusCode::FORBIDDEN);
     }
 
     #[test]

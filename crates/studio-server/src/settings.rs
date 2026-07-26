@@ -250,10 +250,17 @@ fn catalogue_for(state: &AppState, provider: Provider) -> Value {
 }
 
 async fn model_catalogue(State(state): State<AppState>) -> Response {
-    let rows: Vec<Value> = Provider::ALL
-        .into_iter()
-        .map(|p| catalogue_for(&state, p))
-        .collect();
+    let read = crate::off_the_runtime(move || {
+        Provider::ALL
+            .into_iter()
+            .map(|p| catalogue_for(&state, p))
+            .collect::<Vec<Value>>()
+    })
+    .await;
+    let rows = match read {
+        Ok(rows) => rows,
+        Err(response) => return response,
+    };
 
     axum::Json(serde_json::json!({
         "providers": rows,
@@ -669,8 +676,13 @@ async fn limits(State(state): State<AppState>) -> Response {
         "the CLI names the window in force and when it resets, never how much of it is left, so no percentage is shown"
     };
 
+    let account = match crate::off_the_runtime(read_account).await {
+        Ok(said) => said,
+        Err(response) => return response,
+    };
+
     axum::Json(serde_json::json!({
-        "account": read_account(),
+        "account": account,
         "windows": windows,
         "note": note,
         "ledger": ledger,

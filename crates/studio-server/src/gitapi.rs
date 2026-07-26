@@ -112,17 +112,27 @@ async fn tree(State(state): State<AppState>, Query(q): Query<TreeQuery>) -> Resp
         Err(response) => return response,
     };
 
-    let history = match git::history(&root, q.skip, q.limit) {
+    let (skip, limit) = (q.skip, q.limit);
+    let read = crate::off_the_runtime(move || {
+        let history = git::history(&root, skip, limit);
+        let dirty = git::changes(&root).unwrap_or_default();
+        let remotes = git::remotes(&root).unwrap_or_default();
+        (history, dirty, remotes, git::branch(&root), git::head_sha(&root))
+    })
+    .await;
+    let (history, dirty, remotes, branch, head) = match read {
+        Ok(got) => got,
+        Err(response) => return response,
+    };
+    let history = match history {
         Ok(h) => h,
         Err(e) => return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
     };
-    let dirty = git::changes(&root).unwrap_or_default();
-    let remotes = git::remotes(&root).unwrap_or_default();
 
     axum::Json(serde_json::json!({
         "project": q.project,
-        "branch": git::branch(&root),
-        "head": git::head_sha(&root),
+        "branch": branch,
+        "head": head,
         "skip": q.skip,
         "lanes": history.lanes,
         "more": history.more,
@@ -145,7 +155,12 @@ async fn remote(
         Ok(root) => root,
         Err(response) => return response,
     };
-    match git::set_remote(&root, &req.url) {
+    let url = req.url.clone();
+    let set = match crate::off_the_runtime(move || git::set_remote(&root, &url)).await {
+        Ok(done) => done,
+        Err(response) => return response,
+    };
+    match set {
         Ok(()) => {
             let detail = format!("origin is {}", req.url.trim());
             announce(&state, &req.project, "remote", true, &detail);
@@ -166,7 +181,13 @@ async fn create(
         Ok(root) => root,
         Err(response) => return response,
     };
-    match git::create_remote(&root, &req.name, req.private) {
+    let (name, private) = (req.name.clone(), req.private);
+    let made = match crate::off_the_runtime(move || git::create_remote(&root, &name, private)).await
+    {
+        Ok(done) => done,
+        Err(response) => return response,
+    };
+    match made {
         Ok(url) => {
             let detail = format!("created {url}");
             announce(&state, &req.project, "create", true, &detail);
@@ -184,7 +205,11 @@ async fn push(State(state): State<AppState>, axum::Json(req): axum::Json<PushReq
         Ok(root) => root,
         Err(response) => return response,
     };
-    match git::push(&root) {
+    let pushed = match crate::off_the_runtime(move || git::push(&root)).await {
+        Ok(done) => done,
+        Err(response) => return response,
+    };
+    match pushed {
         Ok(said) => {
             announce(&state, &req.project, "push", true, &said);
             (StatusCode::OK, said).into_response()
@@ -205,14 +230,31 @@ async fn rollback(
         Err(response) => return response,
     };
 
-    if !req.confirm {
-        return match git::rollback_plan(&root, &req.sha) {
-            Ok(plan) => axum::Json(serde_json::json!({"applied": false, "plan": plan})).into_response(),
-            Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-        };
-    }
+    let sha = req.sha.clone();
+    let confirm = req.confirm;
+    let did = crate::off_the_runtime(move || {
+        if confirm {
+            git::rollback(&root, &sha).map(Ok)
+        } else {
+            git::rollback_plan(&root, &sha).map(Err)
+        }
+    })
+    .await;
+    let did = match did {
+        Ok(done) => done,
+        Err(response) => return response,
+    };
 
-    match git::rollback(&root, &req.sha) {
+    let did = match did {
+        Ok(Err(plan)) => {
+            return axum::Json(serde_json::json!({"applied": false, "plan": plan}))
+                .into_response()
+        }
+        Ok(Ok(done)) => Ok(done),
+        Err(e) => Err(e),
+    };
+
+    match did {
         Ok(done) => {
             let detail = format!(
                 "rolled back to {} '{}', discarding {} commit(s) and {} uncommitted change(s)",
