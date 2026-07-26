@@ -745,6 +745,42 @@ function enginesSection(root) {
   paint();
 }
 
+function budgetSection(root) {
+  root.append(
+    ...section(
+      "spend",
+      "what one run may cost before it stops and waits for you; a stopped run can be picked up again from the run panel"
+    )
+  );
+
+  const money = el("input", {
+    type: "number",
+    min: "0",
+    step: "1",
+    value: String(read("budget.usd", 25)),
+    onchange: (e) => store("budget.usd", Number(e.target.value)),
+  });
+  root.append(field("dollars per run", money));
+  root.append(
+    el("div", { class: "hint", text: "0 means no dollar ceiling at all" })
+  );
+
+  const tokens = el("input", {
+    type: "number",
+    min: "0",
+    step: "10000",
+    value: String(read("budget.tokens", 0)),
+    onchange: (e) => store("budget.tokens", Number(e.target.value)),
+  });
+  root.append(field("billed tokens per run", tokens));
+  root.append(
+    el("div", {
+      class: "hint",
+      text: "0 means the plan's own declared budget, which is 120,000 tokens per step",
+    })
+  );
+}
+
 function floorSection(root) {
   root.append(...section("floor"));
   root.append(check("low spec mode", "lowSpec", false));
@@ -812,6 +848,7 @@ function redraw() {
       paintModels();
       providerSection(pane("providers"), providers);
       enginesSection(pane("engines"));
+      budgetSection(pane("budget"));
       limitsSection(pane("limits"));
       musicSection(pane("music"));
       floorSection(pane("floor"));
