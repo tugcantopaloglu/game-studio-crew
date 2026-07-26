@@ -55,11 +55,40 @@ fn guard_nested_session() -> Result<()> {
     Ok(())
 }
 
+fn already_written(path: &std::path::Path, bytes: &str) -> bool {
+    fs::metadata(path)
+        .map(|m| m.len() == bytes.len() as u64)
+        .unwrap_or(false)
+}
+
 fn write_charter(prefix: &FrozenPrefix) -> Result<PathBuf> {
-    let dir = studio_dir().join("charters");
-    fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{}.txt", &prefix.prefix_hash[..16]));
-    fs::write(&path, &prefix.bytes)?;
+    write_charter_into(&studio_dir().join("charters"), prefix)
+}
+
+fn write_charter_into(dir: &std::path::Path, prefix: &FrozenPrefix) -> Result<PathBuf> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fs::create_dir_all(dir)?;
+    let named = &prefix.prefix_hash[..16];
+    let path = dir.join(format!("{named}.txt"));
+
+    if already_written(&path, &prefix.bytes) {
+        return Ok(path);
+    }
+
+    let mine = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let staging = dir.join(format!("{named}.{}.{mine}.part", std::process::id()));
+    fs::write(&staging, &prefix.bytes)?;
+
+    if fs::rename(&staging, &path).is_err() {
+        let _ = fs::remove_file(&staging);
+        if !already_written(&path, &prefix.bytes) {
+            bail!(
+                "the charter at {} could not be put in place and what is there is not it",
+                path.display()
+            );
+        }
+    }
     Ok(path)
 }
 
@@ -767,5 +796,76 @@ mod daemon_path_tests {
             path.display()
         );
         assert!(path.is_file());
+    }
+}
+
+#[cfg(test)]
+mod charter_tests {
+    use super::*;
+    use studio_context::{freeze, CharterSource, Model};
+
+    fn a_charter(body: &str) -> FrozenPrefix {
+        freeze(
+            &CharterSource {
+                studio_conventions: body.into(),
+                engine_profile: "engine".into(),
+                role_charter: "role".into(),
+            },
+            &["Read".to_string()],
+            Model::Opus,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn two_workers_on_the_same_charter_never_see_a_half_written_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let into = dir.path().to_path_buf();
+
+        let prefix = a_charter(&"the studio conventions. ".repeat(4000));
+        let want = prefix.bytes.len();
+
+        let paths: Vec<PathBuf> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let prefix = prefix.clone();
+                    let into = into.clone();
+                    scope.spawn(move || write_charter_into(&into, &prefix).unwrap())
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        assert!(paths.windows(2).all(|w| w[0] == w[1]), "one charter, one path");
+        assert_eq!(
+            fs::read_to_string(&paths[0]).unwrap().len(),
+            want,
+            "a worker whose CLI reads this while another truncates it is briefed with half a              charter and misses the prefix cache the whole design is paid for"
+        );
+
+        let leftovers: Vec<_> = fs::read_dir(paths[0].parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".part"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging files were left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn a_charter_that_is_already_on_disk_is_not_rewritten_under_a_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = a_charter("short");
+        let first = write_charter_into(dir.path(), &prefix).unwrap();
+        let stamped = fs::metadata(&first).unwrap().modified().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let again = write_charter_into(dir.path(), &prefix).unwrap();
+
+        assert_eq!(first, again);
+        assert_eq!(
+            fs::metadata(&again).unwrap().modified().unwrap(),
+            stamped,
+            "the name is the hash of the bytes, so rewriting it can only ever disturb a reader"
+        );
     }
 }
