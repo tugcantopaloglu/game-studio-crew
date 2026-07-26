@@ -14,6 +14,8 @@ pub use stream::{map_cli_event, CliEvent, McpServer, StreamState};
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use studio_events::Outcome;
 
@@ -50,14 +52,36 @@ pub struct StreamStateSnapshot {
     pub mcp_connected: Vec<String>,
 }
 
+pub const CANCEL_POLL: Duration = Duration::from_millis(250);
+
+#[derive(Clone)]
 pub struct WorkerLimits {
     pub stall_timeout: Duration,
     pub wall_clock: Duration,
+    pub stop_asked: Option<Arc<AtomicBool>>,
+}
+
+impl WorkerLimits {
+    pub fn stopping(&self) -> bool {
+        self.stop_asked
+            .as_ref()
+            .map(|f| f.load(Ordering::Relaxed))
+            .unwrap_or(false)
+    }
+
+    pub fn until(mut self, stop_asked: Arc<AtomicBool>) -> Self {
+        self.stop_asked = Some(stop_asked);
+        self
+    }
 }
 
 impl Default for WorkerLimits {
     fn default() -> Self {
-        Self { stall_timeout: Duration::from_secs(180), wall_clock: WALL_CLOCK_LIMIT }
+        Self {
+            stall_timeout: Duration::from_secs(180),
+            wall_clock: WALL_CLOCK_LIMIT,
+            stop_asked: None,
+        }
     }
 }
 
@@ -160,35 +184,38 @@ impl Worker {
         let mut state = StreamState::default();
         let mut timed_out = false;
         let mut stalled = false;
+        let mut stopped = false;
+        let mut last_line = Instant::now();
 
         loop {
+            if limits.stopping() {
+                stopped = true;
+                break;
+            }
             let remaining_wall = limits.wall_clock.saturating_sub(started.elapsed());
             if remaining_wall.is_zero() {
                 timed_out = true;
                 break;
             }
-            let wait = limits.stall_timeout.min(remaining_wall);
+            if last_line.elapsed() >= limits.stall_timeout {
+                stalled = true;
+                break;
+            }
 
-            match rx.recv_timeout(wait) {
+            match rx.recv_timeout(CANCEL_POLL.min(remaining_wall)) {
                 Ok(line) => {
+                    last_line = Instant::now();
                     if let Some(ev) = stream::parse_line(&line) {
                         state.apply(&ev);
                         on_event(&ev);
                     }
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if started.elapsed() >= limits.wall_clock {
-                        timed_out = true;
-                    } else {
-                        stalled = true;
-                    }
-                    break;
-                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
 
-        let exit_code = if timed_out || stalled {
+        let exit_code = if timed_out || stalled || stopped {
             let _ = self.group.kill_tree();
             let _ = self.child.wait();
             None
@@ -217,7 +244,9 @@ impl Worker {
                 .collect(),
         };
 
-        let outcome = if timed_out {
+        let outcome = if stopped {
+            Outcome::Killed
+        } else if timed_out {
             Outcome::TimedOut
         } else if stalled {
             Outcome::Stalled
@@ -327,6 +356,7 @@ mod tests {
         let limits = WorkerLimits {
             stall_timeout: Duration::from_secs(30),
             wall_clock: Duration::from_millis(300),
+            stop_asked: None,
         };
         let w = Worker::spawn("node", &node_emitting(script), "").unwrap();
         let report = w.drive(&limits, |_| {}).unwrap();
@@ -344,6 +374,7 @@ mod tests {
         let limits = WorkerLimits {
             stall_timeout: Duration::from_millis(200),
             wall_clock: Duration::from_secs(30),
+            stop_asked: None,
         };
         let w = Worker::spawn("node", &node_emitting(script), "").unwrap();
         let report = w.drive(&limits, |_| {}).unwrap();
@@ -364,6 +395,7 @@ mod tests {
         let limits = WorkerLimits {
             stall_timeout: Duration::from_secs(20),
             wall_clock: Duration::from_secs(30),
+            stop_asked: None,
         };
         let w = Worker::spawn("node", &node_emitting(script), "").unwrap();
         let report = w.drive(&limits, |_| {}).unwrap();
@@ -417,9 +449,53 @@ mod tests {
         let limits = WorkerLimits {
             stall_timeout: Duration::from_millis(250),
             wall_clock: Duration::from_secs(30),
+            stop_asked: None,
         };
         let w = Worker::spawn("node", &node_emitting(script), "").unwrap();
         let report = w.drive(&limits, |_| {}).unwrap();
         assert!(report.duration < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn asking_a_run_to_stop_kills_the_worker_that_is_already_talking() {
+        let script = r#"
+            const line = (o) => process.stdout.write(JSON.stringify(o) + String.fromCharCode(10));
+            line({type:"system",subtype:"init",session_id:"s"});
+            setInterval(() => line({type:"stream_event",event:{type:"content_block_delta",delta:{type:"text_delta",text:"."}}}), 30);
+        "#;
+        let stop = Arc::new(AtomicBool::new(false));
+        let limits = WorkerLimits::default().until(stop.clone());
+
+        let asked = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            asked.store(true, Ordering::Relaxed);
+        });
+
+        let started = Instant::now();
+        let w = Worker::spawn("node", &node_emitting(script), "").unwrap();
+        let report = w.drive(&limits, |_| {}).unwrap();
+
+        assert_eq!(
+            report.outcome,
+            Outcome::Killed,
+            "pressing stop used to leave this worker running to its 45 minute wall clock"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "it took {:?} to notice the stop",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_worker_nobody_stopped_runs_to_its_own_finish() {
+        let script = r#"
+            const line = (o) => process.stdout.write(JSON.stringify(o) + String.fromCharCode(10));
+            line({type:"result",subtype:"success",is_error:false,total_cost_usd:0,usage:{}});
+        "#;
+        let limits = WorkerLimits::default().until(Arc::new(AtomicBool::new(false)));
+        let w = Worker::spawn("node", &node_emitting(script), "").unwrap();
+        assert_eq!(w.drive(&limits, |_| {}).unwrap().outcome, Outcome::Completed);
     }
 }

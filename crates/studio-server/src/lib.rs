@@ -136,6 +136,7 @@ pub struct AppState {
     pub plans: PlanGates,
     pub steps: StepGates,
     pub interrupts: Interrupts,
+    pub stopping: Arc<std::sync::atomic::AtomicBool>,
     pub studio_dir: Arc<std::path::PathBuf>,
 }
 
@@ -157,6 +158,7 @@ impl AppState {
             plans: Arc::new(std::sync::Mutex::new(HashMap::new())),
             steps: Arc::new(std::sync::Mutex::new(HashMap::new())),
             interrupts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             studio_dir: Arc::new(default_studio_dir()),
         }
     }
@@ -215,9 +217,20 @@ impl AppState {
     }
 
     pub fn interrupt(&self, interrupt: Interrupt) {
+        if interrupt.stop {
+            self.stopping.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         if let Ok(mut queued) = self.interrupts.lock() {
             queued.push(interrupt);
         }
+    }
+
+    pub fn stop_asked(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.stopping.clone()
+    }
+
+    pub fn nothing_is_being_stopped(&self) {
+        self.stopping.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn take_interrupts(&self) -> Vec<Interrupt> {

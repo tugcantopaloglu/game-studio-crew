@@ -198,6 +198,7 @@ fn limits_for(acting: bool) -> WorkerLimits {
     WorkerLimits {
         stall_timeout: std::time::Duration::from_secs(300),
         wall_clock: std::time::Duration::from_secs(2700),
+        stop_asked: None,
     }
 }
 
@@ -469,7 +470,8 @@ fn run_worker_inner(
     })?;
 
     let thoughts = std::sync::Mutex::new(crate::thought::Stream::new());
-    let report = worker.drive(&limits_for(acting), |ev| {
+    let limits = limits_for(acting).until(em.state.stop_asked());
+    let report = worker.drive(&limits, |ev| {
         if let CliEvent::RateLimit { raw } = ev {
             studio_server::settings::observe_rate_limit(raw);
         }
