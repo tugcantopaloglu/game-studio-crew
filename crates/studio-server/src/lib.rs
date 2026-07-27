@@ -16,6 +16,7 @@ pub mod fsapi;
 pub mod games;
 pub mod gitapi;
 pub mod health;
+pub mod imagegen;
 pub mod resume;
 pub mod runplan;
 pub mod settings;

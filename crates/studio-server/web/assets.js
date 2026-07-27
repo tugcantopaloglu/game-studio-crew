@@ -2,18 +2,45 @@ import { api, el, onProject, project, settings, toast } from "/bus.js";
 
 const ENABLED = "assets.enabled";
 const MODEL = "assets.model";
+const CONCEPT = "assets.concept";
 
 let host = null;
 let busy = false;
 let lastResult = null;
 
 const asked = {
-  kind: "character",
+  kind: "sprite",
   name: "",
   description: "",
   reference: "",
   overwrite: false,
 };
+
+export function kindOf(view, key) {
+  return (view.kinds || []).find((k) => k.key === key) || null;
+}
+
+export function destinationOf(view, key) {
+  const kind = kindOf(view, key);
+  if (!kind) return "";
+  if (kind.draws) return "lands at " + kind.makes;
+  if (!view.makes) return "pick a project with an engine and this says where the file will land";
+  if (view.makes.export) {
+    return "lands at " + view.makes.factory + " and bakes to " + view.makes.export;
+  }
+  return "lands at " + view.makes.factory + " and loads straight into the scene";
+}
+
+export function imageUrl(projectId, path) {
+  return (
+    "/assets/image?project=" +
+    encodeURIComponent(projectId) +
+    "&path=" +
+    encodeURIComponent(path) +
+    "&at=" +
+    Date.now()
+  );
+}
 
 function firstArray(value) {
   if (Array.isArray(value)) return value;
@@ -127,7 +154,7 @@ function field(label, node) {
 
 function switchRow(onToggle) {
   const input = el("input", { type: "checkbox" });
-  input.checked = Boolean(settings.get(ENABLED, false));
+  input.checked = settings.get(ENABLED, true) !== false;
   input.onchange = () => {
     store(ENABLED, input.checked);
     onToggle();
@@ -137,6 +164,21 @@ function switchRow(onToggle) {
     { class: "check" },
     input,
     el("span", { text: "let the crew generate assets with codex" })
+  );
+}
+
+function conceptRow(onToggle) {
+  const input = el("input", { type: "checkbox" });
+  input.checked = settings.get(CONCEPT, true) !== false;
+  input.onchange = () => {
+    store(CONCEPT, input.checked);
+    onToggle();
+  };
+  return el(
+    "label",
+    { class: "check" },
+    input,
+    el("span", { text: "draw a model's concept art first, then build it from that" })
   );
 }
 
@@ -181,7 +223,10 @@ function kindPicker(kinds) {
     },
   });
   for (const k of kinds) {
-    const option = el("option", { value: k.key, text: k.title });
+    const option = el("option", {
+      value: k.key,
+      text: k.ready ? k.title : k.title + " (blocked)",
+    });
     if (k.key === asked.kind) option.selected = true;
     node.append(option);
   }
@@ -189,19 +234,26 @@ function kindPicker(kinds) {
 }
 
 function shapeOf(view) {
-  const found = (view.kinds || []).find((k) => k.key === asked.kind);
+  const found = kindOf(view, asked.kind);
   return found ? found.shape : "";
 }
 
-function destinationLine(view) {
-  if (!view.makes) return "pick a project with an engine and this says where the file will land";
-  if (view.makes.export) {
-    return "lands at " + view.makes.factory + " and bakes to " + view.makes.export;
-  }
-  return "lands at " + view.makes.factory + " and loads straight into the scene";
+function preview(projectId, path) {
+  if (!projectId || !path) return null;
+  const shot = el("img", {
+    src: imageUrl(projectId, path),
+    alt: path,
+    style:
+      "max-width:100%;max-height:190px;justify-self:start;border-radius:6px;" +
+      "background-image:linear-gradient(45deg,#2a2a2a 25%,transparent 25%,transparent 75%,#2a2a2a 75%)," +
+      "linear-gradient(45deg,#2a2a2a 25%,#1e1e1e 25%,#1e1e1e 75%,#2a2a2a 75%);" +
+      "background-size:14px 14px;background-position:0 0,7px 7px",
+  });
+  shot.onerror = () => shot.remove();
+  return shot;
 }
 
-function resultCard(result) {
+function resultCard(result, projectId) {
   if (!result) return null;
   if (!result.ok) {
     return el(
@@ -224,40 +276,65 @@ function resultCard(result) {
       el("span", { text: result.name })
     )
   );
-  card.append(el("div", { style: "font-size:12px;word-break:break-all", text: result.factory }));
+  if (result.image) {
+    const shot = preview(projectId, result.image);
+    if (shot) card.append(shot);
+    card.append(el("div", { style: "font-size:12px;word-break:break-all", text: result.image }));
+    card.append(
+      el("div", {
+        class: "hint",
+        text:
+          result.width +
+          "x" +
+          result.height +
+          (result.transparent ? ", background removed" : ", opaque"),
+      })
+    );
+  }
+  if (result.factory) {
+    card.append(el("div", { style: "font-size:12px;word-break:break-all", text: result.factory }));
+  }
   if (result.export) {
     card.append(el("div", { style: "font-size:12px;word-break:break-all", text: result.export }));
   }
-  card.append(
-    el("div", {
-      class: "hint",
-      text: result.meshes + " mesh(es), " + result.bytes + " bytes when exported",
-    })
-  );
+  if (result.meshes) {
+    card.append(
+      el("div", {
+        class: "hint",
+        text: result.meshes + " mesh(es), " + result.bytes + " bytes when exported",
+      })
+    );
+  }
   if (result.notes) card.append(el("div", { class: "hint", text: result.notes }));
   return card;
 }
 
-function madeList(rows) {
+function madeList(rows, projectId) {
   if (!rows || !rows.length) {
     return el("div", { class: "hint", text: "no assets generated in this project yet" });
   }
   const box = el("div", { style: "display:grid;gap:5px" });
   for (const row of rows) {
-    box.append(
+    const card = el(
+      "div",
+      { class: "card", style: "display:grid;gap:3px" },
       el(
         "div",
-        { class: "card", style: "display:grid;gap:3px" },
-        el(
-          "div",
-          { class: "row" },
-          el("span", { text: row.name }),
-          el("span", { class: "k", text: row.kind })
-        ),
-        el("div", { class: "hint", style: "word-break:break-all", text: row.factory }),
-        el("div", { class: "hint", text: row.meshes + " mesh(es)" })
+        { class: "row" },
+        el("span", { text: row.name }),
+        el("span", { class: "k", text: row.kind })
       )
     );
+    if (row.image) {
+      const shot = preview(projectId, row.image);
+      if (shot) card.append(shot);
+      card.append(el("div", { class: "hint", style: "word-break:break-all", text: row.image }));
+    }
+    if (row.factory) {
+      card.append(el("div", { class: "hint", style: "word-break:break-all", text: row.factory }));
+    }
+    if (row.meshes) card.append(el("div", { class: "hint", text: row.meshes + " mesh(es)" }));
+    box.append(card);
   }
   return box;
 }
@@ -285,6 +362,7 @@ async function submit(view, button) {
         description: asked.description,
         reference: asked.reference,
         overwrite: asked.overwrite,
+        concept: settings.get(CONCEPT, true) !== false,
       },
     });
     toast(lastResult.ok ? "generated " + lastResult.name : "codex could not do it");
@@ -394,11 +472,14 @@ function form(view) {
   box.append(
     el("div", {
       class: "hint",
-      text: "a path inside the project; codex reads it, it cannot draw one",
+      text: "a path inside the project; give one and codex matches it instead of drawing its own",
     })
   );
 
-  box.append(el("div", { class: "hint", text: destinationLine(view) }));
+  box.append(el("div", { class: "hint", text: destinationOf(view, asked.kind) }));
+  const kind = kindOf(view, asked.kind);
+  if (kind && !kind.draws) box.append(conceptRow(() => redraw()));
+  if (kind && !kind.ready) box.append(blockerList(kind.blockers || []));
   box.append(modelField(view));
 
   const replace = el("input", { type: "checkbox" });
@@ -419,7 +500,7 @@ function form(view) {
     text: "generate",
     onclick: () => submit(view, button),
   });
-  button.disabled = busy || !view.ready || !view.projectId;
+  button.disabled = busy || !(kind && kind.ready) || !view.projectId;
   box.append(button);
 
   if (!view.projectId) {
@@ -452,7 +533,7 @@ function draw(view) {
   host.append(
     ...section(
       "assets",
-      "codex writes procedural three.js source for characters and props; off by default"
+      "codex draws sprites and textures and writes procedural three.js models; a model can be built from art it drew itself"
     )
   );
   host.append(switchRow(() => redraw()));
@@ -461,10 +542,10 @@ function draw(view) {
   if (view.enabled) {
     host.append(...section("make one"));
     host.append(form(view));
-    const result = resultCard(lastResult);
+    const result = resultCard(lastResult, view.projectId);
     if (result) host.append(result);
     host.append(...section("already generated"));
-    host.append(madeList(view.assets));
+    host.append(madeList(view.assets, view.projectId));
   }
 }
 

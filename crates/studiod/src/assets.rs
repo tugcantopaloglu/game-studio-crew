@@ -36,21 +36,36 @@ pub fn crew_hint(studio_dir: &Path, project: &Path) -> String {
             .iter()
             .filter_map(|row| {
                 let name = row.get("name").and_then(|v| v.as_str())?;
-                let factory = row.get("factory").and_then(|v| v.as_str())?;
-                Some(format!("{name} at {factory}"))
+                let at = row
+                    .get("factory")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| row.get("image").and_then(|v| v.as_str()))?;
+                Some(format!("{name} at {at}"))
             })
             .collect();
         format!(
-            " The crew has already generated: {}. Load those rather than sculpting them again.",
+            " The crew has already generated: {}. Load those rather than building them again.",
             listed.join("; ")
         )
     };
 
+    let can = match (cap.draws(), cap.models()) {
+        (true, true) => {
+            "draw sprites and textures with the codex CLI's built-in image tool and turn them \
+             into procedural three.js models the engine can load"
+        }
+        (true, false) => {
+            "draw sprites and textures with the codex CLI's built-in image tool, background \
+             already removed"
+        }
+        _ => "generate character and prop models by asking the codex CLI for procedural three.js \
+              source",
+    };
+
     format!(
-        "\n\nThis studio can generate character and prop models by asking the codex CLI for \
-         procedural three.js source; the {} skill in this project says how. codex writes code, \
-         not pictures, so a reference image is an input to it. Use it for new models instead of \
-         hand-placing primitives, and if it refuses, build the factory by hand and say so.{}",
+        "\n\nThis studio can {can}; the {} skill in this project says how. Use it for new assets \
+         instead of hand-placing primitives or shipping placeholder art, and if it refuses, build \
+         the asset by hand and say so.{}",
         studio_server::assets::SKILL_NAME,
         already
     )
@@ -72,22 +87,22 @@ mod tests {
         (studio, project)
     }
 
-    fn switch_on(studio: &Path) {
+    fn switch_off(studio: &Path) {
         let mut stored = Settings::new();
-        stored.set(studio_server::assets::SETTING_ENABLED, true.into());
+        stored.set(studio_server::assets::SETTING_ENABLED, false.into());
         stored.save(&Settings::path_in(studio)).unwrap();
     }
 
     #[test]
-    fn a_studio_that_never_turned_this_on_hands_the_crew_no_extra_words_at_all() {
+    fn a_studio_that_switched_this_off_hands_the_crew_no_extra_words_at_all() {
         let (studio, project) = scratch("off");
+        switch_off(&studio);
         assert_eq!(crew_hint(&studio, &project), "");
     }
 
     #[test]
-    fn switching_it_on_tells_the_crew_which_skill_to_reach_for() {
+    fn the_crew_is_told_which_skill_to_reach_for_without_anyone_switching_it_on() {
         let (studio, project) = scratch("on");
-        switch_on(&studio);
 
         let hint = crew_hint(&studio, &project);
         if !readiness(&studio, &project).ready() {
@@ -95,13 +110,15 @@ mod tests {
             return;
         }
         assert!(hint.contains(studio_server::assets::SKILL_NAME));
-        assert!(hint.contains("writes code, not pictures"));
+        assert!(
+            !hint.contains("not pictures"),
+            "the studio spent two versions telling its crew a false thing: {hint}"
+        );
     }
 
     #[test]
     fn an_asset_the_crew_already_generated_is_named_in_the_hint_so_it_is_not_built_twice() {
         let (studio, project) = scratch("listed");
-        switch_on(&studio);
         if !readiness(&studio, &project).ready() {
             return;
         }
@@ -110,19 +127,25 @@ mod tests {
         std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
         std::fs::write(
             &manifest,
-            r#"[{"name":"Scrapyard Scout","slug":"scrapyard_scout","factory":"src/models/scrapyard_scout.js"}]"#,
+            r#"[{"name":"Scrapyard Scout","slug":"scrapyard_scout","factory":"src/models/scrapyard_scout.js"},
+                {"name":"Health Potion","slug":"health_potion","image":"assets/sprites/health_potion.png"}]"#,
         )
         .unwrap();
 
         let hint = crew_hint(&studio, &project);
+        assert!(
+            hint.contains("assets/sprites/health_potion.png"),
+            "a drawn sprite has no factory, and listing only factories would hide it: {hint}"
+        );
         assert!(hint.contains("Scrapyard Scout"));
         assert!(hint.contains("src/models/scrapyard_scout.js"));
-        assert!(hint.contains("rather than sculpting them again"));
+        assert!(hint.contains("rather than building them again"));
     }
 
     #[test]
-    fn announcing_an_unavailable_generator_never_panics_and_installs_nothing() {
+    fn announcing_a_switched_off_generator_never_panics_and_installs_nothing() {
         let (studio, project) = scratch("announce");
+        switch_off(&studio);
         announce(&studio, &project);
         assert!(
             !project.join(".claude").exists(),

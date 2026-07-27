@@ -30,19 +30,31 @@ function ctx2d() {
   };
 }
 
+const MIRRORED = new Set([
+  "src", "href", "alt", "title", "id", "value", "type", "rows", "placeholder", "list", "disabled",
+]);
+
 function element(tag) {
   const listeners = new Map();
   const node = {
     tagName: String(tag).toUpperCase(),
     width: 300, height: 150, style: {}, children: [],
-    nodeType: 1, className: "", id: "", textContent: "", innerHTML: "",
+    nodeType: 1, className: "", id: "", textContent: "",
     hidden: false, value: "", checked: false, disabled: false, listeners,
     getContext: (kind, attrs) => {
       if (kind === "2d") return ctx2d();
       glRequests.push({ kind, attrs });
       return null;
     },
-    setAttribute: noop2, getAttribute: () => null, removeAttribute: noop2,
+    attributes: {},
+    setAttribute: (name, value) => {
+      node.attributes[name] = String(value);
+      if (MIRRORED.has(name)) node[name] = value;
+    },
+    getAttribute: (name) => (name in node.attributes ? node.attributes[name] : null),
+    removeAttribute: (name) => {
+      delete node.attributes[name];
+    },
     addEventListener: (kind, fn) => {
       if (!listeners.has(kind)) listeners.set(kind, []);
       listeners.get(kind).push(fn);
@@ -72,6 +84,15 @@ function element(tag) {
     click: () => node.dispatchEvent({ type: "click" }),
     toDataURL: () => "data:,",
   };
+  let markup = "";
+  Object.defineProperty(node, "innerHTML", {
+    get: () => markup,
+    set: (value) => {
+      markup = String(value);
+      if (markup === "") node.children = [];
+    },
+    enumerable: true,
+  });
   return node;
 }
 

@@ -83,7 +83,10 @@ mod tests {
         assert!(doc.is_file(), "a skill claude can find has to be a SKILL.md");
         let body = std::fs::read_to_string(&doc).unwrap();
         assert!(body.starts_with("---\nname: codex-assets"));
-        assert!(body.contains("It cannot draw a picture"));
+        assert!(body.contains("draws raster images"));
+        assert!(body.contains("image_generation"));
+        assert!(body.contains("remove_chroma_key.py"));
+        assert!(body.contains("assets/sprites/<slug>.png"));
         assert!(body.contains("src/models/<slug>.js"));
     }
 

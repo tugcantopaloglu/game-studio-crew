@@ -17,9 +17,13 @@ use studio_settings::Settings;
 pub const PROGRAM: &str = "codex";
 pub const SETTING_ENABLED: &str = "assets.enabled";
 pub const SETTING_MODEL: &str = "assets.model";
+pub const SETTING_CONCEPT: &str = "assets.concept";
 pub const MANIFEST: &str = "assets.json";
 pub const GENERATION_CAP: Duration = Duration::from_secs(600);
 pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
+pub const SPRITE_DIR: &str = "sprites";
+pub const TEXTURE_DIR: &str = "textures";
+pub const CONCEPT_DIR: &str = "concept";
 
 pub fn model_in(settings: &Settings) -> String {
     settings
@@ -58,27 +62,41 @@ pub fn inside(project: &Path, relative: &Path) -> Result<PathBuf, String> {
 pub enum AssetKind {
     Character,
     Prop,
+    Sprite,
+    Texture,
 }
 
 impl AssetKind {
-    pub const ALL: [AssetKind; 2] = [AssetKind::Character, AssetKind::Prop];
+    pub const ALL: [AssetKind; 4] = [
+        AssetKind::Character,
+        AssetKind::Prop,
+        AssetKind::Sprite,
+        AssetKind::Texture,
+    ];
 
     pub fn key(&self) -> &'static str {
         match self {
             AssetKind::Character => "character",
             AssetKind::Prop => "prop",
+            AssetKind::Sprite => "sprite",
+            AssetKind::Texture => "texture",
         }
     }
 
     pub fn title(&self) -> &'static str {
-        match self {
-            AssetKind::Character => "character",
-            AssetKind::Prop => "prop",
-        }
+        self.key()
     }
 
     pub fn from_key(key: &str) -> Option<AssetKind> {
         AssetKind::ALL.into_iter().find(|k| k.key() == key)
+    }
+
+    pub fn draws(&self) -> bool {
+        matches!(self, AssetKind::Sprite | AssetKind::Texture)
+    }
+
+    pub fn cuts_out(&self) -> bool {
+        matches!(self, AssetKind::Sprite)
     }
 
     pub fn shape(&self) -> &'static str {
@@ -93,6 +111,18 @@ impl AssetKind {
                 "A prop is a single static object with no limbs and no implied joints. It \
                  rests on the ground plane with its lowest point at y = 0, is centred on the \
                  x and z axes, and stays under 40 meshes so a level can place many of them."
+            }
+            AssetKind::Sprite => {
+                "A sprite is one subject drawn so it can be lifted off its background: it sits \
+                 whole and unclipped in the middle of the frame with generous padding, is lit \
+                 evenly with no separate ground shadow, and reads clearly when it is scaled \
+                 down to the size of an inventory slot."
+            }
+            AssetKind::Texture => {
+                "A texture is a flat surface sample, not a portrait of an object: it fills the \
+                 frame edge to edge with no border and no vignette, is photographed straight on \
+                 with no perspective and no single focal subject, and is lit evenly enough that \
+                 a level can repeat it across a wall without the lighting giving away the seam."
             }
         }
     }
@@ -149,6 +179,15 @@ pub fn plan_for(engine: &str, slug: &str) -> Option<Plan> {
     }
 }
 
+pub fn image_path_for(kind: AssetKind, slug: &str) -> PathBuf {
+    let dir = match kind {
+        AssetKind::Texture => TEXTURE_DIR,
+        AssetKind::Sprite => SPRITE_DIR,
+        AssetKind::Character | AssetKind::Prop => CONCEPT_DIR,
+    };
+    Path::new("assets").join(dir).join(format!("{slug}.png"))
+}
+
 pub const REFERENCE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "gif"];
 
 pub fn reference_in(project: &Path, given: &str) -> Result<PathBuf, String> {
@@ -197,38 +236,49 @@ pub fn engine_of(project: &Path) -> Option<String> {
 }
 
 pub fn enabled_in(settings: &Settings) -> bool {
-    settings.bool(SETTING_ENABLED, false)
+    settings.bool(SETTING_ENABLED, true)
 }
 
-pub fn blockers(installed: bool, enabled: bool, engine: Option<&str>) -> Vec<String> {
+pub fn concept_in(settings: &Settings) -> bool {
+    settings.bool(SETTING_CONCEPT, true)
+}
+
+pub fn blockers(installed: bool, enabled: bool) -> Vec<String> {
     let mut out = Vec::new();
     if !enabled {
         out.push(format!(
-            "asset generation is switched off, which is how it ships; tick it on in the assets \
-             panel when you want the crew to spend Codex budget on {PROGRAM}"
+            "asset generation is switched off; tick it back on in the assets panel when you want \
+             the crew to spend Codex budget on {PROGRAM}"
         ));
     }
     if !installed {
         out.push(format!(
             "{PROGRAM} is not on PATH, so there is nothing to drive; install it with \
-             `npm i -g @openai/codex` and sign in with `{PROGRAM} login`, or leave this off and \
-             the art crew keeps building factories by hand exactly as it does today"
+             `npm i -g @openai/codex` and sign in with `{PROGRAM} login`, or switch this off and \
+             the art crew keeps building assets by hand exactly as it does today"
         ));
     }
+    out
+}
+
+pub fn model_blockers(engine: Option<&str>) -> Vec<String> {
     match engine {
-        None => out.push(
+        None => vec![
             "no engine is known for this project, so the studio cannot say where a model would \
              go; pick a project on the floor and let it detect or scaffold an engine first"
                 .to_string(),
-        ),
-        Some(id) if plan_for(id, "probe").is_none() => out.push(format!(
+        ],
+        Some(id) if plan_for(id, "probe").is_none() => vec![format!(
             "the {id} engine has no procedural three.js model path in this studio, so a \
-             generated factory would have nowhere to land; use this on a web, godot, unity or \
-             ue5 project"
-        )),
-        Some(_) => {}
+             generated factory would have nowhere to land; ask for a sprite or a texture here, \
+             or use models on a web, godot, unity or ue5 project"
+        )],
+        Some(_) => Vec::new(),
     }
-    out
+}
+
+pub fn image_blockers() -> Vec<String> {
+    crate::imagegen::blockers()
 }
 
 #[derive(Debug, Clone)]
@@ -238,11 +288,32 @@ pub struct Capability {
     pub enabled: bool,
     pub engine: Option<String>,
     pub blockers: Vec<String>,
+    pub models: Vec<String>,
+    pub images: Vec<String>,
 }
 
 impl Capability {
+    pub fn blockers_for(&self, kind: AssetKind) -> Vec<String> {
+        let mut out = self.blockers.clone();
+        let extra = if kind.draws() { &self.images } else { &self.models };
+        out.extend(extra.iter().cloned());
+        out
+    }
+
+    pub fn ready_for(&self, kind: AssetKind) -> bool {
+        self.blockers_for(kind).is_empty()
+    }
+
+    pub fn draws(&self) -> bool {
+        self.ready_for(AssetKind::Sprite)
+    }
+
+    pub fn models(&self) -> bool {
+        self.ready_for(AssetKind::Prop)
+    }
+
     pub fn ready(&self) -> bool {
-        self.blockers.is_empty()
+        self.draws() || self.models()
     }
 }
 
@@ -253,9 +324,11 @@ pub fn capability(studio_dir: &Path, project: Option<&Path>) -> Capability {
     let enabled = enabled_in(&stored);
     Capability {
         installed: found.is_some(),
+        blockers: blockers(found.is_some(), enabled),
         path: found,
         enabled,
-        blockers: blockers(on_path(PROGRAM).is_some(), enabled, engine.as_deref()),
+        models: model_blockers(engine.as_deref()),
+        images: image_blockers(),
         engine,
     }
 }
@@ -355,26 +428,51 @@ pub fn skill_body(engine: &str) -> String {
     };
 
     format!(
-        "---\nname: {SKILL_NAME}\ndescription: Turn a described or referenced game asset into a \
-         procedural three.js factory by asking the codex CLI for the source, for characters and \
-         props in a {engine} project.\n---\n\n\
+        "---\nname: {SKILL_NAME}\ndescription: Generate a game asset with the codex CLI, either \
+         as a raster sprite or texture it draws with its built-in image tool, or as a procedural \
+         three.js factory it writes as source, for a {engine} project.\n---\n\n\
          # Generating an asset with codex\n\n\
-         `codex` writes code. It cannot draw a picture: `-i/--image` is an input, and there is no \
-         image-generating subcommand. So an asset here means procedural three.js source that \
-         builds the thing out of primitives, exactly like the img2threejs skill produces, and a \
-         reference image is something codex reads rather than something it makes.\n\n\
-         Use this only when the studio has switched it on. If `{PROGRAM}` is not on PATH, or \
-         `{SETTING_ENABLED}` is not true in `.studio/settings.json`, build the factory by hand \
+         `codex` does two different things here and they are easy to confuse.\n\n\
+         It **draws raster images** with a built-in image generation tool, which its bundled \
+         `imagegen` skill drives. That needs no API key: it goes through the same sign-in \
+         `{PROGRAM} login` already made. Check it is there with `{PROGRAM} features list`, where \
+         `image_generation` reads `stable  true`. Nothing about this shows up in `--help`, \
+         because it is a tool the model calls, not a subcommand.\n\n\
+         It also **writes code**, which is how a 3D model is made here: procedural three.js \
+         source that builds the thing out of primitives, exactly like the img2threejs skill \
+         produces.\n\n\
+         The two combine into one pipeline, and that is the point of this skill: ask codex to \
+         draw the asset, remove the background so it is a clean cut-out, then hand that image \
+         back to codex as the reference it builds the model from. Every engine gets the same \
+         asset that way.\n\n\
+         Use this only when the studio has it switched on. If `{PROGRAM}` is not on PATH, or \
+         `{SETTING_ENABLED}` is false in `.studio/settings.json`, build the asset by hand \
          instead and say that is what you did.\n\n\
-         ## Ask for the source, do not let it write files\n\n\
+         ## Drawing a sprite or a texture\n\n\
          ```\n{PROGRAM} exec --skip-git-repo-check --sandbox read-only --color never \\\n  \
-         --output-schema <schema.json> -o <answer.json> [-i <reference.png>] \"<the brief>\"\n\
-         ```\n\n\
-         The schema is `{{\"type\":\"object\",\"required\":[\"source\",\"notes\"]}}` with both \
-         fields strings. Read `source` out of the answer and write it yourself. Asking codex to \
-         write the file is worse: its sandbox on this machine reports read-only even when told \
-         otherwise, and you lose control of which path it touches.\n\n\
-         ## The contract the brief must carry\n\n\
+         --output-schema <schema.json> -o <answer.json> -m <model> < <brief.txt>\n```\n\n\
+         The schema is `{{\"type\":\"object\",\"required\":[\"image_path\",\"notes\"]}}` with \
+         both fields strings. Tell it to use its built-in image generation tool, to generate \
+         exactly one image, and to touch nothing on disk. It saves the file under \
+         `$CODEX_HOME/{}` and puts the absolute path in `image_path`; you copy it where it \
+         belongs. Never take a path from that answer that is not inside that folder.\n\n\
+         A sprite: {}\n\n\
+         A texture: {}\n\n\
+         ## Removing the background\n\n\
+         The built-in tool has no transparent-background control, so ask for the subject on a \
+         flat `{}` chroma-key background (use `{}` when the subject is itself green) and key it \
+         out afterwards with the remover codex ships:\n\n\
+         ```\npython \"$CODEX_HOME/skills/.system/imagegen/scripts/{}\" \\\n  --input <raw.png> \
+         --out <cut.png> --key-color <key> --auto-key border \\\n  --soft-matte \
+         --transparent-threshold 12 --opaque-threshold 220 --despill\n```\n\n\
+         Then check it: fully transparent corners and a subject that covers a plausible slice of \
+         the frame. A sprite whose corners are still opaque did not get cut out, and shipping it \
+         is worse than reporting the failure. Textures are not cut out at all: they are meant to \
+         fill their frame.\n\n\
+         ## Turning an image into a model every engine can load\n\n\
+         Ask codex for the factory source with the cut-out attached as `-i <cut.png>`, against \
+         the `{{\"source\",\"notes\"}}` schema, and write the source yourself. The contract the \
+         brief must carry:\n\n\
          - one default export taking THREE as its only argument, returning a THREE.Group\n\
          - no imports at all, no loaders, no textures, no canvas, no data URIs\n\
          - MeshStandardMaterial with a solid colour plus roughness and metalness\n\
@@ -382,10 +480,19 @@ pub fn skill_body(engine: &str) -> String {
          - no comments of any kind\n\n\
          A character: {}\n\n\
          A prop: {}\n\n\
-         ## Where it goes\n\n{where_it_goes}\n\n\
+         ## Where it goes\n\n\
+         Sprites land in `assets/{SPRITE_DIR}/<slug>.png`, textures in \
+         `assets/{TEXTURE_DIR}/<slug>.png`, and the concept art a model was built from in \
+         `assets/{CONCEPT_DIR}/<slug>.png`. {where_it_goes}\n\n\
          A mesh count of zero means the factory built nothing; treat that as a failure, keep the \
          project as you found it, and report that the asset was not generated rather than \
          leaving a file nothing renders.\n",
+        crate::imagegen::GENERATED_DIR,
+        AssetKind::Sprite.shape(),
+        AssetKind::Texture.shape(),
+        crate::imagegen::KEY_COLOR,
+        crate::imagegen::GREEN_SUBJECT_KEY,
+        crate::imagegen::CUTOUT_HELPER,
         AssetKind::Character.shape(),
         AssetKind::Prop.shape()
     )
@@ -476,13 +583,17 @@ pub fn parse_export_line(text: &str) -> Option<(u64, usize)> {
     None
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Generated {
     pub kind: String,
     pub name: String,
     pub slug: String,
-    pub factory: String,
+    pub factory: Option<String>,
     pub export: Option<String>,
+    pub image: Option<String>,
+    pub width: u32,
+    pub height: u32,
+    pub transparent: bool,
     pub meshes: usize,
     pub bytes: u64,
     pub notes: String,
@@ -497,6 +608,10 @@ impl Generated {
             "slug": self.slug,
             "factory": self.factory,
             "export": self.export,
+            "image": self.image,
+            "width": self.width,
+            "height": self.height,
+            "transparent": self.transparent,
             "meshes": self.meshes,
             "bytes": self.bytes,
             "notes": self.notes,
@@ -513,6 +628,7 @@ pub struct Request {
     pub reference: Option<PathBuf>,
     pub model: String,
     pub overwrite: bool,
+    pub concept: bool,
 }
 
 fn work_dir(project: &Path) -> PathBuf {
@@ -559,9 +675,14 @@ pub fn diagnose(recorded: &str, model: &str) -> Option<String> {
     None
 }
 
+pub struct Ask<'a> {
+    pub model: &'a str,
+    pub reference: Option<&'a Path>,
+}
+
 fn run_codex(
     project: &Path,
-    req: &Request,
+    ask: &Ask,
     brief: &Path,
     schema: &Path,
     answer: &Path,
@@ -594,8 +715,8 @@ fn run_codex(
         .arg(schema)
         .arg("-o")
         .arg(answer);
-    cmd.args(["-m", req.model.as_str()]);
-    if let Some(reference) = req.reference.as_deref() {
+    cmd.args(["-m", ask.model]);
+    if let Some(reference) = ask.reference {
         cmd.arg("-i").arg(reference);
     }
     cmd.stdin(std::process::Stdio::from(asking))
@@ -612,7 +733,7 @@ fn run_codex(
             Ok(Some(status)) => {
                 let said = std::fs::read_to_string(log).unwrap_or_default();
                 if !status.success() {
-                    return Err(match diagnose(&said, &req.model) {
+                    return Err(match diagnose(&said, ask.model) {
                         Some(why) => why,
                         None => format!(
                             "{PROGRAM} exited {}; its whole run is recorded in {} and usually \
@@ -686,9 +807,145 @@ pub fn verify(project: &Path, plan: &Plan) -> Result<(u64, usize), String> {
     }
 }
 
+pub struct DrawSpec<'a> {
+    pub title: &'a str,
+    pub shape: String,
+    pub cut: bool,
+    pub tag: &'a str,
+}
+
+pub struct Drawn {
+    pub file: PathBuf,
+    pub png: crate::imagegen::Png,
+    pub cut: Option<crate::imagegen::Cut>,
+    pub notes: String,
+    pub log: PathBuf,
+}
+
+pub fn concept_shape(kind: AssetKind) -> String {
+    format!(
+        "This image is a reference the studio hands straight back to codex so it can build the \
+         model from what it shows, so draw the whole {} unclipped in one three-quarter view with \
+         every part the model needs already visible, and keep the silhouette clean enough to \
+         read at a glance. {} {}",
+        kind.title(),
+        kind.shape(),
+        AssetKind::Sprite.shape()
+    )
+}
+
+fn draw(
+    project: &Path,
+    work: &Path,
+    spec: &DrawSpec,
+    req: &Request,
+    slug: &str,
+    engine: &str,
+) -> Result<Drawn, String> {
+    let key = spec
+        .cut
+        .then(|| crate::imagegen::key_for(&req.description));
+    let prompt = crate::imagegen::prompt_for(
+        spec.title,
+        &req.name,
+        &req.description,
+        &spec.shape,
+        key,
+        engine,
+    );
+
+    let tag = spec.tag;
+    let schema = work.join(format!("{slug}.{tag}.schema.json"));
+    let answer = work.join(format!("{slug}.{tag}.answer.json"));
+    let brief = work.join(format!("{slug}.{tag}.brief.txt"));
+    let log = work.join(format!("{slug}.{tag}.codex.log"));
+    std::fs::write(&schema, crate::imagegen::IMAGE_ANSWER_SCHEMA)
+        .map_err(|e| format!("could not write {}: {e}", schema.display()))?;
+    std::fs::write(&brief, &prompt)
+        .map_err(|e| format!("could not write {}: {e}", brief.display()))?;
+    let _ = std::fs::remove_file(&answer);
+
+    let ask = Ask {
+        model: &req.model,
+        reference: req.reference.as_deref(),
+    };
+    let said = run_codex(project, &ask, &brief, &schema, &answer, &log)?;
+    let raw = match std::fs::read_to_string(&answer) {
+        Ok(raw) => raw,
+        Err(e) => {
+            return Err(diagnose(&said, &req.model).unwrap_or_else(|| {
+                format!(
+                    "{PROGRAM} finished without leaving an answer at {} ({e}); its whole run is \
+                     recorded in {}",
+                    answer.display(),
+                    log.display()
+                )
+            }))
+        }
+    };
+
+    let (named, notes) = crate::imagegen::parse_answer(&raw)?;
+    let source = crate::imagegen::source_in(&crate::imagegen::codex_home(), &named)?;
+    let landed = work.join(format!("{slug}.{tag}.raw.png"));
+    std::fs::copy(&source, &landed).map_err(|e| {
+        format!(
+            "could not collect the generated image from {}: {e}",
+            source.display()
+        )
+    })?;
+    let png = crate::imagegen::inspect(&landed)?;
+
+    let Some(key) = key else {
+        return Ok(Drawn {
+            file: landed,
+            png,
+            cut: None,
+            notes,
+            log,
+        });
+    };
+
+    let python = crate::imagegen::python()?;
+    let cut_file = work.join(format!("{slug}.{tag}.cut.png"));
+    crate::imagegen::cut_out(&python, &landed, &cut_file, key)?;
+    let cut = crate::imagegen::check(&python, work, &cut_file)?;
+    let png = crate::imagegen::inspect(&cut_file)?;
+    Ok(Drawn {
+        file: cut_file,
+        png,
+        cut: Some(cut),
+        notes,
+        log,
+    })
+}
+
+fn land(project: &Path, relative: &Path, from: &Path) -> Result<PathBuf, String> {
+    let to = inside(project, relative)?;
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+    }
+    std::fs::copy(from, &to)
+        .map_err(|e| format!("could not write {}: {e}", to.display()))?;
+    Ok(to)
+}
+
+fn taken(relative: &Path) -> String {
+    format!(
+        "{} already exists, and a generated asset never replaces a file that is already there; \
+         tick replace in the assets panel if you did mean to overwrite it",
+        relative.display()
+    )
+}
+
+fn slashed(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 pub fn generate(project: &Path, cap: &Capability, req: &Request) -> Result<Generated, String> {
-    if !cap.ready() {
-        return Err(cap.blockers.join(" "));
+    let blocked = cap.blockers_for(req.kind);
+    if !blocked.is_empty() {
+        return Err(blocked.join(" "));
     }
     let slug = slugify(&req.name);
     if slug.is_empty() {
@@ -701,22 +958,105 @@ pub fn generate(project: &Path, cap: &Capability, req: &Request) -> Result<Gener
                 .to_string(),
         );
     }
-    let engine = cap.engine.as_deref().unwrap_or_default();
-    let plan = plan_for(engine, &slug)
-        .ok_or_else(|| format!("the {engine} engine has no place for a generated model"))?;
-    let factory = inside(project, &plan.factory)?;
-    let proof = inside(project, &plan.proof)?;
-    if factory.exists() && !req.overwrite {
-        return Err(format!(
-            "{} already exists, and a generated asset never replaces a file that is already \
-             there; tick replace in the assets panel if you did mean to overwrite it",
-            plan.factory.display()
-        ));
+
+    if req.kind.draws() {
+        draw_asset(project, cap, req, &slug)
+    } else {
+        model_asset(project, cap, req, &slug)
+    }
+}
+
+fn draw_asset(
+    project: &Path,
+    cap: &Capability,
+    req: &Request,
+    slug: &str,
+) -> Result<Generated, String> {
+    let relative = image_path_for(req.kind, slug);
+    let destination = inside(project, &relative)?;
+    if destination.exists() && !req.overwrite {
+        return Err(taken(&relative));
     }
 
     let work = work_dir(project);
     std::fs::create_dir_all(&work)
         .map_err(|e| format!("could not create {}: {e}", work.display()))?;
+
+    let spec = DrawSpec {
+        title: req.kind.title(),
+        shape: req.kind.shape().to_string(),
+        cut: req.kind.cuts_out(),
+        tag: "image",
+    };
+    let engine = cap.engine.as_deref().unwrap_or("game");
+    let drawn = draw(project, &work, &spec, req, slug, engine)?;
+    land(project, &relative, &drawn.file)?;
+
+    let record = Generated {
+        kind: req.kind.key().to_string(),
+        name: req.name.clone(),
+        slug: slug.to_string(),
+        image: Some(slashed(&relative)),
+        width: drawn.png.width,
+        height: drawn.png.height,
+        transparent: drawn.png.alpha,
+        bytes: drawn.png.bytes,
+        notes: drawn.notes,
+        log: drawn.log.to_string_lossy().into_owned(),
+        ..Generated::default()
+    };
+    remember(project, &record);
+    Ok(record)
+}
+
+fn model_asset(
+    project: &Path,
+    cap: &Capability,
+    req: &Request,
+    slug: &str,
+) -> Result<Generated, String> {
+    let engine = cap.engine.as_deref().unwrap_or_default();
+    let plan = plan_for(engine, slug)
+        .ok_or_else(|| format!("the {engine} engine has no place for a generated model"))?;
+    let factory = inside(project, &plan.factory)?;
+    let proof = inside(project, &plan.proof)?;
+    if factory.exists() && !req.overwrite {
+        return Err(taken(&plan.factory));
+    }
+
+    let work = work_dir(project);
+    std::fs::create_dir_all(&work)
+        .map_err(|e| format!("could not create {}: {e}", work.display()))?;
+
+    let mut concept: Option<PathBuf> = None;
+    let mut concept_at: Option<String> = None;
+    let mut concept_png: Option<crate::imagegen::Png> = None;
+    let mut planted: Option<PathBuf> = None;
+    let mut drawn_notes = String::new();
+    if req.concept && req.reference.is_none() && cap.draws() {
+        let relative = image_path_for(req.kind, slug);
+        let landed = inside(project, &relative)?;
+        if landed.is_file() {
+            concept_png = crate::imagegen::inspect(&landed).ok();
+            concept_at = Some(slashed(&relative));
+            concept = Some(landed);
+        } else {
+            let spec = DrawSpec {
+                title: req.kind.title(),
+                shape: concept_shape(req.kind),
+                cut: true,
+                tag: "concept",
+            };
+            let made = draw(project, &work, &spec, req, slug, engine)?;
+            let at = land(project, &relative, &made.file)?;
+            concept_png = Some(made.png);
+            drawn_notes = made.notes;
+            concept_at = Some(slashed(&relative));
+            planted = Some(at.clone());
+            concept = Some(at);
+        }
+    }
+
     let schema = work.join(format!("{slug}.schema.json"));
     let answer = work.join(format!("{slug}.answer.json"));
     let log = work.join(format!("{slug}.codex.log"));
@@ -724,17 +1064,23 @@ pub fn generate(project: &Path, cap: &Capability, req: &Request) -> Result<Gener
         .map_err(|e| format!("could not write {}: {e}", schema.display()))?;
     let _ = std::fs::remove_file(&answer);
 
+    let reference = req.reference.clone().or(concept);
     let prompt = prompt_for(
         req.kind,
         &req.name,
         &req.description,
         &plan,
-        req.reference.as_ref().map(|_| "attached"),
+        reference.as_ref().map(|_| "attached"),
     );
     let brief = work.join(format!("{slug}.brief.txt"));
     std::fs::write(&brief, &prompt)
         .map_err(|e| format!("could not write {}: {e}", brief.display()))?;
-    let said = run_codex(project, req, &brief, &schema, &answer, &log)?;
+
+    let ask = Ask {
+        model: &req.model,
+        reference: reference.as_deref(),
+    };
+    let said = run_codex(project, &ask, &brief, &schema, &answer, &log)?;
     let raw = match std::fs::read_to_string(&answer) {
         Ok(raw) => raw,
         Err(e) => {
@@ -764,18 +1110,24 @@ pub fn generate(project: &Path, cap: &Capability, req: &Request) -> Result<Gener
 
     match verify(project, &plan) {
         Ok((bytes, meshes)) => {
+            let told = match (&concept_at, drawn_notes.is_empty()) {
+                (Some(at), false) => format!("{drawn_notes} {notes} The concept art is at {at}."),
+                (Some(at), true) => format!("{notes} Built from the concept art already at {at}."),
+                (None, _) => notes,
+            };
             let record = Generated {
                 kind: req.kind.key().to_string(),
                 name: req.name.clone(),
-                slug,
-                factory: plan.factory.to_string_lossy().replace('\\', "/"),
-                export: plan
-                    .export
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().replace('\\', "/")),
+                slug: slug.to_string(),
+                factory: Some(slashed(&plan.factory)),
+                export: plan.export.as_deref().map(slashed),
+                image: concept_at,
+                width: concept_png.map(|p| p.width).unwrap_or_default(),
+                height: concept_png.map(|p| p.height).unwrap_or_default(),
+                transparent: concept_png.map(|p| p.alpha).unwrap_or_default(),
                 meshes,
                 bytes,
-                notes,
+                notes: told,
                 log: log.to_string_lossy().into_owned(),
             };
             remember(project, &record);
@@ -789,6 +1141,9 @@ pub fn generate(project: &Path, cap: &Capability, req: &Request) -> Result<Gener
                 None => {
                     let _ = std::fs::remove_file(&factory);
                 }
+            }
+            if let Some(concept) = planted {
+                let _ = std::fs::remove_file(concept);
             }
             Err(format!(
                 "{why}. The project is untouched and the attempt is recorded in {}",
@@ -827,12 +1182,91 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/assets", get(overview))
         .route("/assets/generate", post(generate_asset))
+        .route("/assets/image", get(serve_image))
 }
 
-fn kinds_value() -> Vec<Value> {
+pub fn readable_image(project: &Path, given: &str) -> Result<PathBuf, String> {
+    let given = given.trim();
+    let ext = given
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_lowercase())
+        .unwrap_or_default();
+    if !REFERENCE_EXTENSIONS.contains(&ext.as_str()) {
+        return Err(format!(
+            "{given} is not an image this studio serves ({})",
+            REFERENCE_EXTENSIONS.join(", ")
+        ));
+    }
+    let joined = inside(project, Path::new(given))?;
+    let settled = joined
+        .canonicalize()
+        .map_err(|e| format!("there is no image at {}: {e}", joined.display()))?;
+    let root = project
+        .canonicalize()
+        .map_err(|e| format!("could not resolve the project: {e}"))?;
+    if !settled.starts_with(&root) || !settled.is_file() {
+        return Err(format!("{given} does not resolve to a file inside the project"));
+    }
+    Ok(settled)
+}
+
+pub fn content_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default()
+        .as_str()
+    {
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => "image/png",
+    }
+}
+
+async fn serve_image(
+    State(state): State<AppState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(root) = q.get("project").and_then(|id| crate::project_root(&state, id)) else {
+        return (StatusCode::NOT_FOUND, "no such project".to_string()).into_response();
+    };
+    let Some(given) = q.get("path") else {
+        return (StatusCode::BAD_REQUEST, "name a path inside the project".to_string())
+            .into_response();
+    };
+    let file = match readable_image(&root, given) {
+        Ok(file) => file,
+        Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
+    };
+    match std::fs::read(&file) {
+        Ok(raw) => (
+            [
+                (axum::http::header::CONTENT_TYPE, content_type(&file)),
+                (axum::http::header::CACHE_CONTROL, "no-store"),
+            ],
+            raw,
+        )
+            .into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, format!("could not read it: {e}")).into_response(),
+    }
+}
+
+fn kinds_value(cap: &Capability) -> Vec<Value> {
     AssetKind::ALL
         .into_iter()
-        .map(|k| serde_json::json!({"key": k.key(), "title": k.title(), "shape": k.shape()}))
+        .map(|k| {
+            serde_json::json!({
+                "key": k.key(),
+                "title": k.title(),
+                "shape": k.shape(),
+                "draws": k.draws(),
+                "cuts_out": k.cuts_out(),
+                "ready": cap.ready_for(k),
+                "blockers": cap.blockers_for(k),
+                "makes": slashed(&image_path_for(k, "example")),
+            })
+        })
         .collect()
 }
 
@@ -844,14 +1278,19 @@ fn capability_value(cap: &Capability, plan: Option<&Plan>) -> Value {
         "enabled": cap.enabled,
         "engine": cap.engine,
         "ready": cap.ready(),
+        "can_draw": cap.draws(),
+        "can_model": cap.models(),
         "blockers": cap.blockers,
+        "image_blockers": cap.images,
+        "model_blockers": cap.models,
         "setting": SETTING_ENABLED,
-        "kinds": kinds_value(),
+        "concept_setting": SETTING_CONCEPT,
+        "kinds": kinds_value(cap),
         "makes": plan.map(|p| serde_json::json!({
-            "factory": p.factory.to_string_lossy().replace('\\', "/"),
-            "export": p.export.as_ref().map(|e| e.to_string_lossy().replace('\\', "/")),
+            "factory": slashed(&p.factory),
+            "export": p.export.as_deref().map(slashed),
         })),
-        "how": "codex cannot draw a picture; it reads an optional reference image and writes procedural three.js source, which the studio saves where the engine loads models from",
+        "how": "codex draws raster sprites and textures with its built-in image tool, and writes procedural three.js source for models; the studio removes a sprite's background, saves every file where the engine loads it from, and can hand a generated image straight back to codex as the reference a model is built from",
     })
 }
 
@@ -866,6 +1305,7 @@ async fn overview(State(state): State<AppState>, Query(q): Query<HashMap<String,
     let stored = Settings::load(&Settings::path_in(&state.studio_dir)).unwrap_or_default();
     let mut body = capability_value(&cap, plan.as_ref());
     body["model"] = Value::String(model_in(&stored));
+    body["concept"] = Value::Bool(concept_in(&stored));
     body["default_model"] = Value::String(DEFAULT_MODEL.to_string());
     body["model_setting"] = Value::String(SETTING_MODEL.to_string());
     body["model_note"] = Value::String(format!(
@@ -891,6 +1331,8 @@ pub struct GenerateRequest {
     pub reference: Option<String>,
     #[serde(default)]
     pub overwrite: bool,
+    #[serde(default)]
+    pub concept: Option<bool>,
 }
 
 async fn generate_asset(State(state): State<AppState>, body: String) -> Response {
@@ -936,6 +1378,7 @@ async fn generate_asset(State(state): State<AppState>, body: String) -> Response
         reference,
         model,
         overwrite: req.overwrite,
+        concept: req.concept.unwrap_or_else(|| concept_in(&stored)),
     };
     let done = tokio::task::spawn_blocking(move || generate(&root, &cap, &asked)).await;
 
@@ -993,38 +1436,100 @@ mod tests {
         (status, serde_json::from_slice(&raw).unwrap_or(Value::Null))
     }
 
+    fn ready_cap(engine: Option<&str>) -> Capability {
+        Capability {
+            installed: true,
+            path: Some(PathBuf::from("codex")),
+            enabled: true,
+            engine: engine.map(str::to_string),
+            blockers: Vec::new(),
+            models: model_blockers(engine),
+            images: Vec::new(),
+        }
+    }
+
     #[test]
     fn a_missing_codex_is_reported_as_the_reason_with_the_command_that_installs_it() {
-        let said = blockers(false, true, Some("web"));
+        let said = blockers(false, true);
         assert_eq!(said.len(), 1, "only the missing binary is wrong here");
         assert!(said[0].contains("not on PATH"));
         assert!(said[0].contains("npm i -g @openai/codex"));
     }
 
     #[test]
-    fn the_feature_is_off_until_somebody_turns_it_on() {
+    fn asset_generation_is_on_out_of_the_box_and_can_still_be_switched_off() {
         let fresh = Settings::new();
-        assert!(!enabled_in(&fresh), "asset generation must ship switched off");
+        assert!(
+            enabled_in(&fresh),
+            "the crew is meant to reach for codex without anyone ticking a box first"
+        );
+        assert!(concept_in(&fresh), "a model is drawn before it is built by default");
 
-        let said = blockers(true, false, Some("web"));
+        let mut off = Settings::new();
+        off.set(SETTING_ENABLED, false.into());
+        assert!(!enabled_in(&off));
+
+        let said = blockers(true, false);
         assert_eq!(said.len(), 1);
         assert!(said[0].contains("switched off"));
     }
 
     #[test]
-    fn an_installed_and_enabled_codex_on_a_web_project_has_nothing_standing_in_its_way() {
-        assert!(blockers(true, true, Some("web")).is_empty());
+    fn an_installed_and_enabled_codex_has_nothing_standing_in_its_way() {
+        assert!(blockers(true, true).is_empty());
     }
 
     #[test]
-    fn an_engine_with_no_model_path_says_so_rather_than_writing_a_file_nothing_reads() {
-        let said = blockers(true, true, Some("python"));
+    fn an_engine_with_no_model_path_still_draws_even_though_it_cannot_hold_a_model() {
+        let said = model_blockers(Some("python"));
         assert_eq!(said.len(), 1);
         assert!(said[0].contains("python"));
+        assert!(
+            said[0].contains("sprite"),
+            "a python project is told what it can still ask for: {}",
+            said[0]
+        );
 
-        let none = blockers(true, true, None);
+        let none = model_blockers(None);
         assert_eq!(none.len(), 1);
         assert!(none[0].contains("no engine is known"));
+
+        let cap = ready_cap(Some("python"));
+        assert!(cap.ready_for(AssetKind::Sprite), "a sprite needs no engine at all");
+        assert!(cap.ready_for(AssetKind::Texture));
+        assert!(!cap.ready_for(AssetKind::Prop));
+        assert!(cap.ready(), "a studio that can draw is not an idle studio");
+    }
+
+    #[test]
+    fn a_blocked_drawer_still_reports_the_models_it_can_build() {
+        let mut cap = ready_cap(Some("web"));
+        cap.images = vec!["python is not on PATH".to_string()];
+
+        assert!(!cap.draws());
+        assert!(cap.models());
+        assert!(cap.ready());
+        assert!(cap.blockers_for(AssetKind::Sprite)[0].contains("python"));
+        assert!(cap.blockers_for(AssetKind::Character).is_empty());
+    }
+
+    #[test]
+    fn every_kind_says_where_its_file_lands_and_whether_it_gets_cut_out() {
+        assert_eq!(image_path_for(AssetKind::Sprite, "scout"), Path::new("assets/sprites/scout.png"));
+        assert_eq!(image_path_for(AssetKind::Texture, "bark"), Path::new("assets/textures/bark.png"));
+        assert_eq!(
+            image_path_for(AssetKind::Character, "scout"),
+            Path::new("assets/concept/scout.png"),
+            "a model's concept art is not a sprite and does not sit with them"
+        );
+
+        assert!(AssetKind::Sprite.draws() && AssetKind::Sprite.cuts_out());
+        assert!(AssetKind::Texture.draws());
+        assert!(
+            !AssetKind::Texture.cuts_out(),
+            "a texture that got cut out would be a hole where a surface should be"
+        );
+        assert!(!AssetKind::Character.draws() && !AssetKind::Prop.draws());
     }
 
     #[test]
@@ -1308,13 +1813,7 @@ mod tests {
         let by_hand = "export default function scout(THREE) { return new THREE.Group(); }";
         std::fs::write(&precious, by_hand).unwrap();
 
-        let cap = Capability {
-            installed: true,
-            path: Some(PathBuf::from("codex")),
-            enabled: true,
-            engine: Some("web".into()),
-            blockers: Vec::new(),
-        };
+        let cap = ready_cap(Some("web"));
         let asked = Request {
             kind: AssetKind::Character,
             name: "Scout".into(),
@@ -1322,6 +1821,7 @@ mod tests {
             reference: None,
             model: DEFAULT_MODEL.into(),
             overwrite: false,
+            concept: true,
         };
 
         let err = generate(&dir, &cap, &asked).unwrap_err();
@@ -1339,22 +1839,108 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_floor_is_told_the_feature_is_off_and_why_before_anything_is_installed() {
+    async fn the_floor_is_told_what_each_kind_needs_before_anything_is_asked_for() {
         let (status, body) = get(state_in("overview"), "/assets").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["enabled"], false);
-        assert_eq!(body["ready"], false);
+        assert_eq!(body["enabled"], true, "the studio ships able to reach for codex");
         assert_eq!(body["setting"], SETTING_ENABLED);
-        assert!(!body["blockers"].as_array().unwrap().is_empty());
-        assert_eq!(body["kinds"].as_array().unwrap().len(), AssetKind::ALL.len());
+        assert_eq!(body["concept_setting"], SETTING_CONCEPT);
+
+        let kinds = body["kinds"].as_array().unwrap();
+        assert_eq!(kinds.len(), AssetKind::ALL.len());
+        for kind in kinds {
+            let ready = kind["ready"].as_bool().unwrap();
+            let blocked = kind["blockers"].as_array().unwrap();
+            assert_eq!(
+                ready,
+                blocked.is_empty(),
+                "a kind is ready exactly when nothing blocks it: {kind}"
+            );
+            assert!(kind["makes"].as_str().unwrap().starts_with("assets/"));
+        }
+
+        let sprite = kinds.iter().find(|k| k["key"] == "sprite").unwrap();
+        assert_eq!(sprite["draws"], true);
+        assert_eq!(sprite["cuts_out"], true);
     }
 
     #[tokio::test]
-    async fn the_overview_says_codex_writes_code_rather_than_pictures() {
+    async fn the_overview_says_codex_draws_as_well_as_writes_code() {
         let (_, body) = get(state_in("honesty"), "/assets").await;
         let how = body["how"].as_str().unwrap();
-        assert!(how.contains("cannot draw"));
+        assert!(how.contains("draws raster"), "{how}");
         assert!(how.contains("procedural"));
+        assert!(
+            !how.contains("cannot draw"),
+            "the studio told its users this for two versions and it was never true: {how}"
+        );
+    }
+
+    #[test]
+    fn the_panel_can_only_read_images_that_are_really_inside_the_project() {
+        let root = std::env::temp_dir().join("studio-assets-serve");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("assets").join("sprites")).unwrap();
+        std::fs::write(root.join("assets").join("sprites").join("potion.png"), b"png").unwrap();
+        std::fs::write(root.join("secret.txt"), b"not an image").unwrap();
+        std::fs::write(std::env::temp_dir().join("studio-assets-outside.png"), b"nope").unwrap();
+
+        assert!(readable_image(&root, "assets/sprites/potion.png").is_ok());
+        assert!(readable_image(&root, "secret.txt")
+            .unwrap_err()
+            .contains("not an image this studio serves"));
+        for climbing in ["../studio-assets-outside.png", "assets/../../studio-assets-outside.png"] {
+            assert!(
+                readable_image(&root, climbing).is_err(),
+                "{climbing} was served from outside the project"
+            );
+        }
+        assert!(readable_image(&root, "assets/sprites/missing.png").is_err());
+
+        assert_eq!(content_type(Path::new("a.png")), "image/png");
+        assert_eq!(content_type(Path::new("a.JPG")), "image/jpeg");
+        assert_eq!(content_type(Path::new("a.webp")), "image/webp");
+    }
+
+    #[tokio::test]
+    async fn a_generated_image_is_served_back_to_the_panel_as_the_image_it_is() {
+        let state = state_in("serveimage");
+        let project = state.studio_dir.join("game");
+        std::fs::create_dir_all(project.join("assets").join("sprites")).unwrap();
+        std::fs::write(project.join("index.html"), "<html></html>").unwrap();
+        let png = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        std::fs::write(project.join("assets").join("sprites").join("potion.png"), png).unwrap();
+        state
+            .store
+            .insert_project(
+                studio_store::ProjectRow {
+                    id: "p1".into(),
+                    name: "game".into(),
+                    root: project.to_string_lossy().into_owned(),
+                    engine: "web".into(),
+                    git: false,
+                },
+                &crate::now_rfc3339(),
+            )
+            .unwrap();
+
+        let req = axum::http::Request::builder()
+            .uri("/assets/image?project=p1&path=assets/sprites/potion.png")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let res = crate::router(state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()["content-type"], "image/png");
+        assert_eq!(res.headers()["cache-control"], "no-store");
+        let raw = axum::body::to_bytes(res.into_body(), 4_000_000).await.unwrap();
+        assert_eq!(&raw[..], &png[..]);
+
+        let climbing = axum::http::Request::builder()
+            .uri("/assets/image?project=p1&path=../../secret.png")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let refused = crate::router(state).oneshot(climbing).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -1374,6 +1960,9 @@ mod tests {
         let project = state.studio_dir.join("game");
         std::fs::create_dir_all(project.join("src")).unwrap();
         std::fs::write(project.join("index.html"), "<html></html>").unwrap();
+        let mut off = Settings::new();
+        off.set(SETTING_ENABLED, false.into());
+        off.save(&Settings::path_in(&state.studio_dir)).unwrap();
         state
             .store
             .insert_project(
@@ -1414,7 +2003,9 @@ mod tests {
             path: None,
             enabled: true,
             engine: Some("web".into()),
-            blockers: blockers(false, true, Some("web")),
+            blockers: blockers(false, true),
+            models: Vec::new(),
+            images: Vec::new(),
         };
         let asked = Request {
             kind: AssetKind::Character,
@@ -1423,6 +2014,7 @@ mod tests {
             reference: None,
             model: DEFAULT_MODEL.into(),
             overwrite: false,
+            concept: true,
         };
 
         let err = generate(&dir, &cap, &asked).unwrap_err();
@@ -1437,13 +2029,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let cap = Capability {
-            installed: true,
-            path: Some(PathBuf::from("codex")),
-            enabled: true,
-            engine: Some("web".into()),
-            blockers: Vec::new(),
-        };
+        let cap = ready_cap(Some("web"));
         let asked = Request {
             kind: AssetKind::Prop,
             name: "Crate".into(),
@@ -1451,8 +2037,22 @@ mod tests {
             reference: None,
             model: DEFAULT_MODEL.into(),
             overwrite: false,
+            concept: true,
         };
         assert!(generate(&dir, &cap, &asked).unwrap_err().contains("needs a description"));
+
+        let unnamed = Request {
+            name: "???".into(),
+            description: "a crate".into(),
+            ..asked
+        };
+        assert!(generate(&dir, &cap, &unnamed)
+            .unwrap_err()
+            .contains("letters or digits"));
+        assert!(
+            !dir.join("assets").exists(),
+            "a refused sprite writes no folder either"
+        );
     }
 
     #[test]
@@ -1465,12 +2065,16 @@ mod tests {
             kind: "character".into(),
             name: "Scout".into(),
             slug: "scout".into(),
-            factory: "src/models/scout.js".into(),
-            export: None,
+            factory: Some("src/models/scout.js".into()),
+            image: Some("assets/concept/scout.png".into()),
+            transparent: true,
+            width: 1024,
+            height: 1024,
             meshes: 12,
             bytes: 4096,
             notes: "a wiry salvager".into(),
             log: "somewhere.log".into(),
+            ..Generated::default()
         };
         remember(&dir, &record);
         remember(&dir, &record);
@@ -1479,6 +2083,27 @@ mod tests {
         assert_eq!(rows.len(), 1, "regenerating an asset replaces its row instead of doubling it");
         assert_eq!(rows[0]["factory"], "src/models/scout.js");
         assert_eq!(rows[0]["meshes"], 12);
+        assert_eq!(
+            rows[0]["image"], "assets/concept/scout.png",
+            "the concept art a model came from is part of the asset, not a scratch file"
+        );
+
+        let drawn = Generated {
+            kind: "sprite".into(),
+            name: "Lantern".into(),
+            slug: "lantern".into(),
+            image: Some("assets/sprites/lantern.png".into()),
+            width: 1024,
+            height: 1024,
+            transparent: true,
+            bytes: 90210,
+            ..Generated::default()
+        };
+        remember(&dir, &drawn);
+        let rows = recorded(&dir);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1]["factory"], Value::Null, "a sprite has no factory to name");
+        assert_eq!(rows[1]["transparent"], true);
     }
 
     #[test]
@@ -1526,6 +2151,7 @@ mod tests {
             reference: None,
             model: model_in(&stored),
             overwrite: false,
+            concept: false,
         };
 
         let made = match generate(&project, &cap, &asked) {
@@ -1533,18 +2159,19 @@ mod tests {
             Err(why) => panic!("the real generation failed: {why}"),
         };
 
-        println!("factory   {}", project.join(&made.factory).display());
+        let factory = made.factory.clone().expect("a model records its factory");
+        println!("factory   {}", project.join(&factory).display());
         println!("meshes    {}", made.meshes);
         println!("glb bytes {}", made.bytes);
         println!("notes     {}", made.notes);
         println!("log       {}", made.log);
 
         assert_eq!(made.slug, "wooden_crate");
-        assert_eq!(made.factory, "src/models/wooden_crate.js");
+        assert_eq!(factory, "src/models/wooden_crate.js");
         assert!(made.meshes > 0, "a prop with no meshes is not a prop");
         assert!(project.join("src").join("models").join("wooden_crate.js").is_file());
 
-        let source = std::fs::read_to_string(project.join(&made.factory)).unwrap();
+        let source = std::fs::read_to_string(project.join(&factory)).unwrap();
         assert!(looks_like_a_factory(&source).is_ok());
 
         let rows = recorded(&project);
@@ -1556,6 +2183,149 @@ mod tests {
             again.contains("already exists"),
             "a second ask must refuse before spending again: {again}"
         );
+    }
+
+    #[test]
+    #[ignore]
+    fn a_real_codex_draws_a_sprite_and_the_studio_cuts_its_background_off() {
+        if std::env::var("STUDIO_REAL_CODEX").is_err() {
+            println!("set STUDIO_REAL_CODEX=1 to spend one real Codex request on a drawn sprite");
+            return;
+        }
+
+        let dir = std::env::temp_dir().join("studio-assets-real-sprite");
+        let _ = std::fs::remove_dir_all(&dir);
+        let studio = dir.join(".studio");
+        let project = dir.join("game");
+        std::fs::create_dir_all(&studio).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("index.html"), "<html></html>").unwrap();
+
+        let mut stored = Settings::new();
+        stored.set(
+            SETTING_MODEL,
+            std::env::var("STUDIO_REAL_CODEX_MODEL")
+                .unwrap_or_else(|_| DEFAULT_MODEL.into())
+                .into(),
+        );
+        stored.save(&Settings::path_in(&studio)).unwrap();
+
+        let cap = capability(&studio, Some(&project));
+        assert!(
+            cap.ready_for(AssetKind::Sprite),
+            "codex cannot draw here: {:?}",
+            cap.blockers_for(AssetKind::Sprite)
+        );
+
+        let asked = Request {
+            kind: AssetKind::Sprite,
+            name: "Health Potion".into(),
+            description: "a small round glass flask of glowing red liquid with a cork stopper \
+                          and a leather cord, stylised game inventory art"
+                .into(),
+            reference: None,
+            model: model_in(&stored),
+            overwrite: false,
+            concept: false,
+        };
+
+        let made = match generate(&project, &cap, &asked) {
+            Ok(made) => made,
+            Err(why) => panic!("the real sprite generation failed: {why}"),
+        };
+
+        let at = made.image.clone().expect("a sprite records where it landed");
+        println!("sprite    {}", project.join(&at).display());
+        println!("size      {}x{}", made.width, made.height);
+        println!("bytes     {}", made.bytes);
+        println!("notes     {}", made.notes);
+
+        assert_eq!(at, "assets/sprites/health_potion.png");
+        assert!(project.join(&at).is_file());
+        assert!(
+            made.transparent,
+            "the whole point of a sprite is that its background is gone"
+        );
+        assert!(made.width > 0 && made.height > 0);
+
+        let landed = crate::imagegen::inspect(&project.join(&at)).unwrap();
+        assert!(landed.alpha, "the file on disk carries the alpha, not just the record");
+
+        let rows = recorded(&project);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["kind"], "sprite");
+    }
+
+    #[test]
+    #[ignore]
+    fn a_real_codex_draws_a_character_and_then_builds_the_model_from_its_own_drawing() {
+        if std::env::var("STUDIO_REAL_CODEX").is_err() {
+            println!("set STUDIO_REAL_CODEX=1 to spend two real Codex requests on the pipeline");
+            return;
+        }
+
+        let dir = std::env::temp_dir().join("studio-assets-real-pipeline");
+        let _ = std::fs::remove_dir_all(&dir);
+        let studio = dir.join(".studio");
+        let project = dir.join("game");
+        std::fs::create_dir_all(&studio).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("index.html"), "<html></html>").unwrap();
+
+        let profiles = studio_engine::EngineProfile::builtin();
+        let web = profiles.iter().find(|p| p.id == "web").unwrap();
+        studio_engine::install_helpers(web, &project).unwrap();
+
+        let mut stored = Settings::new();
+        stored.set(
+            SETTING_MODEL,
+            std::env::var("STUDIO_REAL_CODEX_MODEL")
+                .unwrap_or_else(|_| DEFAULT_MODEL.into())
+                .into(),
+        );
+        stored.save(&Settings::path_in(&studio)).unwrap();
+
+        let cap = capability(&studio, Some(&project));
+        assert!(cap.draws() && cap.models(), "the pipeline needs both halves: {cap:?}");
+
+        let asked = Request {
+            kind: AssetKind::Character,
+            name: "Dune Runner".into(),
+            description: "a lean desert scavenger in a hooded sand-coloured cloak with goggles, \
+                          wrapped boots and a satchel"
+                .into(),
+            reference: None,
+            model: model_in(&stored),
+            overwrite: false,
+            concept: true,
+        };
+
+        let made = match generate(&project, &cap, &asked) {
+            Ok(made) => made,
+            Err(why) => panic!("the real pipeline failed: {why}"),
+        };
+
+        let concept = made.image.clone().expect("the pipeline draws before it builds");
+        let factory = made.factory.clone().expect("and then builds");
+        println!("concept   {}", project.join(&concept).display());
+        println!("factory   {}", project.join(&factory).display());
+        println!("meshes    {}", made.meshes);
+        println!("notes     {}", made.notes);
+
+        assert_eq!(concept, "assets/concept/dune_runner.png");
+        assert_eq!(factory, "src/models/dune_runner.js");
+        assert!(project.join(&concept).is_file());
+        assert!(project.join(&factory).is_file());
+        assert!(made.meshes > 0);
+        assert!(
+            crate::imagegen::inspect(&project.join(&concept)).unwrap().alpha,
+            "the concept art is cut out before it is handed back to codex"
+        );
+
+        let rows = recorded(&project);
+        assert_eq!(rows.len(), 1, "one asset, one row, whichever steps it took");
+        assert_eq!(rows[0]["kind"], "character");
+        assert!(rows[0]["notes"].as_str().unwrap().contains("concept art"));
     }
 
     #[test]

@@ -1,25 +1,33 @@
 # 19: Asset Generation
 
-> **Status:** v0.1, 2026-07-25. Built: the capability probe, the settings key, the engine-aware destination plan, the codex invocation, post-generation verification through the existing model export bridge, the project manifest, the `codex-assets` project skill, and the assets panel.
-> **This document is the single source of truth for:** what `codex` can and cannot be asked for, where a generated asset lands per engine, and the terms on which the whole feature is absent. [07](07-engine-layer.md) owns the engine profiles this reads; [14](14-settings-and-providers.md) owns the settings file this adds one key to.
+> **Status:** v0.2, 2026-07-27. Built: the capability probe, the settings keys, the engine-aware destination plan, the codex invocation, raster generation through codex's built-in image tool, chroma-key background removal and its validation, the concept-art-to-model pipeline, post-generation verification through the existing model export bridge, the project manifest, the `codex-assets` project skill, the assets panel and the route that serves a generated image back to it.
+> **This document is the single source of truth for:** what `codex` can and cannot be asked for, where a generated asset lands per engine, and the terms on which the whole feature is absent. [07](07-engine-layer.md) owns the engine profiles this reads; [14](14-settings-and-providers.md) owns the settings file this adds keys to.
 
 ## What codex can actually do, measured
 
-This was checked before anything was designed, because the obvious reading of "generate a character with codex" is wrong.
+**v0.1 of this document got this wrong, in the most expensive way a measurement can be wrong: it measured the wrong surface and then designed around the answer.** It reported that codex cannot produce a raster image, the route said so to every caller, and the skill taught it to every worker. Codex had been able to draw the whole time.
 
-`codex-cli 0.145.0`, on the machine this was built on:
+Here is what v0.1 asked, and what was actually true, on `codex-cli 0.145.0`:
 
-| Asked | Answer |
-|---|---|
-| Is there an image-generation subcommand? | **No.** The full command list is exec, review, login, logout, mcp, plugin, mcp-server, app-server, remote-control, app, completion, update, doctor, sandbox, debug, apply, resume, archive, delete, unarchive, fork, cloud, exec-server, features, help. |
-| What is `-i/--image` then? | **Input only.** "Optional image(s) to attach to the initial prompt", on both `codex` and `codex exec`. |
-| Does a plugin add it? | **No.** `codex plugin list` reports no marketplace plugins found. |
-| Does an MCP server add it? | **No.** `codex mcp list` has exactly one entry, `unityMCP` at `http://127.0.0.1:8080/mcp`, and it was not even answering (`HTTP 404 Cannot POST /mcp`). |
-| Is there a feature flag for it? | **No.** Nothing in `codex features`. |
+| Asked | v0.1 answer | Actually |
+|---|---|---|
+| Is there an image-generation subcommand? | No | **Correct, and irrelevant.** Image generation is a tool the *model* calls, not a subcommand. Nothing about it can appear in `--help`. |
+| What is `-i/--image` then? | Input only | **Correct.** It attaches an image to the prompt; it is not how one comes back. |
+| Does a plugin add it? | No | **Correct, and irrelevant.** It is built in, not a plugin. |
+| Is there a feature flag for it? | **No. "Nothing in `codex features`."** | **Wrong.** `codex features list` reports `image_generation  stable  true`. Bare `codex features` prints its own usage text and no flags at all, so the probe that produced this answer never saw the list it claimed to have read. |
 
-So **codex cannot produce a raster image.** It reads images and writes code. That is the whole shape of this feature, and it is the same shape the studio already uses for art: [07](07-engine-layer.md) tells the `web` and `godot` crews to build any model that comes from a reference image with the img2threejs skill, as a procedural three.js factory. Reference image in, procedural asset code out. This document adds a second producer of exactly that artefact, driven by a CLI rather than by a worker.
+The lesson is worth more than the feature: **a CLI's `--help` surface is not the boundary of what its agent can do**, and a command that prints usage instead of output has not answered the question. This is the same distinction [14](14-settings-and-providers.md) draws between "installed" and "drivable", one level up: *reachable through the CLI* and *listed by the CLI* are different facts.
 
-Anything in the UI or in a charter that implied codex draws pictures would be a lie the studio told its user, so `GET /assets` carries the sentence "codex cannot draw a picture" and the panel prints it.
+So, measured properly and then run for real:
+
+- codex draws raster images with a **built-in `image_gen` tool**, driven by the `imagegen` skill it ships at `$CODEX_HOME/skills/.system/imagegen/`.
+- It needs **no `OPENAI_API_KEY`**: it goes through the same sign-in `codex login` already made. There are still no API keys anywhere in this studio.
+- It works **non-interactively**, under `codex exec --sandbox read-only`, with `--output-schema`, which is the exact invocation this feature already used for source.
+- The image lands at `$CODEX_HOME/generated_images/<session>/<call-id>.png` — **outside the project**, which is what lets the daemon keep owning every byte that reaches disk.
+
+The one thing codex still cannot do is produce a transparent background directly: its built-in tool exposes no such control. So the studio asks for a flat chroma-key background and removes it locally with the remover codex ships beside the skill, `remove_chroma_key.py`.
+
+Both halves are now used together, and that composition is the point of this feature: **codex draws the asset, the studio cuts its background off, and codex is handed its own drawing back as the reference it builds the procedural model from.** Reference image in, procedural asset code out is still the shape [07](07-engine-layer.md) describes for the img2threejs skill — the difference is that the studio no longer has to wait for a human to supply the reference.
 
 ## codex is a pure generator; the daemon owns every byte that reaches disk
 
@@ -49,27 +57,46 @@ This is worth stating as a general lesson, not a Windows footnote: **"the binary
 
 Two mechanisms, both already in the repo, and no third one:
 
-- **The capability table.** `assets::blockers(installed, enabled, engine)` returns a list of reasons, each ending in what to do next, exactly like `studio_core::Provider::blockers(needs)`. `Capability::ready()` is "the list is empty". Nothing infers availability from whether a binary happens to exist.
+- **The capability table.** `assets::blockers(installed, enabled)` returns a list of reasons, each ending in what to do next, exactly like `studio_core::Provider::blockers(needs)`. Nothing infers availability from whether a binary happens to exist.
 - **The per-project optional skill.** `skills::ensure_codex_assets` writes `.claude/skills/codex-assets/SKILL.md` into the project the same way `ensure_img2threejs` clones one in, returns `true`/`false`/`Err` and never fails a run.
 
-The three things that can block it:
+**Readiness is per kind, because the two halves fail independently and a studio that reported one number would be lying about one of them.** A python project cannot hold a procedural three.js model and can absolutely hold a sprite; a machine without pillow can build models all day and cannot cut a background off. So `Capability` carries three lists — what blocks everything, what blocks drawing, what blocks models — and `blockers_for(kind)` is the only thing that decides whether a request runs. `Capability::ready()` means "some kind is runnable", and the panel disables the button per kind rather than as a whole.
 
-| Blocker | Said when |
-|---|---|
-| switched off | `assets.enabled` is not `true`. **This is the default.** |
-| `codex` not on PATH | `on_path("codex")` finds nothing. Names the install command and says the art crew keeps working by hand. |
-| the engine has nowhere to put a model | the project is `python`, or no engine was detected. |
+| Blocker | Blocks | Said when |
+|---|---|---|
+| switched off | everything | `assets.enabled` is `false`. |
+| `codex` not on PATH | everything | `on_path("codex")` finds nothing. Names the install command and says the art crew keeps working by hand. |
+| no python | drawing | there is no background remover to run. Says a texture needs no cut-out, because that is a real way forward rather than a shrug. |
+| codex's imagegen skill missing | drawing | `$CODEX_HOME/skills/.system/imagegen/scripts/remove_chroma_key.py` is not there. |
+| the engine has nowhere to put a model | models | the project is `python`, or no engine was detected. Names sprites and textures as what this project *can* have. |
 
-**With the feature off, or with codex absent, every existing path behaves exactly as it does today.** `crew_hint` returns the empty string, so not one byte is added to any charter or brief and no prefix hash moves ([02](02-context-engine.md)). No skill is installed. No file is written into the project. `a_studio_that_never_turned_this_on_hands_the_crew_no_extra_words_at_all` pins the empty string, because a hint that leaked in when the feature was off would silently cold-start the prompt cache for every art seat.
+### "A python on PATH" is not "a python that runs", and this cost a real generation
 
-### The one settings key
+The first real run of the sprite pipeline failed at the last step with:
+
+> the background could not be removed: Python was not found; run without arguments to install from the Microsoft Store...
+
+`on_path("python3")` had found `%LOCALAPPDATA%\Microsoft\WindowsApps\python3.exe`, which on Windows is not an interpreter at all: it is the **App Execution Alias**, a shortcut that prints that sentence and exits 49. The real interpreter was `C:\Python313\python.exe`, second in the candidate list and never reached. This is the same mistake as v0.1's `codex.cmd` spawn failure and the same mistake as the `codex features` probe, for the third time: **presence on PATH was mistaken for capability.**
+
+So python is not resolved by name. `python()` walks `python3`, `python`, `py` and returns **the first one that answers `-c "import PIL"` with exit 0** — the question worth asking, because that is precisely the interpreter the remover needs. A candidate that fails is classified rather than dropped: the Store shortcut is recognised by its own sentence and named as a shortcut, and an interpreter that starts but has no pillow is named with the exact `-m pip install pillow` command for *that* interpreter, not a generic one.
+
+The verdict is cached against the candidate list itself, so `GET /assets` costs one spawn per daemon lifetime rather than one per poll, and installing python changes the candidate list, which invalidates the cache without anything having to watch for it. `windows_store_shortcut_is_recognised_as_the_non_interpreter_it_is` pins the sentence that caused the failure, because it is the kind of string that only a real run produces.
+
+**With the feature off, or with codex absent, every existing path behaves exactly as it does today.** `crew_hint` returns the empty string, so not one byte is added to any charter or brief and no prefix hash moves ([02](02-context-engine.md)). No skill is installed. No file is written into the project. `a_studio_that_switched_this_off_hands_the_crew_no_extra_words_at_all` pins the empty string, because a hint that leaked in when the feature was off would silently cold-start the prompt cache for every art seat.
+
+### The settings keys
 
 | Key | Value | Default | Changes |
 |---|---|---|---|
-| `assets.enabled` | bool | **`false`** | whether the crew may spend Codex budget on assets |
+| `assets.enabled` | bool | **`true`** | whether the crew may spend Codex budget on assets |
+| `assets.concept` | bool | **`true`** | whether a model is drawn as concept art first and built from that |
 | `assets.model` | free text | **`gpt-5.6-sol`** | the `-m` handed to codex |
 
 Flat keys in `.studio/settings.json`, read through `studio_settings::Settings`, written by the panel through the existing `POST /settings` merge. Nothing new persists anywhere else.
+
+**v0.1 shipped this off and v0.2 ships it on, at the studio owner's instruction.** That is a real trade and it is worth stating what was given up: with it on, a project whose codex is installed and signed in gets the crew hint in every art brief, so the prefix hash moves once, and a crew that asks for an asset spends Codex budget without anyone having ticked a box. The argument for it is that a generator nobody switches on is a generator nobody has, and the crew's alternative is placeholder art. `assets.enabled = false` still turns every part of this off, still empties `crew_hint`, and `a_studio_that_switched_this_off_hands_the_crew_no_extra_words_at_all` still pins that the off state adds not one byte to a brief.
+
+**`assets.concept` doubles the cost of a model on purpose.** With it on, a character costs two Codex requests rather than one: one to draw it, one to build it from the drawing. It is on because a model built from a picture of itself beats a model built from a sentence, and because the picture is a deliverable in its own right. It is off per-request from the panel and per-call through the route.
 
 ### The model is always passed explicitly, and never left to codex's config
 
@@ -101,11 +128,23 @@ Not invented here. `plan_for(engine, slug)` reproduces what the engine profiles 
 |---|---|---|
 | `web` | `src/models/<slug>.js` | the browser imports it directly; no export step |
 | `godot`, `unity`, `ue5` | `tools/models/<slug>.mjs` | baked to `assets/models/<slug>.glb`, which the engine imports |
-| `python`, undetected | — | refused with a reason |
+| `python`, undetected | — | refused with a reason, and told to ask for a sprite instead |
 
 The factory contract is the one `tools/model_export.mjs` already enforces, because that helper is the verifier: **one default export, taking `THREE` as its only argument, returning a `THREE.Group`, importing nothing.** A factory that imported `three` would be unloadable in node and so unverifiable, which is why `looks_like_a_factory` rejects an import before the file is written rather than after.
 
 For the `.glb` engines the prompt also says textures, canvases and data URIs do not survive the export. That is not a guess; it is what the `godot` profile in [07](07-engine-layer.md) already tells the art crew.
+
+Raster assets take a different path, and **it is the same path on every engine**:
+
+| Kind | Lands at | Cut out |
+|---|---|---|
+| `sprite` | `assets/sprites/<slug>.png` | yes |
+| `texture` | `assets/textures/<slug>.png` | **no** — a texture that got cut out would be a hole where a surface should be |
+| the concept art a model was built from | `assets/concept/<slug>.png` | yes |
+
+`image_path_for` does not branch on the engine at all. That is not laziness: a PNG in a project-relative folder is exactly what Godot's `res://`, a browser `fetch`, a Unity import and pygame's `image.load` all consume, and inventing four spellings of the same idea would create four things to keep in step for no gain. Models branch by engine because their *loading* genuinely differs; images do not.
+
+`tileset` and `sprite sheet` are still absent, but the reason has changed: v0.1 refused them because it believed no raster path existed, and that reason is gone. What remains is that both need a project convention for cell size and atlas layout that this studio does not have, and inventing one silently inside an asset generator is how you get art nothing can slice. `AssetKind::from_key("tileset")` still returns `None` and the route still refuses it by name.
 
 ## The generation, step by step
 
@@ -117,7 +156,7 @@ For the `.glb` engines the prompt also says textures, canvases and data URIs do 
 
 **`--output-schema` is what shipped, and it works.** A statement about a run, not an intention: the real generations below used exactly this, and codex wrote well-formed JSON with exactly the keys `source` and `notes` into `-o`'s file. Stdout capture was the fallback if it had not; it was not needed, so it is not in the code and there is no second path to maintain.
 
-1. **Refuse first.** `Capability::ready()`, then a name that slugifies to something, then a non-empty description. An asset with no description is refused before codex is paid to guess.
+1. **Refuse first.** `Capability::blockers_for(kind)`, then a name that slugifies to something, then a non-empty description, then the no-clobber check. An asset with no description is refused before codex is paid to guess.
 2. **Ask.** The answer is `{source, notes}` against `ANSWER_SCHEMA`. stdout and stderr go to `.studio-out/assets/<slug>.codex.log`, a file rather than a pipe, so a chatty run cannot deadlock on a full pipe buffer. The wait is bounded at ten minutes and the child is killed on overrun.
 3. **Read the source, not the filesystem.** `parse_answer` refuses anything that is not the schema and quotes the first 200 characters of what arrived instead, because "codex said something else" and "codex said nothing" need different fixes.
 4. **Check what can be checked cheaply.** `looks_like_a_factory` rejects a missing `export default`, any `import`, and any `require()`.
@@ -126,37 +165,76 @@ For the `.glb` engines the prompt also says textures, canvases and data URIs do 
 
 `a_generation_that_cannot_run_leaves_the_project_exactly_as_it_found_it` asserts the refusal path writes neither `src/` nor `.studio-out/`. `generating_while_the_feature_is_off_refuses_without_spending_anything` drives the real route and asserts `200` with `ok: false` — a refusal is an answer, not a server error, because a 500 would make the floor look broken when the studio is merely switched off.
 
+## Drawing one, step by step
+
+```
+<launcher> codex exec --skip-git-repo-check --sandbox read-only --color never \
+  -C <project> --output-schema <image schema.json> -o <answer.json> \
+  -m <assets.model>                              < <brief.txt>
+```
+
+The same invocation as above with a different schema, which is why `run_codex` takes an `Ask` rather than a whole `Request`: one spawn path, two briefs.
+
+1. **Ask for one image and nothing else.** The brief names the built-in image generation tool, forbids moving, copying, post-processing and any shell command, and asks for the absolute path in `image_path`. It tells codex the studio does its own copying, because a model that helpfully moves the file breaks the one guarantee below.
+2. **Take the path as an untrusted string.** `source_in` requires the extension to be `png` or `webp`, canonicalizes it, and **requires it to resolve inside `$CODEX_HOME/generated_images`**. This is the same shape as `reference_in` and it exists for the same reason: a path that arrives from a model is an input, not a fact. Without it, an answer naming `~/.ssh/id_rsa.png` would be copied into the project and committed by the next daemon-side commit.
+3. **Copy it into the working directory, then read its header.** `inspect` parses the PNG signature and IHDR for width, height and whether the colour type carries alpha. No image crate was added for this: the header is 26 bytes and the whole question is "is this a real PNG and does it have an alpha channel".
+4. **Cut the background off, unless it is a texture.** `remove_chroma_key.py` with `--auto-key border --soft-matte --despill`, the flag set codex's own skill prescribes. The key colour is `#00ff00`, or `#ff00ff` when the description mentions a green subject — `key_for` reads the words rather than the pixels, which is crude and free and catches the case that actually happens.
+5. **Prove the background is gone.** This is the step that matters, and it is why `cutout_check.py` exists rather than trusting the remover's exit code. It reports corner alpha and the opaque share, and `judge` refuses three distinct failures with three distinct sentences: **corners still opaque** means the key never matched and the sprite still has its background; **almost everything opaque** means nothing was removed; **almost nothing opaque** means the remover ate the subject along with the background. A sprite that fails any of these is not written, because shipping a sprite with a green rectangle behind it is worse than reporting that it failed.
+6. **Land it.** `land` writes through `inside`, so the destination is still derived from the kind and the slug and can never come from the model.
+
+## The pipeline: codex draws it, then builds it from its own drawing
+
+Asking for a `character` or a `prop` with `assets.concept` on runs both halves in one call:
+
+1. Draw the asset as concept art against the sprite contract plus `concept_shape`, which asks for one unclipped three-quarter view with every part the model needs already visible.
+2. Cut its background off and land it at `assets/concept/<slug>.png`.
+3. Hand that file back to codex as `-i` on the factory ask, so the brief that builds the model is looking at a picture of the thing it is building.
+4. Verify through `model_export.mjs` exactly as before.
+
+Two properties fall out of this and both are deliberate:
+
+**A concept that already exists is reused rather than redrawn.** If `assets/concept/<slug>.png` is on disk, the draw step is skipped entirely and the existing file becomes the reference. A second attempt at a model therefore costs one request, not two, and hand-drawn concept art dropped into that folder is picked up as-is. This is the one place a human can steer the pipeline without touching the route.
+
+**A failed model takes its concept art with it.** If the factory does not verify, the factory file is restored *and* a concept image planted by this same call is deleted. Anything else would leave the project holding art for a model that does not exist, which is exactly the kind of half-state the degrade rule exists to prevent. A concept that was already there is left alone, because this call did not create it.
+
+The failure policy differs between the two halves on purpose: if the **drawing** step fails, the whole call fails and nothing is written. It does not silently fall back to building the model from the description alone, because a text-only model is a different asset from the one that was asked for, and quietly substituting it would hide the failure at exactly the moment the user is deciding whether the feature works. If codex simply *cannot* draw here — no python, no imagegen skill — that is a capability, not a failure, and the concept step is skipped without comment.
+
 Successes are appended to `.studio/assets.json` in the project, keyed by slug so regenerating replaces a row instead of doubling it. That is the same place and shape as `.studio/game.json` ([games](../../crates/studio-server/src/games.rs)).
 
 ## What the crew gets
 
-When the feature is ready, `announce` installs the `codex-assets` skill and `crew_hint` adds one paragraph naming it plus **the assets already generated and their paths**, so the second art task loads the scout rather than sculpting a new one.
+When the feature is ready, `announce` installs the `codex-assets` skill and `crew_hint` adds one paragraph naming it plus **the assets already generated and their paths**, so the second art task loads the scout rather than sculpting a new one. That list now names a drawn sprite by its image path as well as a model by its factory, because a row for a sprite has no factory at all and listing only factories would have hidden every drawn asset from the crew that generated it.
 
-The skill body is composed from the same `AssetKind::shape()` strings and the same `plan_for` result the daemon uses, so the instructions a worker reads and the prompt the daemon sends cannot drift apart. The art and audio seats already carry `Bash` and `Skill` in their tool allowlist ([04](04-agent-graph.md)), so a worker can drive codex itself; the skill tells it to ask for source and write the file itself, for the same sandbox reason the daemon does.
+**The hint says what this studio can actually do, not what the feature is called.** With both halves available it offers drawing *and* the pipeline; with python missing it offers drawing's absence honestly by falling back to the models-only sentence. A crew told it can draw when it cannot would burn a task discovering that.
 
-## Two asset classes
+The skill body is composed from the same `AssetKind::shape()` strings and the same `plan_for` result the daemon uses, so the instructions a worker reads and the prompt the daemon sends cannot drift apart. It now teaches all three steps — draw, key out, build from the cut-out — and it opens by naming the confusion that produced v0.1: `image_generation` is a tool the model calls, so `--help` will never mention it, and `codex features list` is where to look. The art and audio seats already carry `Bash` and `Skill` in their tool allowlist ([04](04-agent-graph.md)), so a worker can drive codex itself; the skill tells it to ask for the answer and write the file itself, for the same sandbox reason the daemon does, and to refuse a sprite whose corners are still opaque rather than ship it.
 
-| Kind | Asked for |
-|---|---|
-| `character` | reads as a rig: named head, torso, arm and leg parts about sensible joints, ~1.7 units tall, lowest point at `y = 0`, facing `-Z` |
-| `prop` | one static object, no limbs, no implied joints, centred on x and z, resting at `y = 0`, under 40 meshes |
+## Four asset classes
 
-Both land in the same place, because that is what the engines consume. The difference is entirely in what codex is asked for, and it is a real difference: a prop asked for with the character prose comes back with legs.
+| Kind | Made of | Asked for |
+|---|---|---|
+| `character` | source | reads as a rig: named head, torso, arm and leg parts about sensible joints, ~1.7 units tall, lowest point at `y = 0`, facing `-Z` |
+| `prop` | source | one static object, no limbs, no implied joints, centred on x and z, resting at `y = 0`, under 40 meshes |
+| `sprite` | pixels | one subject that survives being lifted off its background: whole and unclipped, generously padded, evenly lit with no separate ground shadow, legible at inventory-slot size |
+| `texture` | pixels | a surface sample rather than a portrait: edge to edge, no border, no vignette, straight on, no focal subject, lit so a repeat does not give away the seam |
 
-`tileset` and `sprite sheet` are deliberately absent. Both would need a raster image or a new project convention, and this studio has neither: `AssetKind::from_key("tileset")` returns `None` and the route refuses it by name.
+The difference between two kinds is entirely in what codex is asked for, and it is a real difference in both pairs: a prop asked for with the character prose comes back with legs, and a texture asked for with the sprite prose comes back as one tile floating in the middle of a background.
 
 ## Routes
 
 | Route | Does |
 |---|---|
-| `GET /assets[?project=<id>]` | capability, blockers, the two kinds and their prose, where a file would land, and the assets already generated |
-| `POST /assets/generate` | `{project, kind, name, description, reference?}`; `200` with `ok:true` and the record, or `200` with `ok:false` and a reason |
+| `GET /assets[?project=<id>]` | capability, per-kind blockers and readiness, the four kinds and their prose, where each one's file would land, and the assets already generated |
+| `POST /assets/generate` | `{project, kind, name, description, reference?, overwrite?, concept?}`; `200` with `ok:true` and the record, or `200` with `ok:false` and a reason |
+| `GET /assets/image?project=<id>&path=<relative>` | the bytes of a generated image, so the panel can show what was drawn |
 
 A kind the studio does not make is a `400` that lists the kinds it does.
 
-### A reference image is the one untrusted path in this feature
+`GET /assets/image` exists because an asset generator whose output you cannot see is a receipt, not a tool. It is a read of one project-relative path, so it is guarded exactly like a reference: an image extension, `inside()` for the plain-components rule, then canonicalize-and-contain against the resolved project root. It answers `no-store`, because the whole point is that the file changed.
 
-Everything else the route takes is either a store-resolved project id or text that gets slugified. `reference` is different: it names a file, and that file is **uploaded to OpenAI** as part of the prompt. A bare join against the project root would have let `../../../.ssh/id_rsa` be attached to a request, so `reference_in` refuses in four ways before the filesystem is trusted:
+### Two untrusted paths, and they run in opposite directions
+
+`reference` names a file, and that file is **uploaded to OpenAI** as part of the prompt. A bare join against the project root would have let `../../../.ssh/id_rsa` be attached to a request, so `reference_in` refuses in four ways before the filesystem is trusted:
 
 - the extension must be one of `png`, `jpg`, `jpeg`, `webp`, `gif`
 - the path may not be absolute, contain `..`, or contain `:`
@@ -165,23 +243,32 @@ Everything else the route takes is either a store-resolved project id or text th
 
 `a_reference_that_climbs_out_of_the_project_is_never_uploaded_to_codex` drives the escaping cases against a real file planted outside the project. The string checks alone would not be enough — a symlink passes all of them — which is why the containment check is on the resolved path rather than the given one. This mirrors `is_a_plain_file_name` on the music route ([14](14-settings-and-providers.md)), for the same reason: a path from a browser is an input, not a fact.
 
+**`image_path` in a generation answer is the second one, and it is worse**, because it does not come from a browser at all: it comes from a language model, and it is used as the *source* of a file copied into the project and committed by the next daemon-side commit. `source_in` therefore requires the resolved path to sit inside `$CODEX_HOME/generated_images` — not merely to be a readable PNG, and not merely to be outside the project. An answer naming `C:\Users\me\.ssh\id_rsa.png` passes every check that only asks "is this a real file"; it fails the only check that asks "is this a file codex just drew". `a_generated_image_is_only_collected_from_the_folder_codex_writes_to` drives it with a real file planted outside that folder.
+
 ## What is verified, and what is not
 
 | Claim | How it is known |
 |---|---|
-| codex has no image generation | **read off the installed CLI**: `--help`, `exec --help`, `plugin list`, `mcp list`, `features` |
+| codex draws raster images through a built-in tool | **read off the installed CLI** (`codex features list`) **and then run for real**, twice by hand and then through `generate()` |
+| it draws under `codex exec` with `--output-schema` and no API key | **observed**: a well-formed `{image_path, notes}` answer and a 1254x1254 PNG on disk |
+| the chroma-key remover produces real alpha | **observed**: corners at alpha 0, 1,213,137 of 1,572,516 pixels transparent |
 | `--sandbox workspace-write` still reports read-only here | **observed** in a real `codex exec` session header |
-| the feature is off by default, reports its blockers, and degrades | **unit tested** |
+| the feature's blockers, per kind, and its degrade path | **unit tested** |
 | a generated factory lands where the engine expects it | **unit tested** against `plan_for` |
+| a sprite, texture and concept land in their own folders | **unit tested** against `image_path_for` |
 | the export bridge report is parsed for the mesh count | **unit tested** against a real report line |
-| `--output-schema` returns usable JSON | **observed** in the real run below |
+| a cut-out that kept its background is refused | **unit tested** against `judge`, all three failure modes |
 | the model default, the refusal diagnosis, path containment, no-clobber | **unit tested** |
-| a character is generated end to end and loads | **done for real**; see below |
-| a prop is generated end to end | **done for real, through `generate()` itself**; see below |
+| the Windows Store python shortcut is not mistaken for python | **unit tested against the sentence a real run produced** |
+| a prop is generated end to end | **done for real, through `generate()` itself** |
+| a sprite is drawn and cut out end to end | **done for real, through `generate()` itself** |
+| the draw-then-build pipeline | **done for real, through `generate()` itself** |
 | `run_codex`, the Rust spawn path | **executed against the live CLI**, and it failed the first time |
 | the no-clobber refusal | **unit tested, and observed on the real run's second ask** |
 
-The panel has **not** been seen in a browser. There was no connected Chrome on the machine this was built on, so `assets.js` is checked by `node --check`, by the module and panel-host tests in `web.rs`, and by a run under the `probes/floor-dom.mjs` stubbed DOM which mounts it against a stubbed `/assets` and asserts it hides the form when off, offers it when on, lists a previously generated asset, and reports a failed read instead of swallowing it. Nothing is claimed about how it looks.
+The panel has **not** been seen in a browser. There was no connected Chrome on the machine this was built on, so `assets.js` is checked by `node --check`, by the module and panel-host tests in `web.rs`, and by `probes/assets-panel.mjs`, which mounts it under the `floor-dom.mjs` stubbed DOM against a stubbed `/assets` and asserts thirteen properties: that it no longer claims codex cannot draw, that it offers all four kinds, that each one names its own destination, that a blocked kind disables the button and says why, that a generated sprite is *previewed* rather than merely named and that the preview points at `/assets/image`, that switching it off hides the form, and that a failed read is reported instead of swallowed. Nothing is claimed about how it looks.
+
+Writing that probe also found two fidelity gaps in the shared DOM stub that had been quietly weakening every panel probe: `setAttribute` was a no-op, so no probe could ever observe an `src`, a `value` or a `type`; and `innerHTML = ""` left the children in place, so a panel that redraws looked to a probe like a panel that appends. Both are fixed in `floor-dom.mjs`. `probes/settings-repaint.mjs` remains broken for an unrelated reason that predates this work — `stageModules` rewrites `from "/x.js"` but not a dynamic `import("/x.js")`, so it dies resolving `/browse.js`.
 
 ### The one real generation
 
@@ -221,6 +308,43 @@ Measured afterwards: root group `wooden_crate`, **all 22 children named**, size 
 
 The test then asks for the same prop a second time and asserts the refusal, so the no-clobber guard is confirmed against a real generated file and not only against a planted one.
 
-What is still **not** proven: generation with a `-i` reference image attached, and generation on a `godot`/`unity`/`ue5` project where the factory is baked to a `.glb` the engine imports. Both are wired and unit-tested; neither has been run. The contract asked for `y = 0` and got within a centimetre. `verify` does not check this, because `model_export.mjs` reports only bytes and a mesh count and that helper belongs to [07](07-engine-layer.md); a bounding-box assertion is the obvious next thing to add the next time that file changes hands.
+### The third real run: a sprite, drawn and cut out
+
+`a_real_codex_draws_a_sprite_and_the_studio_cuts_its_background_off`, under the same two locks.
+
+| | |
+|---|---|
+| asset | `sprite` named **Health Potion** — "a small round glass flask of glowing red liquid with a cork stopper and a leather cord" |
+| model | `gpt-5.6-sol` |
+| drawn | 1254x1254, 1,451,075 bytes, on a flat `#00ff00` background exactly as asked |
+| cut to | `assets/sprites/health_potion.png`, 804,637 bytes with an alpha channel |
+| measured | **corner alpha 0**, 381,226 of 1,572,516 pixels opaque — a 24% subject share, comfortably inside the 2–98% the judge allows |
+
+The remover sampled the key as `#04f80a` rather than the `#00ff00` that was asked for, which is the whole reason `--auto-key border` is passed alongside `--key-color`: a generated background is *visually* flat and *numerically* is not, and keying on the nominal colour alone would leave a fringe.
+
+### The fourth real run: the pipeline, end to end
+
+`a_real_codex_draws_a_character_and_then_builds_the_model_from_its_own_drawing` — two Codex requests in one call.
+
+| | |
+|---|---|
+| asset | `character` named **Dune Runner** — "a lean desert scavenger in a hooded sand-coloured cloak with goggles, wrapped boots and a satchel" |
+| model | `gpt-5.6-sol` |
+| wall clock | 349 seconds for the pair, of which the draw was about 75 |
+| concept | 1024x1536 drawn, cut out to `assets/concept/dune_runner.png` at 1,006,242 bytes, **corner alpha 0**, 23% subject share |
+| factory | `src/models/dune_runner.js`, 11,904 bytes, built with the cut-out attached as `-i` |
+| verified by | `model_export.mjs` → **85 meshes, 413,516 bytes** of `.glb` |
+
+The concept came back as a full-body three-quarter figure — hood, goggles, face wrap, shoulder plate, satchel, wrapped forearms, strapped boots — and the factory that followed names all of it. **85 meshes against the 54 the description-only character run produced**: the model built from a picture of itself is markedly more detailed than the model built from a sentence, which is the entire argument for `assets.concept` defaulting to on.
+
+The manifest row carries both paths, both sizes and `transparent: true`, so the panel can show the art beside the model it produced.
+
+### What these runs cost, and what they did not prove
+
+**Cost is still unknown in dollars.** A ChatGPT-plan session reports no token count and no figure for any of these, so there is none to quote. What can be said is the shape: a drawn asset is one request, a model is one request, and the pipeline is two.
+
+What is still **not** proven: a `texture` generated end to end (only sprites and concepts have been drawn for real), and generation on a `godot`/`unity`/`ue5` project where the factory is baked to a `.glb` the engine imports. Both are wired and unit-tested; neither has been run. `-i` is now proven, because the pipeline uses it on every model it builds.
+
+The character contract asked for `y = 0` and the earlier run got within a centimetre. `verify` does not check this, because `model_export.mjs` reports only bytes and a mesh count and that helper belongs to [07](07-engine-layer.md); a bounding-box assertion is the obvious next thing to add the next time that file changes hands.
 
 `Provider::Codex` in `studio_core` is a different thing to this and deliberately not reused: that is about spawning a *worker* as codex, which the provider table refuses because codex has no flag that replaces a system prompt. This feature invokes codex as a one-shot tool for a single asset, where no frozen charter is involved at all.
