@@ -631,8 +631,9 @@ function buildMeetingRoom(parent, room, cx, cz, tier) {
   return doorPoint(room, cx, cz, "-x");
 }
 
-function buildExtraRoom(parent, room, cx, cz, hole = null) {
+function buildExtraRoom(parent, room, floor, cx, cz, hole = null) {
   const rx = room.x - cx, rz = room.y - cz;
+  const low = partitionSides(room, floor);
   const mx = rx + room.w / 2, mz = rz + room.h / 2;
   const far = rx + room.w - 0.9;
   const back = rz + 0.62;
@@ -641,7 +642,7 @@ function buildExtraRoom(parent, room, cx, cz, hole = null) {
     case "break": {
       const tint = 0xe0a55a;
       checkerFloor(parent, room, cx, cz, tint);
-      buildWalls(parent, room, cx, cz, doorSideFor(room, cx, cz), null, tint);
+      buildWalls(parent, room, cx, cz, doorSideFor(room, cx, cz), null, tint, [], low);
       neonEdge(parent, room, cx, cz, tint);
       parent.add(place(buildCoffeeBar(), rx + 2.2, 0.2, back).group);
       parent.add(place(buildSofa(tint), mx - 1.2, 0.2, mz + 0.9, Math.PI).group);
@@ -659,7 +660,7 @@ function buildExtraRoom(parent, room, cx, cz, hole = null) {
     case "archive": {
       const tint = 0x8a94a4;
       checkerFloor(parent, room, cx, cz, tint);
-      buildWalls(parent, room, cx, cz, doorSideFor(room, cx, cz), null, tint);
+      buildWalls(parent, room, cx, cz, doorSideFor(room, cx, cz), null, tint, [], low);
       parent.add(place(buildShelf(), rx + 1.4, 0.2, back).group);
       parent.add(place(buildShelf(), rx + 3.4, 0.2, back).group);
       parent.add(place(buildCabinet(tint), far, 0.2, back).group);
@@ -841,7 +842,7 @@ export function buildOffice(floor, scene) {
   const lobbyPois = floor.lobby ? buildLobby(well, floor.lobby, cx, cz, tier) : [];
   const meetingDoor = floor.meeting ? buildMeetingRoom(levels[0], floor.meeting, cx, cz, tier) : null;
   for (const extra of floor.extras || []) {
-    buildExtraRoom(levels[extra.level || 0], extra, cx, cz, floor.atrium);
+    buildExtraRoom(levels[extra.level || 0], extra, floor, cx, cz, floor.atrium);
   }
   if (floor.elevator) {
     for (const g of levels) buildElevatorStop(g, floor.elevator, cx, cz);
