@@ -94,6 +94,11 @@ mod tests {
             "a worker that writes an euler track loses the whole clip and is never told why"
         );
         assert!(body.contains("POST /assets/rig"));
+        assert!(body.contains("mixamo_import.mjs"));
+        assert!(
+            body.contains("without skin"),
+            "a worker who downloads the wrong mixamo option gets a file with no motion in it"
+        );
     }
 
     #[test]

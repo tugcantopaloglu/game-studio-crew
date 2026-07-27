@@ -330,6 +330,53 @@ function rigLine(row) {
   });
 }
 
+const animations = new Map();
+
+async function addAnimation(view, row, button) {
+  if (busy) return;
+  const at = (animations.get(row.slug) || "").trim();
+  if (!at) {
+    toast("name the .fbx you downloaded, inside the project");
+    return;
+  }
+  busy = true;
+  button.disabled = true;
+  button.textContent = "retargeting...";
+  try {
+    lastResult = await api("/assets/animate", {
+      body: { project: view.projectId, slug: row.slug, animation: at },
+    });
+    toast(lastResult.ok ? "animated " + lastResult.name : "the clip could not be retargeted");
+  } catch (err) {
+    lastResult = { ok: false, reason: err.message };
+    toast("animation import failed");
+  }
+  busy = false;
+  redraw();
+}
+
+function animationRow(view, row) {
+  const box = el("div", { style: "display:grid;gap:4px" });
+  const at = el("input", {
+    type: "text",
+    placeholder: "animations/walk.fbx",
+    value: animations.get(row.slug) || "",
+    oninput: (e) => animations.set(row.slug, e.target.value),
+  });
+  box.append(field("mixamo .fbx", at));
+  const button = el("button", { text: "retarget onto this model" });
+  button.onclick = () => addAnimation(view, row, button);
+  button.disabled = busy;
+  box.append(button);
+  box.append(
+    el("div", {
+      class: "hint",
+      text: "download the clip from mixamo as FBX, without skin, and drop it in the project",
+    })
+  );
+  return box;
+}
+
 async function rigExisting(view, row, button) {
   if (busy) return;
   busy = true;
@@ -379,6 +426,8 @@ function madeList(rows, view) {
         button.onclick = () => rigExisting(view, row, button);
         button.disabled = busy || !view.can_model;
         card.append(button);
+      } else {
+        card.append(animationRow(view, row));
       }
     }
     if (row.meshes) card.append(el("div", { class: "hint", text: row.meshes + " mesh(es)" }));

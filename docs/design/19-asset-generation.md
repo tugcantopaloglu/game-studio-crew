@@ -237,6 +237,44 @@ Policy stays in Rust. `Proof::missing()` requires every joint in `RIG_JOINTS`, b
 
 This is the one place the degrade rule bends, deliberately. If the factory verifies as a model but misses the rig contract, **the model is kept** and the record says `rigged: false` with the specific miss. Discarding it would mean throwing away a concept image and a model the user has already paid for because the animation did not come out — and a static character is a genuinely useful thing that the crew can rig later. The reason names the rig route so the next step is obvious.
 
+### Mixamo: motion comes in, models do not go out
+
+The obvious question about any rig is whether Mixamo can drive it. The answer is asymmetric, and both halves were measured rather than assumed.
+
+**Mixamo cannot rig one of these models, and should not be asked to.** It accepts FBX, OBJ or ZIP and not glTF; its auto-rigger wants one clean humanoid mesh in a T- or A-pose with no existing rig, while a generated character is dozens of separately named meshes that already hang off a joint hierarchy — the exact thing its documentation says to remove first. Even if it succeeded it would discard that hierarchy for its own skinned skeleton, taking the named parts with it. That trade is backwards for this studio.
+
+**Mixamo's animation library can drive them, and now does.** Both rigs are joint hierarchies of the same topology, so the motion transfers; three things had to be solved, and the third was the interesting one.
+
+1. **Names.** Mixamo emits `mixamorig:Hips`; three's `PropertyBinding` strips reserved characters, so what actually arrives is `mixamorigHips`, and some files use `mixamorig1`, `mixamorig5`. `strip()` handles every spelling and `MIXAMO_MAP` covers the 22 bones worth mapping.
+2. **Reading the file.** `FBXLoader` is vendored beside `GLTFExporter`, with `fflate` for the deflate-compressed arrays a binary FBX uses and the NURBS curve helpers it imports at module scope. It is driven through `parse(buffer)` directly, so none of three's loading machinery has to exist in node.
+3. **Rest pose, which is where a naive retarget silently produces nonsense.**
+
+#### The rest-pose correction, and why the obvious formula is not enough
+
+The textbook retarget is `Rt(t) = Rs(t) · Rs0⁻¹ · Rt0` — take the source joint's world-space delta from its own rest, and apply it to the target's rest. It is correct, it is what "apply the rotation in bone-local coordinates" reduces to algebraically, and **on these rigs it produces garbage**, which the probe caught.
+
+The reason is measurable. A Mixamo rig rests in a T-pose: the upper arm bone points along **+X**. A generated character rests with its arms down: the same bone points along **−Y**. Mixamo bends that elbow with a rotation about world Y — which, applied to a bone that lies *along* Y, is a rotation about the bone's own axis. The arm twists in place instead of swinging. Nothing errors; the clip plays; the character does the wrong dance.
+
+So the delta is conjugated into the target's bone frame before it is applied. For each joint, `boneAim` takes the rest direction from the joint to its first mapped descendant on both rigs, `alignments` builds the swing `A` that carries the target's rest direction onto the source's, and the delta becomes `A⁻¹ · D · A`. Joints with no mapped child — hands, feet, head — inherit their parent's alignment. With that in place a T-pose clip drives an arms-down rig correctly, which is the whole reason no change to the rig contract was needed and every character generated before this still works.
+
+#### What it was measured against
+
+Not a synthetic stand-in: **`Samba Dancing.fbx`, a real Mixamo download**, retargeted onto the real Bell Keeper.
+
+| | |
+|---|---|
+| source | binary FBX, 3,681,360 bytes, 18.2 seconds |
+| joints mapped | **17** |
+| result | `idle`, `walk` and `samba` in one glb, 46 meshes untouched |
+| agreement | sampling both rigs every two seconds across the whole dance, the **worst joint-angle disagreement is 2.18°** |
+| cost | one second of node, and **no Codex request at all** |
+
+The residual two degrees is limb proportion, not error: Bell Keeper's legs are not the dancer's legs, and a knee angle cannot match exactly when the shin lengths differ. The elbow, whose chain proportions happen to line up, agrees to 0.0°.
+
+Two things the importer refuses rather than passing along: an FBX whose clips hold still — every Mixamo export carries an empty `Take 001` — and a retarget that comes back frozen, which is what a rig sharing no moving joint with the animation looks like. Generic clip names (`mixamo.com`, `Take 001`, `Armature|…`) are replaced with the file's own name, so a downloaded `samba.fbx` becomes a clip called `samba` rather than one called `mixamo.com`.
+
+**A web project cannot load a glb**, so when the engine plan has no export step the importer also writes `src/models/<slug>.anims.json` — the clips through `AnimationClip.toJSON` — beside the factory, where the browser can read them.
+
 ### Rigging something that already exists
 
 `POST /assets/rig` takes a project and a slug, reads the factory that is already there, and hands codex the whole file with instructions to add the hierarchy and the clips **while keeping every mesh, material and colour exactly as they are**. It is the same spawn path and the same answer schema; what differs is that the brief contains the current source and the verifier compares the result against what was there.
@@ -275,6 +313,7 @@ The difference between two kinds is entirely in what codex is asked for, and it 
 | `GET /assets[?project=<id>]` | capability, per-kind blockers and readiness, the four kinds and their prose, where each one's file would land, and the assets already generated |
 | `POST /assets/generate` | `{project, kind, name, description, reference?, overwrite?, concept?, rig?}`; `200` with `ok:true` and the record, or `200` with `ok:false` and a reason |
 | `POST /assets/rig` | `{project, slug}`; gives an existing model a joint hierarchy and clips, restoring it untouched if the rig does not land |
+| `POST /assets/animate` | `{project, slug, animation, name?}`; retargets a downloaded mixamo `.fbx` onto a rigged model. Costs no Codex request, so it is gated on `assets.enabled` alone and not on codex being installed at all |
 | `GET /assets/image?project=<id>&path=<relative>` | the bytes of a generated image, so the panel can show what was drawn |
 
 A kind the studio does not make is a `400` that lists the kinds it does.
@@ -313,6 +352,10 @@ A kind the studio does not make is a `400` that lists the kinds it does.
 | a clip that never changes a value is refused | **reproduced**: a hand-written frozen clip is rejected and no glb is written |
 | a rig pass reparents rather than rebuilds | **done for real**: 46 meshes in, 46 meshes out, 14 joints animated |
 | the clips actually move the body | **measured**: playing `walk`, the shin travels 0.212 and the foot 0.398 units against the hips |
+| mixamo will not accept one of these models | **read off Adobe's own documentation**: FBX/OBJ/ZIP only, one clean mesh, no existing rig |
+| a mixamo clip drives a generated rig | **done for real** with `Samba Dancing.fbx`, 17 joints, worst joint-angle disagreement 2.18° across 18 seconds |
+| the naive retarget formula breaks on these rigs | **reproduced**: without the bone-aim correction the elbow twists instead of bending, and the probe fails |
+| a binary FBX can be read in node | **done for real**: 3.6 MB deflate-compressed file parsed through the vendored `FBXLoader` |
 | the model default, the refusal diagnosis, path containment, no-clobber | **unit tested** |
 | the Windows Store python shortcut is not mistaken for python | **unit tested against the sentence a real run produced** |
 | a prop is generated end to end | **done for real, through `generate()` itself** |

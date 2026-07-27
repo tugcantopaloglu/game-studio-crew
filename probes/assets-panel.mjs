@@ -104,7 +104,11 @@ let answer = null;
 
 function serve(url, init) {
   const path = String(url);
-  if (path.startsWith("/assets/generate") || path.startsWith("/assets/rig")) {
+  if (
+    path.startsWith("/assets/generate") ||
+    path.startsWith("/assets/rig") ||
+    path.startsWith("/assets/animate")
+  ) {
     asked = JSON.parse(init.body);
     return answer;
   }
@@ -272,6 +276,26 @@ async function main() {
     "a rigged model is not offered the button again",
     !walk(host).some((n) => n.tagName === "BUTTON" && String(n.textContent) === "rig it")
   );
+
+  const fbxField = walk(host).find(
+    (n) => n.tagName === "INPUT" && String(n.placeholder || "").includes(".fbx")
+  );
+  check("a rigged model offers to take a mixamo clip", Boolean(fbxField), textOf(host).slice(0, 200));
+  if (fbxField) {
+    fbxField.value = "animations/dance.fbx";
+    fbxField.dispatchEvent({ type: "input", target: fbxField });
+    const send = walk(host).find(
+      (n) => n.tagName === "BUTTON" && String(n.textContent).includes("retarget")
+    );
+    answer = { ok: true, name: "Dune Runner", clips: ["idle", "walk", "dance"], rigged: true };
+    send.dispatchEvent({ type: "click" });
+    await new Promise((r) => setTimeout(r, 40));
+    check(
+      "and posts the path it was given to the animate route",
+      asked && asked.animation === "animations/dance.fbx" && asked.slug === "dune_runner",
+      JSON.stringify(asked)
+    );
+  }
 
   serve.view = overview({ enabled: false });
   panel.mount(host);

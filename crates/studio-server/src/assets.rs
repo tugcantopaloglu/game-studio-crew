@@ -571,6 +571,20 @@ pub fn skill_body(engine: &str) -> String {
          the file with the hierarchy and the clips, tell it to keep every mesh, material and \
          colour exactly as they are, and check the rest pose still looks the same before you \
          keep it. The studio does the same thing through `POST /assets/rig`.\n\n\
+         ## Borrowing an animation from mixamo\n\n\
+         A rigged model can take motion capture off mixamo.com, which is free and enormous. \
+         Download the clip as **FBX, without skin** — the studio only wants the motion — drop it \
+         anywhere in the project, and retarget it:\n\n\
+         ```\nnode tools/mixamo_import.mjs <factory.js> <clip.fbx> <out.glb> \\\n  \
+         [--clips src/models/<slug>.anims.json] [--name walk]\n```\n\n\
+         It maps `mixamorig:LeftUpLeg` and friends onto this studio's joint names, corrects for \
+         the fact that mixamo rests in a T-pose while these models rest with their arms down, \
+         and writes the clip out beside the ones the model already had. Nothing is asked of \
+         codex, so this costs nothing but a second of node.\n\n\
+         Mixamo will **not** rig one of these models for you: it takes FBX or OBJ rather than \
+         glb, it wants one clean mesh rather than the named parts this studio builds, and it \
+         would replace the joint hierarchy with its own skinned skeleton. Motion travels from \
+         mixamo to here; models do not travel the other way.\n\n\
          ## Where it goes\n\n\
          Sprites land in `assets/{SPRITE_DIR}/<slug>.png`, textures in \
          `assets/{TEXTURE_DIR}/<slug>.png`, and the concept art a model was built from in \
@@ -1518,6 +1532,170 @@ pub fn rig(project: &Path, cap: &Capability, req: &RigRequest) -> Result<Generat
     Ok(record)
 }
 
+pub const ANIMATION_EXTENSIONS: [&str; 1] = ["fbx"];
+pub const ANIMATION_DIR: &str = "animations";
+
+pub fn animation_in(project: &Path, given: &str) -> Result<PathBuf, String> {
+    let given = given.trim();
+    let ext = given
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_lowercase())
+        .unwrap_or_default();
+    if !ANIMATION_EXTENSIONS.contains(&ext.as_str()) {
+        return Err(format!(
+            "a downloaded animation is an .fbx, and {given} is not one; on mixamo pick the clip, \
+             download it as FBX, and \"without skin\" is enough because the studio only wants the \
+             motion"
+        ));
+    }
+    let path = Path::new(given);
+    if path.is_absolute() || given.contains("..") || given.contains(':') {
+        return Err(
+            "an animation is a path inside the project, so it cannot be absolute or climb out of it"
+                .to_string(),
+        );
+    }
+    let joined = project.join(path);
+    let settled = joined
+        .canonicalize()
+        .map_err(|e| format!("there is no animation at {}: {e}", joined.display()))?;
+    let root = project
+        .canonicalize()
+        .map_err(|e| format!("could not resolve the project at {}: {e}", project.display()))?;
+    if !settled.starts_with(&root) || !settled.is_file() {
+        return Err(format!("{given} does not resolve to a file inside the project"));
+    }
+    Ok(settled)
+}
+
+#[derive(Debug, Clone)]
+pub struct AnimateRequest {
+    pub slug: String,
+    pub animation: String,
+    pub name: Option<String>,
+}
+
+pub fn animate(project: &Path, cap: &Capability, req: &AnimateRequest) -> Result<Generated, String> {
+    if !cap.enabled {
+        return Err(blockers(true, false).join(" "));
+    }
+    let slug = slugify(&req.slug);
+    if slug.is_empty() {
+        return Err("name the asset to animate".to_string());
+    }
+    let engine = cap.engine.as_deref().unwrap_or_default();
+    let plan = plan_for(engine, &slug).ok_or_else(|| {
+        format!("the {engine} engine has no procedural model for a downloaded clip to land on")
+    })?;
+    let factory = inside(project, &plan.factory)?;
+    if !factory.is_file() {
+        return Err(format!(
+            "there is no model at {} to animate; generate one first",
+            plan.factory.display()
+        ));
+    }
+    let source = animation_in(project, &req.animation)?;
+
+    let node = on_path("node").ok_or_else(|| {
+        "node is not on PATH, so the studio cannot read a downloaded animation; install node 18 \
+         or newer"
+            .to_string()
+    })?;
+    let bridge = project.join("tools").join("mixamo_import.mjs");
+    if !bridge.is_file() {
+        return Err(format!(
+            "{} is missing, so there is nothing to retarget with; open the project once so the \
+             studio installs its engine helpers",
+            bridge.display()
+        ));
+    }
+
+    let proof = inside(project, &plan.proof)?;
+    if let Some(parent) = proof.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let sidecar = plan
+        .export
+        .is_none()
+        .then(|| plan.factory.with_extension("anims.json"));
+
+    let mut run = studio_core::command(node);
+    run.arg(&bridge)
+        .arg(&factory)
+        .arg(&source)
+        .arg(&proof)
+        .current_dir(project);
+    if let Some(sidecar) = sidecar.as_ref() {
+        run.arg("--clips").arg(inside(project, sidecar)?);
+    }
+    if let Some(name) = req.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        run.args(["--name", &slugify(name)]);
+    }
+
+    let out = run
+        .output()
+        .map_err(|e| format!("could not run the animation importer: {e}"))?;
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if !out.status.success() {
+        return Err(format!(
+            "the animation was not imported: {}. {} is untouched",
+            said.trim().chars().take(600).collect::<String>(),
+            plan.factory.display()
+        ));
+    }
+    let Some((bytes, meshes)) = parse_export_line(&said) else {
+        return Err(format!(
+            "the animation importer said something this build could not read: {}",
+            said.trim().chars().take(300).collect::<String>()
+        ));
+    };
+    let proof = Proof {
+        bytes,
+        meshes,
+        clips: parse_clip_line(&said),
+        joints: parse_joint_line(&said),
+    };
+
+    let known = recorded(project);
+    let row = known
+        .iter()
+        .find(|r| r.get("slug").and_then(Value::as_str) == Some(slug.as_str()));
+    let record = Generated {
+        kind: row
+            .and_then(|r| r.get("kind").and_then(Value::as_str))
+            .unwrap_or(AssetKind::Character.key())
+            .to_string(),
+        name: row
+            .and_then(|r| r.get("name").and_then(Value::as_str))
+            .unwrap_or(&slug)
+            .to_string(),
+        slug,
+        factory: Some(slashed(&plan.factory)),
+        export: plan.export.as_deref().map(slashed),
+        image: row
+            .and_then(|r| r.get("image").and_then(Value::as_str))
+            .map(str::to_string),
+        meshes: proof.meshes,
+        bytes: proof.bytes,
+        joints: proof.joints.clone(),
+        clips: proof.clip_names(),
+        rigged: proof.rigged(),
+        notes: format!(
+            "Retargeted {} onto this model; it now carries {}.",
+            req.animation,
+            proof.clip_names().join(", ")
+        ),
+        log: sidecar.map(|p| slashed(&p)).unwrap_or_default(),
+        ..Generated::default()
+    };
+    remember(project, &record);
+    Ok(record)
+}
+
 pub fn manifest_path(project: &Path) -> PathBuf {
     project.join(".studio").join(MANIFEST)
 }
@@ -1548,6 +1726,7 @@ pub fn routes() -> Router<AppState> {
         .route("/assets", get(overview))
         .route("/assets/generate", post(generate_asset))
         .route("/assets/rig", post(rig_asset))
+        .route("/assets/animate", post(animate_asset))
         .route("/assets/image", get(serve_image))
 }
 
@@ -1805,6 +1984,53 @@ async fn rig_asset(State(state): State<AppState>, body: String) -> Response {
         Err(e) => axum::Json(serde_json::json!({
             "ok": false,
             "reason": format!("the rigger stopped unexpectedly: {e}"),
+        }))
+        .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnimateAsk {
+    pub project: String,
+    pub slug: String,
+    pub animation: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+async fn animate_asset(State(state): State<AppState>, body: String) -> Response {
+    let req: AnimateAsk = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("an animation request needs project, slug and animation: {e}"),
+            )
+                .into_response()
+        }
+    };
+    let Some(root) = crate::project_root(&state, &req.project) else {
+        return (StatusCode::NOT_FOUND, "no such project".to_string()).into_response();
+    };
+
+    let cap = capability(&state.studio_dir, Some(&root));
+    let asked = AnimateRequest {
+        slug: req.slug.clone(),
+        animation: req.animation.clone(),
+        name: req.name.clone(),
+    };
+    let done = tokio::task::spawn_blocking(move || animate(&root, &cap, &asked)).await;
+
+    match done {
+        Ok(Ok(record)) => {
+            let mut body = record.to_value();
+            body["ok"] = Value::Bool(true);
+            axum::Json(body).into_response()
+        }
+        Ok(Err(why)) => axum::Json(serde_json::json!({"ok": false, "reason": why})).into_response(),
+        Err(e) => axum::Json(serde_json::json!({
+            "ok": false,
+            "reason": format!("the animation importer stopped unexpectedly: {e}"),
         }))
         .into_response(),
     }
@@ -2150,6 +2376,132 @@ mod tests {
         assert!(has_clip_export("export function clips(THREE, root) { return []; }"));
         assert!(has_clip_export("export const clips = () => [];"));
         assert!(!has_clip_export(source));
+    }
+
+    #[test]
+    fn a_downloaded_animation_has_to_be_an_fbx_from_inside_the_project() {
+        let root = std::env::temp_dir().join("studio-assets-anim-path");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(ANIMATION_DIR)).unwrap();
+        std::fs::write(root.join(ANIMATION_DIR).join("walk.fbx"), b"pretend fbx").unwrap();
+        std::fs::write(std::env::temp_dir().join("studio-assets-outside.fbx"), b"nope").unwrap();
+
+        assert!(animation_in(&root, "animations/walk.fbx").is_ok());
+
+        let wrong = animation_in(&root, "animations/walk.glb").unwrap_err();
+        assert!(wrong.contains("is an .fbx"), "{wrong}");
+        assert!(
+            wrong.contains("without skin"),
+            "the refusal has to say which mixamo download to pick: {wrong}"
+        );
+
+        for climbing in ["../studio-assets-outside.fbx", "animations/../../x.fbx"] {
+            assert!(animation_in(&root, climbing).is_err(), "{climbing} was allowed");
+        }
+        assert!(animation_in(&root, "animations/nobody.fbx").is_err());
+    }
+
+    #[test]
+    fn animating_a_model_that_is_not_there_says_so_before_anything_runs() {
+        let dir = std::env::temp_dir().join("studio-assets-anim-missing");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let cap = ready_cap(Some("web"));
+        let asked = AnimateRequest {
+            slug: "nobody".into(),
+            animation: "animations/walk.fbx".into(),
+            name: None,
+        };
+        let err = animate(&dir, &cap, &asked).unwrap_err();
+        assert!(err.contains("there is no model at"), "{err}");
+        assert!(!dir.join(".studio-out").exists());
+    }
+
+    #[test]
+    fn importing_an_animation_needs_no_codex_at_all_but_still_respects_the_switch() {
+        let dir = std::env::temp_dir().join("studio-assets-anim-off");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut cap = ready_cap(Some("web"));
+        cap.installed = false;
+        cap.path = None;
+        let asked = AnimateRequest {
+            slug: "scout".into(),
+            animation: "animations/walk.fbx".into(),
+            name: None,
+        };
+        let err = animate(&dir, &cap, &asked).unwrap_err();
+        assert!(
+            !err.contains("not on PATH"),
+            "retargeting a downloaded clip is pure node and must not ask for codex: {err}"
+        );
+
+        cap.enabled = false;
+        let off = animate(&dir, &cap, &asked).unwrap_err();
+        assert!(off.contains("switched off"), "{off}");
+    }
+
+    #[test]
+    #[ignore]
+    fn a_real_mixamo_download_is_retargeted_onto_a_generated_model() {
+        let fbx = match std::env::var("STUDIO_MIXAMO_FBX") {
+            Ok(at) => PathBuf::from(at),
+            Err(_) => {
+                println!(
+                    "set STUDIO_MIXAMO_FBX to a downloaded mixamo .fbx to drive this end to end"
+                );
+                return;
+            }
+        };
+
+        let dir = std::env::temp_dir().join("studio-assets-mixamo");
+        let _ = std::fs::remove_dir_all(&dir);
+        let studio = dir.join(".studio");
+        let project = dir.join("game");
+        std::fs::create_dir_all(&studio).unwrap();
+        std::fs::create_dir_all(project.join(ANIMATION_DIR)).unwrap();
+        std::fs::write(project.join("index.html"), "<html></html>").unwrap();
+
+        let profiles = studio_engine::EngineProfile::builtin();
+        let web = profiles.iter().find(|p| p.id == "web").unwrap();
+        studio_engine::install_helpers(web, &project).unwrap();
+
+        let rigged = std::env::var("STUDIO_RIGGED_FACTORY")
+            .expect("set STUDIO_RIGGED_FACTORY to a rigged factory this can animate");
+        std::fs::create_dir_all(project.join("src").join("models")).unwrap();
+        std::fs::copy(&rigged, project.join("src/models/dancer.js")).unwrap();
+        std::fs::copy(&fbx, project.join(ANIMATION_DIR).join("dance.fbx")).unwrap();
+
+        let cap = capability(&studio, Some(&project));
+        let made = match animate(
+            &project,
+            &cap,
+            &AnimateRequest {
+                slug: "dancer".into(),
+                animation: "animations/dance.fbx".into(),
+                name: None,
+            },
+        ) {
+            Ok(made) => made,
+            Err(why) => panic!("the mixamo import failed: {why}"),
+        };
+
+        println!("clips  {}", made.clips.join(", "));
+        println!("joints {}", made.joints.len());
+        println!("sheet  {}", made.log);
+
+        assert!(made.clips.len() >= 3, "the model keeps its own clips too: {:?}", made.clips);
+        assert!(
+            made.joints.len() >= RIG_JOINTS.len(),
+            "a mixamo rig should reach every joint this studio names: {:?}",
+            made.joints
+        );
+        assert!(
+            project.join("src/models/dancer.anims.json").is_file(),
+            "a web project cannot read a glb, so the clips have to land beside the factory"
+        );
     }
 
     #[test]

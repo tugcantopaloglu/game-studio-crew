@@ -901,6 +901,12 @@ pub const GODOT_CI_HELPER: &str = include_str!("../helpers/studio_ci.gd");
 pub const WEB_CI_HELPER: &str = include_str!("../helpers/studio_ci.mjs");
 pub const GLTF_EXPORTER_HELPER: &str = include_str!("../helpers/GLTFExporter.js");
 pub const MODEL_EXPORT_HELPER: &str = include_str!("../helpers/model_export.mjs");
+pub const FBX_LOADER_HELPER: &str = include_str!("../helpers/FBXLoader.js");
+pub const FFLATE_HELPER: &str = include_str!("../helpers/fflate.module.js");
+pub const NURBS_CURVE_HELPER: &str = include_str!("../helpers/NURBSCurve.js");
+pub const NURBS_UTILS_HELPER: &str = include_str!("../helpers/NURBSUtils.js");
+pub const RETARGET_HELPER: &str = include_str!("../helpers/retarget.mjs");
+pub const MIXAMO_IMPORT_HELPER: &str = include_str!("../helpers/mixamo_import.mjs");
 pub const WEB_RUNTIME_PROBE: &str = include_str!("../helpers/runtime_probe.mjs");
 pub const PYTHON_RUNTIME_PROBE: &str = include_str!("../helpers/runtime_probe.py");
 pub const WEB_SCREENSHOT_HELPER: &str = include_str!("../helpers/screenshot.mjs");
@@ -964,6 +970,25 @@ pub fn install_helpers(profile: &EngineProfile, project: &Path) -> Result<Vec<Pa
         let exporter = vendor.join("GLTFExporter.js");
         write_if_changed(&exporter, GLTF_EXPORTER_HELPER)?;
         installed.push(exporter);
+
+        for (name, content) in [
+            ("FBXLoader.js", FBX_LOADER_HELPER),
+            ("fflate.module.js", FFLATE_HELPER),
+            ("NURBSCurve.js", NURBS_CURVE_HELPER),
+            ("NURBSUtils.js", NURBS_UTILS_HELPER),
+        ] {
+            let path = vendor.join(name);
+            write_if_changed(&path, content)?;
+            installed.push(path);
+        }
+        for (name, content) in [
+            ("retarget.mjs", RETARGET_HELPER),
+            ("mixamo_import.mjs", MIXAMO_IMPORT_HELPER),
+        ] {
+            let path = project.join("tools").join(name);
+            write_if_changed(&path, content)?;
+            installed.push(path);
+        }
     }
     Ok(installed)
 }
@@ -978,7 +1003,12 @@ mod bootstrap_tests {
         let godot = EngineProfile::parse(GODOT_PROFILE).unwrap();
 
         let first = install_helpers(&godot, dir.path()).unwrap();
-        assert_eq!(first.len(), 4, "ci helper plus the three model-bridge files");
+        assert_eq!(
+            first.len(),
+            10,
+            "the ci helper, the model bridge and its vendored three, plus the mixamo importer \
+             and the fbx reader it needs"
+        );
         assert!(first.iter().all(|p| p.exists()));
 
         let before: Vec<_> = first
@@ -1037,6 +1067,36 @@ mod bootstrap_tests {
             assert!(dir.path().join("tools/vendor/GLTFExporter.js").exists());
             assert!(dir.path().join("tools/vendor/three.module.js").exists());
         }
+    }
+
+    #[test]
+    fn every_gltf_capable_engine_can_also_read_a_mixamo_animation() {
+        for src in [GODOT_PROFILE, UNITY_PROFILE, UE5_PROFILE, WEB_PROFILE] {
+            let dir = tempfile::tempdir().unwrap();
+            let profile = EngineProfile::parse(src).unwrap();
+            install_helpers(&profile, dir.path()).unwrap();
+
+            for needed in [
+                "tools/mixamo_import.mjs",
+                "tools/retarget.mjs",
+                "tools/vendor/FBXLoader.js",
+                "tools/vendor/fflate.module.js",
+            ] {
+                assert!(
+                    dir.path().join(needed).exists(),
+                    "{} has no {needed}, so a downloaded mixamo clip has nothing to read it",
+                    profile.id
+                );
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let python = EngineProfile::parse(PYTHON_PROFILE).unwrap();
+        install_helpers(&python, dir.path()).unwrap();
+        assert!(
+            !dir.path().join("tools/mixamo_import.mjs").exists(),
+            "a python project has no three.js model to retarget onto"
+        );
     }
 }
 
