@@ -536,6 +536,7 @@ let ambient = [];
 let meetingTable = null;
 let meetingApproach = [];
 let levelGroups = [];
+let wellRect = null;
 let mingleList = [];
 let viewLevel = 0;
 
@@ -549,12 +550,27 @@ floorsEl.addEventListener("click", (e) => {
 });
 
 function applyLevel() {
-  levelGroups.forEach((g, i) => { g.visible = i <= viewLevel; });
+  levelGroups.forEach((g, i) => {
+    g.visible = i <= viewLevel;
+    const well = g.userData.seenFromAbove;
+    if (!well) return;
+    const under = i < viewLevel;
+    for (const child of g.children) child.visible = !under || child === well;
+  });
   miniDirty = true;
 }
 
 function levelOf(a) {
   return Math.round(a.person.position.y / LEVEL_H);
+}
+
+function seenFromHere(a) {
+  const at = levelOf(a);
+  if (at === viewLevel) return true;
+  if (at > viewLevel || !wellRect) return false;
+  const p = a.person.position;
+  return p.x >= wellRect.x0 && p.x <= wellRect.x1
+    && p.z >= wellRect.z0 && p.z <= wellRect.z1;
 }
 
 let following = null;
@@ -1132,7 +1148,7 @@ function animate() {
     const stuck = st.ring === "error" || st.ring === "blocked";
     const busy = st.ring === "running" || st.ring === "meeting" || stuck;
     wanderStep(a, busy, dt, t);
-    a.person.visible = levelOf(a) <= viewLevel;
+    a.person.visible = seenFromHere(a);
     a.rig.update(avatarPose(a, st.ring, t), dt, t, rigStep(a, cam));
 
     a.ringMat.opacity = ringOpacity(st.ring, stuck, t, a.seed);
@@ -1165,7 +1181,7 @@ function animate() {
 
   for (const a of ambient) {
     wanderStep(a, false, dt, t);
-    a.person.visible = levelOf(a) <= viewLevel;
+    a.person.visible = seenFromHere(a);
     a.rig.update(avatarPose(a, "idle", t), dt, t, rigStep(a, cam));
   }
   stepBubble(dt, t);
@@ -1801,6 +1817,7 @@ fetch("/floor").then((r) => r.json()).then((f) => {
   avatars = built.avatars;
   ambient = built.ambient || [];
   levelGroups = built.levels || [];
+  wellRect = built.wellRect || null;
   meetingTable = built.meetingTable;
   meetingApproach = built.meetingApproach || [];
   mingleList = [...avatars.values(), ...ambient];

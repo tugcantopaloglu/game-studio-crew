@@ -120,14 +120,24 @@ function contactTexture() {
 const SHADE_PLANE = new THREE.PlaneGeometry(1, 1);
 const FLAT = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
 
+function branchUnder(obj, level) {
+  let node = obj;
+  while (node.parent && node.parent !== level) node = node.parent;
+  return node.parent === level ? node : null;
+}
+
 function buildContactShade(levels) {
-  const byLevel = levels.map(() => []);
+  const buckets = new Map();
   const at = new THREE.Vector3();
   for (const spot of shadeSpots) {
     spot.group.getWorldPosition(at);
     const level = Math.round(at.y / LEVEL_H);
-    if (!byLevel[level]) continue;
-    byLevel[level].push({ x: at.x, z: at.z, reach: spot.reach });
+    const host = levels[level];
+    if (!host) continue;
+    const seen = host.userData.seenFromAbove;
+    const home = seen && branchUnder(spot.group, host) === seen ? seen : host;
+    if (!buckets.has(home)) buckets.set(home, []);
+    buckets.get(home).push({ x: at.x, z: at.z, reach: spot.reach });
   }
 
   const mat = new THREE.MeshBasicMaterial({
@@ -137,8 +147,7 @@ function buildContactShade(levels) {
   const pos = new THREE.Vector3();
   const size = new THREE.Vector3();
 
-  byLevel.forEach((spots, level) => {
-    if (!spots.length) return;
+  for (const [home, spots] of buckets) {
     const pool = new THREE.InstancedMesh(SHADE_PLANE, mat, spots.length);
     pool.renderOrder = 1;
     spots.forEach((s, i) => {
@@ -149,8 +158,8 @@ function buildContactShade(levels) {
       pool.setMatrixAt(i, m);
     });
     pool.instanceMatrix.needsUpdate = true;
-    levels[level].add(pool);
-  });
+    home.add(pool);
+  }
 }
 
 function drawScreen(x, style, tint, data, crew) {
@@ -311,6 +320,89 @@ function wallScreens(parent, room, cx, cz, tint, doorSide, glassSide, avoid = []
     const panel = new THREE.Mesh(screenPanelGeo, surface.material);
     panel.position.z = 0.03;
     group.add(panel);
+  }
+}
+
+const POSTER_GEO = new THREE.PlaneGeometry(0.86, 1.18);
+const FRAME_GEO = new THREE.PlaneGeometry(0.96, 1.28);
+
+function posterFace(tint, department, variant) {
+  const c = document.createElement("canvas");
+  c.width = 86;
+  c.height = 118;
+  const x = c.getContext("2d");
+  const hex = "#" + tint.toString(16).padStart(6, "0");
+  x.fillStyle = "#0c1017";
+  x.fillRect(0, 0, 86, 118);
+
+  if (variant === 0) {
+    x.fillStyle = hex;
+    x.globalAlpha = 0.85;
+    x.beginPath();
+    x.arc(43, 46, 24, 0, Math.PI * 2);
+    x.fill();
+    x.globalAlpha = 0.35;
+    x.beginPath();
+    x.arc(43, 46, 34, 0, Math.PI * 2);
+    x.stroke();
+  } else if (variant === 1) {
+    x.fillStyle = hex;
+    for (let i = 0; i < 5; i++) {
+      x.globalAlpha = 0.35 + i * 0.12;
+      x.fillRect(12, 74 - i * 12, 20 + i * 11, 8);
+    }
+  } else {
+    x.strokeStyle = hex;
+    x.lineWidth = 3;
+    x.globalAlpha = 0.8;
+    x.beginPath();
+    x.moveTo(10, 78);
+    for (let i = 1; i <= 6; i++) {
+      x.lineTo(10 + i * 11, 78 - Math.abs(Math.sin(i * 1.7)) * 46);
+    }
+    x.stroke();
+  }
+
+  x.globalAlpha = 1;
+  x.fillStyle = "#8f9bb0";
+  x.font = "700 9px ui-monospace, monospace";
+  x.fillText(department.toUpperCase().slice(0, 11), 9, 106);
+  x.fillStyle = hex;
+  x.fillRect(9, 110, 30, 2);
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return new THREE.MeshLambertMaterial({ map: tex });
+}
+
+function wallPosters(parent, room, cx, cz, tint, doorSide, glassSide, avoid = []) {
+  const m = mountWall(room, cx, cz, doorSide, glassSide, avoid);
+  const span = m.a1 - m.a0;
+  const frameMat = lambert(0x0a0d13);
+
+  for (const t of [0.12, 0.88]) {
+    const along = m.a0 + span * t;
+    const px = m.along === "x" ? along : m.fixed;
+    const pz = m.along === "x" ? m.fixed : along;
+
+    const g = new THREE.Group();
+    g.position.set(px, 1.06, pz);
+    g.rotation.y = m.rot;
+    parent.add(g);
+
+    const frame = new THREE.Mesh(FRAME_GEO, frameMat);
+    frame.position.z = 0.02;
+    g.add(frame);
+
+    const face = new THREE.Mesh(
+      POSTER_GEO,
+      posterFace(tint, room.department, Math.floor(tileNoise(room.x + t * 10, room.y) * 3) % 3)
+    );
+    face.position.z = 0.035;
+    g.add(face);
   }
 }
 
@@ -724,6 +816,9 @@ function buildLobby(parent, lobby, cx, cz, tier) {
   }
 
   parent.add(place(buildWaterCooler(), mid.x + 4.6, 0.2, rz + 1.0).group);
+  pois.push(poi(mid.x + 4.6, rz + 1.7, mid.x + 4.6, rz + 1.0, "\u{1F4A7}"));
+  pois.push(poi(mid.x + 3.2, mid.z + 2.6, mid.x + 2.0, mid.z + 3.4, "\u{1F440}"));
+  pois.push(poi(rx + lobby.w - 2.4, rz + lobby.h - 2.2, rx + lobby.w - 1.6, rz + lobby.h - 1.9, "\u{1F4E6}"));
   loose(buildBoxes(), parent, rx + lobby.w - 1.6, rz + lobby.h - 1.9);
 
   if (tier.roomLights) {
@@ -1004,6 +1099,10 @@ export function buildOffice(floor, scene) {
   levels[1].position.y = LEVEL_H;
   for (const g of levels) fixtures.add(g);
 
+  const well = new THREE.Group();
+  levels[0].add(well);
+  levels[0].userData.seenFromAbove = well;
+
 
   if ((floor.levels || 1) > 1) {
     buildUpperDeck(levels[1], floor, cx, cz);
@@ -1014,7 +1113,7 @@ export function buildOffice(floor, scene) {
       if (tier.roomLights) {
         const shaft = new THREE.PointLight(0xffe4bd, 42, 22, 1.5);
         shaft.position.set(wx, LEVEL_H - 0.7, wz);
-        levels[0].add(shaft);
+        well.add(shaft);
 
         const landing = (floor.extras || []).find((r) => r.department === "landing");
         const loft = new THREE.PointLight(0xffe9c8, 48, 32, 1.5);
@@ -1028,7 +1127,7 @@ export function buildOffice(floor, scene) {
     }
   }
 
-  const lobbyPois = floor.lobby ? buildLobby(levels[0], floor.lobby, cx, cz, tier) : [];
+  const lobbyPois = floor.lobby ? buildLobby(well, floor.lobby, cx, cz, tier) : [];
   const meetingDoor = floor.meeting ? buildMeetingRoom(levels[0], floor.meeting, floor, cx, cz, tier) : null;
   for (const extra of floor.extras || []) {
     buildExtraRoom(levels[extra.level || 0], extra, floor, cx, cz, floor.atrium);
@@ -1068,6 +1167,7 @@ export function buildOffice(floor, scene) {
     buildWalls(rg, room, cx, cz, door, glass === door ? null : glass, tint, open, low);
     neonEdge(rg, room, cx, cz, tint);
     wallScreens(rg, room, cx, cz, tint, door, glass, open.concat(low));
+    wallPosters(rg, room, cx, cz, tint, door, glass, open.concat(low));
     poisByDept.set(room.department, roomProps(rg, room, cx, cz, tint));
 
     const rx = room.x - cx, rz = room.y - cz;
@@ -1242,7 +1342,7 @@ export function buildOffice(floor, scene) {
     });
   }
 
-  buildShell(levels[0], floor, cx, cz);
+  buildShell(fixtures, floor, cx, cz);
   buildGround(scene, floor);
   const table = floor.meeting
     ? new THREE.Vector3(
@@ -1272,6 +1372,12 @@ export function buildOffice(floor, scene) {
   return {
     world, fixtures, avatars, ambient, levels, meetingTable: table,
     meetingApproach: meetingDoor ? [meetingDoor] : [],
+    wellRect: floor.atrium
+      ? {
+          x0: floor.atrium.x - cx, x1: floor.atrium.x - cx + floor.atrium.w,
+          z0: floor.atrium.y - cz, z1: floor.atrium.y - cz + floor.atrium.h,
+        }
+      : null,
   };
 }
 
@@ -1609,8 +1715,8 @@ export function wanderStep(a, busy, dt, now) {
         if (a.path.length) a.target.copy(a.path[0]);
         else a.target.copy(pointIn(a.inLobby ? a.lobby : a.bounds, a.inLobby ? 0.22 : p.y));
       } else if (now > a.wait) {
-        const goLobby = a.lobby && !a.inLobby && rand() < 0.35;
-        const comeBack = a.inLobby && rand() < 0.45;
+        const goLobby = a.lobby && !a.inLobby && rand() < 0.2;
+        const comeBack = a.inLobby && rand() < 0.55;
         a.mode = "idle";
 
         if (goLobby) {
@@ -1627,7 +1733,8 @@ export function wanderStep(a, busy, dt, now) {
           const pois = a.inLobby ? a.lobbyPois : a.roomPois;
           if (pois && pois.length && rand() < 0.4) {
             a.visit = pois[(rand() * pois.length) | 0];
-            a.target.set(a.visit.x, p.y, a.visit.z);
+            const side = Math.cos(a.seed * 5.7), fore = Math.sin(a.seed * 9.1);
+            a.target.set(a.visit.x + side * 0.55, p.y, a.visit.z + fore * 0.45);
           } else {
             a.visit = null;
             a.target.copy(pointIn(a.inLobby ? a.lobby : a.bounds, a.inLobby ? 0.22 : p.y));
