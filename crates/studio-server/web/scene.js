@@ -391,8 +391,9 @@ function buildWalls(parent, room, cx, cz, doorSide, glassSide, tint, openThrough
 
 function buildShell(parent, floor, cx, cz) {
   const w = floor.width, h = floor.height;
-  const t = 0.5, y = WALL_H + 0.5;
-  const shade = 0x171b24;
+  const t = 0.5;
+  const foot = -0.4, sill = 0.95, head = 2.35, cap = WALL_H + 0.1;
+  const frame = lambert(0x171b24);
   const segs = [
     [0, -h / 2 - t / 2, w + t * 2, t],
     [0, h / 2 + t / 2, w + t * 2, t],
@@ -400,11 +401,37 @@ function buildShell(parent, floor, cx, cz) {
     [w / 2 + t / 2, 0, t, h + t * 2],
   ];
   for (const [px, pz, sw, sd] of segs) {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(sw, y, sd), lambert(shade));
-    m.position.set(px, y / 2 - 0.4, pz);
-    m.castShadow = true;
-    m.receiveShadow = true;
-    parent.add(m);
+    const base = new THREE.Mesh(new THREE.BoxGeometry(sw, sill - foot, sd), frame);
+    base.position.set(px, (foot + sill) / 2, pz);
+    base.castShadow = true;
+    base.receiveShadow = true;
+    parent.add(base);
+
+    const lintel = new THREE.Mesh(new THREE.BoxGeometry(sw, cap - head, sd), frame);
+    lintel.position.set(px, (head + cap) / 2, pz);
+    lintel.castShadow = true;
+    parent.add(lintel);
+
+    const along = sw > sd;
+    const pane = new THREE.Mesh(
+      new THREE.BoxGeometry(along ? sw : sd * 0.4, head - sill, along ? sd * 0.4 : sd),
+      glassMat
+    );
+    pane.position.set(px, (sill + head) / 2, pz);
+    parent.add(pane);
+
+    const span = along ? sw : sd;
+    const bays = Math.max(2, Math.round(span / 9));
+    for (let i = 1; i < bays; i++) {
+      const f = i / bays - 0.5;
+      const mull = new THREE.Mesh(
+        new THREE.BoxGeometry(along ? 0.22 : sw, head - sill, along ? sd : 0.22),
+        frame
+      );
+      mull.position.set(px + (along ? f * sw : 0), (sill + head) / 2, pz + (along ? 0 : f * sd));
+      mull.castShadow = true;
+      parent.add(mull);
+    }
 
     const strip = new THREE.Mesh(
       new THREE.BoxGeometry(sw + 0.1, 0.16, sd + 0.1),
@@ -413,6 +440,16 @@ function buildShell(parent, floor, cx, cz) {
     strip.position.set(px, -0.12, pz);
     parent.add(strip);
   }
+}
+
+function buildGround(parent, floor) {
+  const span = Math.max(floor.width, floor.height);
+  const ground = new THREE.Mesh(
+    new THREE.BoxGeometry(span * 8, 0.6, span * 8),
+    lambert(0x0b0e16)
+  );
+  ground.position.y = -1.5;
+  parent.add(ground);
 }
 
 function podFacing(desk, room) {
@@ -1148,6 +1185,7 @@ export function buildOffice(floor, scene) {
   }
 
   buildShell(levels[0], floor, cx, cz);
+  buildGround(scene, floor);
   const table = floor.meeting
     ? new THREE.Vector3(
         floor.meeting.x - cx + floor.meeting.w / 2,
