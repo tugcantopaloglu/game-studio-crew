@@ -1314,7 +1314,7 @@ export function buildOffice(floor, scene) {
       person, body: rig.group, rig, hit: proxy, ringMat, alarm, lamp, bulb, cone, pool, spot,
       tier: d.tier, title: d.title, dept: d.department,
       home,
-      deskLook: new THREE.Vector3(d.x + d.w / 2 - cx, deckY + 0.92, d.y + d.h / 2 - cz),
+      deskLook: new THREE.Vector3(d.x + d.w / 2 - cx, deckY + 1.09, d.y + d.h / 2 - cz),
       homeFacing: facing,
       bounds: {
         x0: room.x - cx + 1.1, x1: room.x - cx + room.w - 1.1,

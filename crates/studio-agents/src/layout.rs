@@ -23,7 +23,6 @@ pub const GRID_ROWS: u32 = 3;
 pub const LOBBY_CELL: u32 = 4;
 
 const ATRIUM_MARGIN: u32 = 2;
-const LIFT_CLEARANCE: u32 = 4;
 
 const COL_W: [u32; 3] = [13, 19, 13];
 const ROW_H: [u32; 3] = [9, 11, 9];
@@ -231,13 +230,17 @@ pub fn pack_floor(roles: &[Role]) -> Floor {
         level: 0,
     };
 
+    let void_x = lobby.x + ATRIUM_MARGIN;
+    let void_y = lobby.y + ATRIUM_MARGIN;
+    let void_far = elevator.x.min(lobby.x + lobby.w - ATRIUM_MARGIN);
+    let void_near = lobby.y + lobby.h - ATRIUM_MARGIN;
     let atrium = Room {
         department: "atrium".to_string(),
         visual_family: "atrium".to_string(),
-        x: lobby.x + ATRIUM_MARGIN,
-        y: lobby.y + LIFT_CLEARANCE,
-        w: lobby.w - ATRIUM_MARGIN - LIFT_CLEARANCE,
-        h: lobby.h - ATRIUM_MARGIN - LIFT_CLEARANCE,
+        x: void_x,
+        y: void_y,
+        w: void_far.saturating_sub(void_x),
+        h: void_near.saturating_sub(void_y),
         level: 1,
     };
 
@@ -573,6 +576,24 @@ mod lobby_tests {
                 && a.x + a.w <= landing.x + landing.w
                 && a.y + a.h <= landing.y + landing.h,
             "the void has to be cut out of a floor that exists there"
+        );
+    }
+
+    #[test]
+    fn the_atrium_is_the_widest_the_lobby_and_the_lift_between_them_allow() {
+        let f = studio_floor();
+        let a = &f.atrium;
+        let l = &f.lobby;
+        assert!(
+            a.w * a.h >= (l.w * l.h) / 3,
+            "the void is {}x{} in an {}x{} lobby; it should be the room you look down, \
+             not a hatch in it",
+            a.w, a.h, l.w, l.h
+        );
+        assert_eq!(
+            a.x + a.w,
+            f.elevator.x.min(l.x + l.w - ATRIUM_MARGIN),
+            "the void should run east until the lift or the walkway stops it"
         );
     }
 

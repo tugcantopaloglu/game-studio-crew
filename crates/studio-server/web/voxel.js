@@ -454,22 +454,22 @@ export function characterBounds() {
 export function buildDesk(tint, variant = -1) {
   const v = [];
   box(v, 0, 0, 0, 10, 1, 6, 0x3a3f4c, 4);
-  box(v, 0, 1, 0, 10, 4, 1, 0x2e3340, 4);
-  box(v, 0, 1, 5, 10, 4, 1, 0x2e3340, 4);
-  box(v, 0, 5, 0, 10, 1, 6, 0x4a5060, 4);
-  box(v, 2, 6, 1, 6, 4, 1, 0x14161c, 3);
-  box(v, 3, 7, 2, 4, 2, 1, tint, 6);
-  box(v, 2, 6, 4, 6, 1, 2, 0x2a2e38, 4);
+  box(v, 0, 1, 0, 10, 6, 1, 0x2e3340, 4);
+  box(v, 0, 1, 5, 10, 6, 1, 0x2e3340, 4);
+  box(v, 0, 7, 0, 10, 1, 6, 0x4a5060, 4);
+  box(v, 2, 8, 1, 6, 4, 1, 0x14161c, 3);
+  box(v, 3, 9, 2, 4, 2, 1, tint, 6);
+  box(v, 2, 8, 4, 6, 1, 2, 0x2a2e38, 4);
   if (variant === 0) {
-    box(v, 8, 6, 4, 1, 2, 1, 0xd9d3c4, 3);
-    box(v, 0, 6, 3, 2, 1, 2, 0xe7e3d7, 3);
+    box(v, 8, 8, 4, 1, 2, 1, 0xd9d3c4, 3);
+    box(v, 0, 8, 3, 2, 1, 2, 0xe7e3d7, 3);
   } else if (variant === 1) {
-    box(v, 8, 6, 1, 2, 3, 1, 0x14161c, 3);
-    box(v, 8, 7, 2, 2, 1, 1, tint, 6);
-    box(v, 0, 6, 4, 2, 1, 1, 0xc4573f, 4);
+    box(v, 8, 8, 1, 2, 3, 1, 0x14161c, 3);
+    box(v, 8, 9, 2, 2, 1, 1, tint, 6);
+    box(v, 0, 8, 4, 2, 1, 1, 0xc4573f, 4);
   } else if (variant === 2) {
-    box(v, 0, 6, 2, 2, 3, 2, 0x3f6b3a, 7);
-    box(v, 8, 6, 4, 1, 2, 1, 0xcf7a45, 3);
+    box(v, 0, 8, 2, 2, 3, 2, 0x3f6b3a, 7);
+    box(v, 8, 8, 4, 1, 2, 1, 0xcf7a45, 3);
   }
   return v;
 }
