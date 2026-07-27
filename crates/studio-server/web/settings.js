@@ -1,5 +1,6 @@
 import { settings, api, el, toast } from "/bus.js";
 import { folderPicker } from "/browse.js";
+import { frameP95 } from "/perf.js";
 
 const EFFORTS =["low", "medium", "high", "xhigh", "max"];
 const TIERS = [
@@ -109,6 +110,16 @@ function group(root, id, title, summary, build) {
   build(body);
   root.append(box);
   return body;
+}
+
+function refreshSummaries() {
+  for (const refresh of summaries) {
+    try {
+      refresh();
+    } catch (err) {
+      continue;
+    }
+  }
 }
 
 function reset(key, fallback, after) {
@@ -844,6 +855,25 @@ function budgetSection(root) {
 }
 
 function floorSection(root) {
+  const speed = el("div", { class: "card" });
+  const paintSpeed = () => {
+    const p95 = frameP95();
+    speed.replaceChildren(
+      el("b", { text: p95 > 0 ? `${p95.toFixed(1)}ms · ${Math.round(1000 / p95)}fps` : "measuring" }),
+      el("div", {
+        class: "k",
+        text: "the slowest one frame in twenty, measured while this window is in front."
+          + " a background tab reads far worse than it is",
+      })
+    );
+  };
+  paintSpeed();
+  timers.push(setInterval(() => {
+    paintSpeed();
+    refreshSummaries();
+  }, 1000));
+  root.append(speed);
+
   root.append(check("low spec mode", "lowSpec", false));
   root.append(
     el("div", {
@@ -982,7 +1012,9 @@ function redraw() {
 
       band(host, "This device", "stored with the studio, but only this window reads it");
       group(host, "floor", "floor", () => {
-        const bits = [read("lowSpec", false) ? "low spec" : "full quality"];
+        const p95 = frameP95();
+        const bits = [p95 > 0 ? `${Math.round(1000 / p95)}fps` : "measuring"];
+        bits.push(read("lowSpec", false) ? "low spec" : "full quality");
         if (read("gpu.acceleration", true) === false) bits.push("gpu off");
         return bits.join(" · ");
       }, floorSection);
@@ -1007,15 +1039,7 @@ function redraw() {
     });
 }
 
-settings.onChange(() => {
-  for (const refresh of summaries) {
-    try {
-      refresh();
-    } catch (err) {
-      continue;
-    }
-  }
-});
+settings.onChange(refreshSummaries);
 
 export function mount(root) {
   host = root;
