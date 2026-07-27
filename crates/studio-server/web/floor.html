@@ -457,7 +457,7 @@ import * as THREE from "/vendor/three.module.js";
 import { buildOffice, wanderStep, avatarPose, mingle, refreshScreens, paintScreens, setMotion, seatAtTable, leaveTable, showBoard, boardSays, boardDecided, hideBoard, LEVEL_H } from "/scene.js";
 import { pushEvent, setProject, onProject, setStage, settings } from "/bus.js";
 import { startChatter, chatterSays } from "/chatter.js";
-import { budget, reducedMotion, sampleFrame, frameP95, hardwareHints, shouldOfferLowSpec, noteOffered, reasonForOffer, onTier, createRenderer, describeRenderer, gpuNeedsReload, gpuWanted, onGpu } from "/perf.js";
+import { budget, reducedMotion, onMotion, sampleFrame, frameP95, hardwareHints, shouldOfferLowSpec, noteOffered, reasonForOffer, onTier, createRenderer, describeRenderer, gpuNeedsReload, gpuWanted, onGpu } from "/perf.js";
 
 const RING = { idle: 0x2f3644, running: 0x4ad991, blocked: 0xd9c24a, meeting: 0x6fa8d1, error: 0xd95555 };
 const TERMINAL = new Set(["run_ended","meeting_ended","workflow_ended","decision_recorded","escalated","verify_result","budget_exhausted"]);
@@ -968,9 +968,10 @@ onTier((b) => {
   resize();
 });
 
+const followMotion = () => { motionOn = !reducedMotion(); setMotion(motionOn); };
+onMotion(followMotion);
 if (typeof matchMedia === "function") {
   const calm = matchMedia("(prefers-reduced-motion: reduce)");
-  const followMotion = () => { motionOn = !calm.matches; setMotion(motionOn); };
   if (calm.addEventListener) calm.addEventListener("change", followMotion);
 }
 

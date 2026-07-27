@@ -11,6 +11,11 @@ const REFRESH = [
   [300, "every 5 minutes"],
   [60, "every minute"],
 ];
+const MOTION = [
+  ["auto", "follow the system"],
+  ["on", "always walking"],
+  ["off", "parked at their desks"],
+];
 const CAPABILITIES = [
   ["system_prompt_file", "frozen charter"],
   ["streaming_events", "streamed events"],
@@ -788,6 +793,20 @@ function floorSection(root) {
     el("div", {
       class: "hint",
       text: "drops the heavy parts of the 3D floor so an older machine keeps a steady frame rate",
+    })
+  );
+  root.append(
+    field(
+      "crew motion",
+      choose(MOTION, read("motion.crew", "auto"), (v) => store("motion.crew", v))
+    )
+  );
+  root.append(
+    el("div", {
+      class: "hint",
+      text: "whether the crew walks the floor, chats and fetches coffee. following the system"
+        + " parks them whenever Windows or macOS asks for reduced motion, which is easy to have"
+        + " on without meaning to",
     })
   );
 }

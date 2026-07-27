@@ -16,6 +16,7 @@ export const DEFAULTS = {
   "limits.enabled": true,
   "limits.refreshSeconds": 1800,
   "lowSpec": false,
+  "motion.crew": "auto",
   "chatter.enabled": true,
   "chatter.volume": 0.12,
   "thoughts.enabled": true,

@@ -30,6 +30,7 @@ A missing file reads as empty rather than failing, so a fresh studio needs no se
 | `limits.refreshSeconds` | 1800 \| 300 \| 60 | how often |
 | `music.enabled` `.folder` `.track` `.volume` `.shuffle` | | the floor's music |
 | `lowSpec` | bool | consumed by the 3D scene |
+| `motion.crew` | `auto` \| `on` \| `off` | whether the crew walks the floor |
 | `chatter.*`, `thoughts.*`, `run.stepConfirm` | | owned by other panels; listed here because they share the file |
 
 Empty strings and whitespace count as **unset**, not as a value. This is what lets the UI offer a single "inherit" option in every select without needing a separate delete verb.
@@ -279,3 +280,7 @@ When a spawn fails, the message names the provider and the model — `Seat::desc
 ## Low spec
 
 `lowSpec` is a plain boolean, described in the panel as dropping the heavy parts of the 3D floor so an older machine keeps a steady frame rate. The scene consumes it ([12](12-visual-workspace.md)); this document only owns the key.
+
+## Crew motion
+
+`motion.crew` is three-valued rather than a boolean, because the interesting state is *not having chosen*. On `auto`, the default, the floor follows `prefers-reduced-motion` and parks the crew at their desks whenever the operating system asks for reduced motion. That is the right default and the wrong lock: Windows reports reduced motion whenever "animation effects" is off, which is a display preference many machines have off without anyone having asked for a still office. `on` and `off` are the explicit answers, and once one is stored the system preference stops being consulted. `perf.js` owns the resolution and publishes it through `onMotion`, so the floor picks up a change without a reload.

@@ -47,6 +47,7 @@ const SOFTWARE = /swiftshader|basic render|llvmpipe|software|microsoft basic/i;
 
 const tierTaps = new Set();
 const gpuTaps = new Set();
+const motionTaps = new Set();
 const samples = [];
 let cursor = 0;
 let counted = 0;
@@ -62,13 +63,29 @@ export function tier() {
   return budget().name;
 }
 
-export function reducedMotion() {
+export function osReducedMotion() {
   if (typeof matchMedia !== "function") return false;
   try {
     return matchMedia("(prefers-reduced-motion: reduce)").matches;
   } catch (err) {
     return false;
   }
+}
+
+export function crewMoves() {
+  const want = settings.get("motion.crew", "auto");
+  if (want === "on") return true;
+  if (want === "off") return false;
+  return !osReducedMotion();
+}
+
+export function reducedMotion() {
+  return !crewMoves();
+}
+
+export function onMotion(fn) {
+  motionTaps.add(fn);
+  return () => motionTaps.delete(fn);
 }
 
 export function onTier(fn) {
@@ -94,6 +111,7 @@ function fanout(taps, arg) {
 settings.onChange((key) => {
   if (key === null || key === "lowSpec") fanout(tierTaps, budget());
   if (key === null || key === "gpu.acceleration") fanout(gpuTaps, gpuNeedsReload());
+  if (key === null || key === "motion.crew") fanout(motionTaps, crewMoves());
 });
 
 export function sampleFrame(ms) {
