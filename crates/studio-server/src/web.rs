@@ -5,7 +5,7 @@ use axum::Router;
 
 use crate::AppState;
 
-pub const MODULES: [(&str, &str); 10] = [
+pub const MODULES: [(&str, &str); 11] = [
     ("bus.js", include_str!("../web/bus.js")),
     ("panels.js", include_str!("../web/panels.js")),
     ("settings.js", include_str!("../web/settings.js")),
@@ -16,6 +16,7 @@ pub const MODULES: [(&str, &str); 10] = [
     ("chatter.js", include_str!("../web/chatter.js")),
     ("avatar.js", include_str!("../web/avatar.js")),
     ("perf.js", include_str!("../web/perf.js")),
+    ("glow.js", include_str!("../web/glow.js")),
 ];
 
 pub const IMAGES: [(&str, &[u8]); 2] = [

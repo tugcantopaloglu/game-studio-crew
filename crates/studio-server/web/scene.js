@@ -20,6 +20,11 @@ const SIDES = ["-z", "+z", "-x", "+x"];
 
 const lamberts = new Map();
 const basics = new Map();
+const glowing = new Set();
+
+export function isGlow(material) {
+  return glowing.has(material);
+}
 
 function lambert(color) {
   let m = lamberts.get(color);
@@ -38,6 +43,7 @@ function basic(color, opacity) {
       ? new THREE.MeshBasicMaterial({ color, toneMapped: false })
       : new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false, toneMapped: false });
     basics.set(key, m);
+    glowing.add(m);
   }
   return m;
 }

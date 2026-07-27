@@ -454,7 +454,8 @@
 
 <script type="module">
 import * as THREE from "/vendor/three.module.js";
-import { buildOffice, wanderStep, avatarPose, mingle, refreshScreens, paintScreens, setMotion, seatAtTable, leaveTable, showBoard, boardSays, boardDecided, hideBoard, LEVEL_H } from "/scene.js";
+import { createGlow, GLOW_LAYER } from "/glow.js";
+import { buildOffice, isGlow, wanderStep, avatarPose, mingle, refreshScreens, paintScreens, setMotion, seatAtTable, leaveTable, showBoard, boardSays, boardDecided, hideBoard, LEVEL_H } from "/scene.js";
 import { pushEvent, setProject, onProject, setStage, settings } from "/bus.js";
 import { startChatter, chatterSays } from "/chatter.js";
 import { budget, reducedMotion, onMotion, sampleFrame, frameP95, hardwareHints, shouldOfferLowSpec, noteOffered, reasonForOffer, onTier, createRenderer, describeRenderer, gpuNeedsReload, gpuWanted, onGpu } from "/perf.js";
@@ -479,6 +480,8 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.35;
 stage.appendChild(renderer.domElement);
+
+const glow = tier.postFX ? createGlow(renderer) : null;
 
 const scene = new THREE.Scene();
 scene.background = skyGradient();
@@ -885,6 +888,7 @@ grip.addEventListener("pointerdown", (e) => {
 function resize() {
   const w = stage.clientWidth, h = stage.clientHeight;
   renderer.setSize(w, h);
+  if (glow) glow.resize(w * renderer.getPixelRatio(), h * renderer.getPixelRatio());
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   updateCamera();
@@ -1207,7 +1211,8 @@ function animate() {
     updateCamera();
   }
 
-  renderer.render(scene, camera);
+  if (glow) glow.render(scene, camera);
+  else renderer.render(scene, camera);
   sampleFrame(performance.now() - began);
   if (shouldOfferLowSpec(hints)) offerLowSpec();
   if (++sinceGpuLine >= 120) { sinceGpuLine = 0; renderGpuLine(); }
@@ -1814,6 +1819,7 @@ fetch("/floor").then((r) => r.json()).then((f) => {
   miniFloor = f;
   fitShadowToFloor(f);
   const built = buildOffice(f, scene);
+  if (glow) scene.traverse((o) => { if (o.isMesh && isGlow(o.material)) o.layers.enable(GLOW_LAYER); });
   avatars = built.avatars;
   ambient = built.ambient || [];
   levelGroups = built.levels || [];
