@@ -452,6 +452,16 @@ function insideRect(rect, x, y) {
   return x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
 }
 
+function tileNoise(x, z) {
+  const n = Math.sin(x * 127.1 + z * 311.7) * 43758.5453;
+  return n - Math.floor(n);
+}
+
+function loose(raw, parent, x, z) {
+  const turn = (tileNoise(x * 3.7 + 11.3, z * 5.9 + 7.1) - 0.5) * 0.5;
+  parent.add(place(raw, x, 0.2, z, turn).group);
+}
+
 function checkerFloor(parent, room, cx, cz, tint, hole = null) {
   const mesh = new THREE.InstancedMesh(tileGeo, vertexLit, room.w * room.h);
   mesh.receiveShadow = true;
@@ -463,9 +473,11 @@ function checkerFloor(parent, room, cx, cz, tint, hole = null) {
       if (hole && insideRect(hole, room.x + ix, room.y + iz)) continue;
       m.makeTranslation(room.x - cx + ix + 0.5, 0.1, room.y - cz + iz + 0.5);
       mesh.setMatrixAt(i, m);
-      mesh.setColorAt(i, c.setHex((ix + iz) % 2
-        ? shade(0x39414f, tint, 0.13)
-        : shade(0x323947, tint, 0.09)));
+      c.setHex((ix + iz) % 2
+        ? shade(0x373f4d, tint, 0.12)
+        : shade(0x343c49, tint, 0.10));
+      c.multiplyScalar(0.955 + tileNoise(room.x + ix, room.y + iz) * 0.09);
+      mesh.setColorAt(i, c);
       i++;
     }
   mesh.count = i;
@@ -484,8 +496,8 @@ function roomProps(parent, room, cx, cz, tint) {
   const far = rx + room.w - 0.9;
   const pois = [];
 
-  parent.add(place(buildPlant(), rx + 0.75, 0.2, rz + room.h - 0.8).group);
-  parent.add(place(buildPlant(), far, 0.2, rz + room.h - 0.8).group);
+  loose(buildPlant(), parent, rx + 0.75, rz + room.h - 0.8);
+  loose(buildPlant(), parent, far, rz + room.h - 0.8);
   parent.add(place(buildWaterCooler(), rx + 0.7, 0.2, back).group);
   pois.push(poi(rx + 0.7, back + 0.6, rx + 0.7, back, "\u{1F4A7}"));
 
@@ -513,7 +525,7 @@ function roomProps(parent, room, cx, cz, tint) {
       parent.add(place(buildWhiteboard(tint), rx + room.w * 0.3, 1.05, back).group);
       pois.push(poi(rx + room.w * 0.3, back + 0.7, rx + room.w * 0.3, back, "\u{1F4A1}"));
       parent.add(place(buildServerRack(), far, 0.2, back).group);
-      parent.add(place(buildBoxes(), rx + 1.2, 0.2, rz + room.h - 1.2).group);
+      loose(buildBoxes(), parent, rx + 1.2, rz + room.h - 1.2);
       break;
     case "art":
       parent.add(place(buildEasel(tint), rx + room.w * 0.3, 0.2, rz + room.h - 1.6).group);
@@ -530,7 +542,7 @@ function roomProps(parent, room, cx, cz, tint) {
       parent.add(place(buildTestBench(tint), rx + room.w * 0.35, 0.2, back).group);
       pois.push(poi(rx + room.w * 0.35, back + 0.65, rx + room.w * 0.35, back, "\u{1F3AE}"));
       parent.add(place(buildTestBench(tint), rx + room.w * 0.62, 0.2, back).group);
-      parent.add(place(buildBoxes(), far, 0.2, rz + room.h - 1.2).group);
+      loose(buildBoxes(), parent, far, rz + room.h - 1.2);
       break;
     case "infra":
       for (let i = 0; i < 5; i++) {
@@ -538,7 +550,7 @@ function roomProps(parent, room, cx, cz, tint) {
       }
       pois.push(poi(rx + 2.2 + 1.24, back + 0.6, rx + 2.2 + 1.24, back, "\u{1F5A5}"));
       parent.add(place(buildServerRack(), far, 0.2, rz + room.h - 1.3).group);
-      parent.add(place(buildBoxes(), rx + 1.1, 0.2, rz + room.h - 1.2).group);
+      loose(buildBoxes(), parent, rx + 1.1, rz + room.h - 1.2);
       break;
   }
   return pois;
@@ -558,7 +570,9 @@ function buildLobby(parent, lobby, cx, cz, tier) {
       m.makeTranslation(rx + ix + 0.5, 0.1, rz + iz + 0.5);
       mesh.setMatrixAt(i, m);
       const ring = Math.min(ix, iz, lobby.w - 1 - ix, lobby.h - 1 - iz);
-      mesh.setColorAt(i, c.setHex(ring === 0 ? 0x3f4757 : (ix + iz) % 2 ? 0x465062 : 0x404859));
+      c.setHex(ring === 0 ? 0x424b5d : (ix + iz) % 2 ? 0x454d60 : 0x424a5a);
+      c.multiplyScalar(0.955 + tileNoise(lobby.x + ix, lobby.y + iz) * 0.09);
+      mesh.setColorAt(i, c);
       i++;
     }
   mesh.instanceMatrix.needsUpdate = true;
@@ -579,11 +593,11 @@ function buildLobby(parent, lobby, cx, cz, tier) {
     [rx + 0.9, rz + lobby.h - 0.9], [rx + lobby.w - 0.9, rz + lobby.h - 0.9],
     [mid.x + 3.6, mid.z], [mid.x - 4.4, mid.z + 1.9],
   ]) {
-    parent.add(place(buildPlant(), px, 0.2, pz).group);
+    loose(buildPlant(), parent, px, pz);
   }
 
   parent.add(place(buildWaterCooler(), mid.x + 4.6, 0.2, rz + 1.0).group);
-  parent.add(place(buildBoxes(), rx + lobby.w - 1.6, 0.2, rz + lobby.h - 1.9).group);
+  loose(buildBoxes(), parent, rx + lobby.w - 1.6, rz + lobby.h - 1.9);
 
   if (tier.roomLights) {
     const lamp = new THREE.PointLight(0xffe9c8, 46, 24, 1.6);
@@ -599,12 +613,13 @@ function buildLobby(parent, lobby, cx, cz, tier) {
   return pois;
 }
 
-function buildMeetingRoom(parent, room, cx, cz, tier) {
+function buildMeetingRoom(parent, room, floor, cx, cz, tier) {
   const tint = 0x6fa8d1;
   const mx = room.x - cx + room.w / 2, mz = room.y - cz + room.h / 2;
+  const low = partitionSides(room, floor).filter((k) => k !== "-z" && k !== "-x");
 
   checkerFloor(parent, room, cx, cz, tint);
-  buildWalls(parent, room, cx, cz, "-x", "-x", tint);
+  buildWalls(parent, room, cx, cz, "-x", "-x", tint, [], low);
   neonEdge(parent, room, cx, cz, tint);
   parent.add(place(buildMeetingTable(tint), mx, 0.2, mz).group);
 
@@ -614,8 +629,8 @@ function buildMeetingRoom(parent, room, cx, cz, tier) {
     parent.add(place(buildChair(0x3a4152), px, 0.2, pz, Math.atan2(mx - px, mz - pz)).group);
   }
   parent.add(place(buildWhiteboard(tint), mx, 1.05, room.y - cz + 0.62).group);
-  parent.add(place(buildPlant(), room.x - cx + 0.8, 0.2, room.y - cz + room.h - 0.8).group);
-  parent.add(place(buildPlant(), room.x - cx + room.w - 0.9, 0.2, room.y - cz + 0.9).group);
+  loose(buildPlant(), parent, room.x - cx + 0.8, room.y - cz + room.h - 0.8);
+  loose(buildPlant(), parent, room.x - cx + room.w - 0.9, room.y - cz + 0.9);
 
   if (tier.roomLights) {
     const lamp = new THREE.PointLight(0xfff0d8, 34, 18, 1.7);
@@ -649,8 +664,8 @@ function buildExtraRoom(parent, room, floor, cx, cz, hole = null) {
       parent.add(place(buildSofa(0x3ce0c8), mx - 1.2, 0.2, mz - 1.1).group);
       parent.add(place(buildMeetingTable(tint), mx + 2.2, 0.2, mz).group);
       parent.add(place(buildWaterCooler(), far, 0.2, back).group);
-      parent.add(place(buildPlant(), rx + 0.75, 0.2, rz + room.h - 0.8).group);
-      parent.add(place(buildPlant(), far, 0.2, rz + room.h - 0.8).group);
+      loose(buildPlant(), parent, rx + 0.75, rz + room.h - 0.8);
+      loose(buildPlant(), parent, far, rz + room.h - 0.8);
       const sign = makeLabel("BREAK ROOM", tint, 1.1);
       sign.position.set(mx, 0.03, rz + room.h - 1.3);
       sign.rotation.x = -Math.PI / 2;
@@ -665,8 +680,8 @@ function buildExtraRoom(parent, room, floor, cx, cz, hole = null) {
       parent.add(place(buildShelf(), rx + 3.4, 0.2, back).group);
       parent.add(place(buildCabinet(tint), far, 0.2, back).group);
       parent.add(place(buildServerRack(), far, 0.2, rz + room.h - 1.3).group);
-      parent.add(place(buildBoxes(), rx + 1.2, 0.2, rz + room.h - 1.2).group);
-      parent.add(place(buildBoxes(), mx, 0.2, mz).group);
+      loose(buildBoxes(), parent, rx + 1.2, rz + room.h - 1.2);
+      loose(buildBoxes(), parent, mx, mz);
       const sign = makeLabel("ARCHIVE", tint, 1.1);
       sign.position.set(mx, 0.03, rz + room.h - 1.3);
       sign.rotation.x = -Math.PI / 2;
@@ -678,8 +693,8 @@ function buildExtraRoom(parent, room, floor, cx, cz, hole = null) {
       checkerFloor(parent, room, cx, cz, tint, hole);
       parent.add(place(buildSofa(0xffc84a), mx + 2.6, 0.2, mz - 0.9, Math.PI).group);
       parent.add(place(buildSofa(0x6fa8d1), mx + 2.6, 0.2, mz + 1.1).group);
-      parent.add(place(buildPlant(), rx + 0.9, 0.2, rz + 0.9).group);
-      parent.add(place(buildPlant(), rx + room.w - 0.9, 0.2, rz + room.h - 0.9).group);
+      loose(buildPlant(), parent, rx + 0.9, rz + 0.9);
+      loose(buildPlant(), parent, rx + room.w - 0.9, rz + room.h - 0.9);
       parent.add(place(buildWaterCooler(), mx + 5.4, 0.2, rz + 0.9).group);
       const sign = makeLabel("STUDIO LOFT", tint, 1.3);
       sign.position.set(mx, 0.03, rz + 2.1);
@@ -763,6 +778,19 @@ function buildAtriumRail(parent, a, cx, cz) {
     cap.position.set(px, 0.1 + kerb + pane + 0.04, pz);
     cap.castShadow = true;
     parent.add(cap);
+  }
+
+  const drop = 0.7, lip = 0.12;
+  const skirt = [
+    [(x0 + x1) / 2, z0 + lip / 2, a.w + lip * 2, lip],
+    [(x0 + x1) / 2, z1 - lip / 2, a.w + lip * 2, lip],
+    [x0 + lip / 2, (z0 + z1) / 2, lip, a.h],
+    [x1 - lip / 2, (z0 + z1) / 2, lip, a.h],
+  ];
+  for (const [px, pz, ew, ed] of skirt) {
+    const face = new THREE.Mesh(new THREE.BoxGeometry(ew, drop, ed), lambert(0x171c25));
+    face.position.set(px, -0.1 - drop / 2, pz);
+    parent.add(face);
   }
 }
 
@@ -864,7 +892,7 @@ export function buildOffice(floor, scene) {
   }
 
   const lobbyPois = floor.lobby ? buildLobby(well, floor.lobby, cx, cz, tier) : [];
-  const meetingDoor = floor.meeting ? buildMeetingRoom(levels[0], floor.meeting, cx, cz, tier) : null;
+  const meetingDoor = floor.meeting ? buildMeetingRoom(levels[0], floor.meeting, floor, cx, cz, tier) : null;
   for (const extra of floor.extras || []) {
     buildExtraRoom(levels[extra.level || 0], extra, floor, cx, cz, floor.atrium);
   }
