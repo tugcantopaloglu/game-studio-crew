@@ -288,6 +288,8 @@
   #gpu { padding: 0 16px 11px; color: var(--faint); font-size: 11px;
     display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   #gpu span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #gpu em { font-style: normal; color: var(--dim); font: 600 10px var(--sans); letter-spacing: .08em;
+    text-transform: uppercase; white-space: nowrap; }
   #gpu button { cursor: pointer; font: 600 10px var(--sans); letter-spacing: .08em;
     text-transform: uppercase; border-radius: 6px; padding: 3px 8px; white-space: nowrap;
     border: 1px solid var(--line-2); color: var(--dim); background: var(--field); }
@@ -1008,11 +1010,7 @@ function renderGpuLine() {
   const timing = p95 > 0 ? `  ·  ${p95.toFixed(1)}ms p95` : "";
   gpuLine.innerHTML =
     `<span>${esc(describeRenderer(hints) + timing)}</span>` +
-    `<button id="gpu-toggle">turn ${on ? "off" : "on"}</button>`;
-  document.getElementById("gpu-toggle").onclick = () => {
-    settings.set("gpu.acceleration", !gpuWanted());
-    settings.save();
-  };
+    `<em>${on ? "accelerated" : "low power"}</em>`;
 }
 
 renderGpuLine();
