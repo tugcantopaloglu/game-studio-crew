@@ -29,7 +29,10 @@ pub fn lookup(name: &str) -> Option<&'static str> {
 
 fn js(body: &'static str) -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, crate::REVALIDATE),
+        ],
         body,
     )
 }

@@ -357,16 +357,36 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+pub const REVALIDATE: &str = "no-cache";
+
 async fn index() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], FLOOR_HTML)
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, REVALIDATE),
+        ],
+        FLOOR_HTML,
+    )
 }
 
 async fn voxel_js() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], VOXEL_JS)
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, REVALIDATE),
+        ],
+        VOXEL_JS,
+    )
 }
 
 async fn scene_js() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], SCENE_JS)
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, REVALIDATE),
+        ],
+        SCENE_JS,
+    )
 }
 
 async fn three_js() -> impl IntoResponse {
@@ -1300,6 +1320,42 @@ mod tests {
 
     fn ev(seq: u64, actor: &str, ty: EventType) -> Envelope {
         Envelope::new(seq, "t", "run_1", actor, Scene::daemon(), ty, serde_json::json!({}))
+    }
+
+    async fn cache_header_for(uri: &str) -> String {
+        use tower::ServiceExt;
+        let dir = std::env::temp_dir().join("studio-cache-header");
+        let _ = std::fs::create_dir_all(&dir);
+        let store = Arc::new(Store::open(dir.join("s.db")).unwrap());
+        let req = axum::http::Request::builder()
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let res = router(AppState::new(store)).oneshot(req).await.unwrap();
+        res.headers()
+            .get(header::CACHE_CONTROL)
+            .map(|v| v.to_str().unwrap_or("").to_string())
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn the_floor_and_its_modules_are_revalidated_rather_than_cached() {
+        for uri in ["/", "/scene.js", "/voxel.js", "/bus.js", "/perf.js"] {
+            assert_eq!(
+                cache_header_for(uri).await,
+                REVALIDATE,
+                "{uri} is served without asking the browser to check back, so a rebuilt \
+                 floor keeps serving the old one out of the disk cache"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_vendored_engine_is_still_cached_hard() {
+        assert!(
+            cache_header_for("/vendor/three.module.js").await.contains("max-age"),
+            "three.js never changes between builds and should not be refetched"
+        );
     }
 
     async fn post_with_origin(origin: Option<&str>) -> StatusCode {

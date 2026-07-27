@@ -82,6 +82,8 @@ function rand() {
   return rng / 4294967296;
 }
 
+const shadeSpots = [];
+
 function place(raw, x, y, z, rotY = 0) {
   const voxels = shell(raw);
   const mesh = voxelMesh(voxels);
@@ -93,7 +95,62 @@ function place(raw, x, y, z, rotY = 0) {
   g.add(mesh);
   g.position.set(x, y, z);
   g.rotation.y = rotY;
+  if (y < 0.4) shadeSpots.push({ group: g, reach: Math.max(w, d) * VOX });
   return { group: g, mesh };
+}
+
+let shadeTex = null;
+function contactTexture() {
+  if (shadeTex) return shadeTex;
+  const c = document.createElement("canvas");
+  c.width = 64;
+  c.height = 64;
+  const x = c.getContext("2d");
+  const g = x.createRadialGradient(32, 32, 1, 32, 32, 31);
+  g.addColorStop(0, "rgba(0,0,0,0.72)");
+  g.addColorStop(0.45, "rgba(0,0,0,0.38)");
+  g.addColorStop(1, "rgba(0,0,0,0)");
+  x.fillStyle = g;
+  x.fillRect(0, 0, 64, 64);
+  shadeTex = new THREE.CanvasTexture(c);
+  shadeTex.colorSpace = THREE.SRGBColorSpace;
+  return shadeTex;
+}
+
+const SHADE_PLANE = new THREE.PlaneGeometry(1, 1);
+const FLAT = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
+
+function buildContactShade(levels) {
+  const byLevel = levels.map(() => []);
+  const at = new THREE.Vector3();
+  for (const spot of shadeSpots) {
+    spot.group.getWorldPosition(at);
+    const level = Math.round(at.y / LEVEL_H);
+    if (!byLevel[level]) continue;
+    byLevel[level].push({ x: at.x, z: at.z, reach: spot.reach });
+  }
+
+  const mat = new THREE.MeshBasicMaterial({
+    map: contactTexture(), transparent: true, depthWrite: false, toneMapped: false,
+  });
+  const m = new THREE.Matrix4();
+  const pos = new THREE.Vector3();
+  const size = new THREE.Vector3();
+
+  byLevel.forEach((spots, level) => {
+    if (!spots.length) return;
+    const pool = new THREE.InstancedMesh(SHADE_PLANE, mat, spots.length);
+    pool.renderOrder = 1;
+    spots.forEach((s, i) => {
+      const r = s.reach * 1.65;
+      pos.set(s.x, 0.226, s.z);
+      size.set(r, r, 1);
+      m.compose(pos, FLAT, size);
+      pool.setMatrixAt(i, m);
+    });
+    pool.instanceMatrix.needsUpdate = true;
+    levels[level].add(pool);
+  });
 }
 
 function drawScreen(x, style, tint, data, crew) {
@@ -916,6 +973,7 @@ function buildElevatorStop(parent, rect, cx, cz) {
 
 export function buildOffice(floor, scene) {
   rng = 12345;
+  shadeSpots.length = 0;
   screens.length = 0;
   screenByKey.clear();
   screenCursor = 0;
@@ -1203,6 +1261,8 @@ export function buildOffice(floor, scene) {
   for (const a of ambient) a.lobbyPois = lobbyPois;
   buildBoard(levels[0], table);
 
+  scene.updateMatrixWorld(true);
+  buildContactShade(levels);
   scene.updateMatrixWorld(true);
   scene.matrixAutoUpdate = false;
   world.matrixAutoUpdate = false;
