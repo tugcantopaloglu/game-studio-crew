@@ -258,6 +258,7 @@
   #floors button:hover { color: var(--text); }
   #floors button.on { background: rgba(74,217,145,.12);
     border-color: rgba(74,217,145,.4); color: var(--running); }
+  #stage:has(#floors:not([hidden])) #room { top: 136px; }
 
   #done { position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
     display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 14px;
@@ -349,6 +350,7 @@
     #minimap, #shot { display: none !important; }
     #done { max-width: calc(100% - 28px); flex-wrap: wrap; }
     #room { right: 14px; width: auto; top: 92px; max-height: calc(100% - 150px); }
+    #stage:has(#floors:not([hidden])) #room { top: 128px; max-height: calc(100% - 186px); }
   }
 </style>
 </head>
