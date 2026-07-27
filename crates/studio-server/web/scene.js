@@ -443,27 +443,45 @@ export function screenCount() {
   return screens.length;
 }
 
-function neonEdge(parent, room, cx, cz, tint) {
-  const mat = basic(tint);
+const coves = new Map();
+
+function cove(tint) {
+  let m = coves.get(tint);
+  if (!m) {
+    m = new THREE.MeshBasicMaterial({
+      color: shade(0x2a3038, tint, 0.55),
+      transparent: true,
+      opacity: 0.42,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    coves.set(tint, m);
+  }
+  return m;
+}
+
+function roomTrim(parent, room, cx, cz, tint) {
+  const board = lambert(shade(0x252b37, tint, 0.24));
   const x0 = room.x - cx, z0 = room.y - cz;
   const x1 = x0 + room.w, z1 = z0 + room.h;
-  const t = 0.16, y = 0.23, half = t / 2;
+  const t = 0.1, half = t / 2, h = 0.17, spill = 0.5;
   const segs = [
-    [(x0 + x1) / 2, z0 + half, room.w, t],
-    [(x0 + x1) / 2, z1 - half, room.w, t],
-    [x0 + half, (z0 + z1) / 2, t, room.h - t * 2],
-    [x1 - half, (z0 + z1) / 2, t, room.h - t * 2],
+    [(x0 + x1) / 2, z0 + half, room.w, t, 0, 1],
+    [(x0 + x1) / 2, z1 - half, room.w, t, 0, -1],
+    [x0 + half, (z0 + z1) / 2, t, room.h - t * 2, 1, 0],
+    [x1 - half, (z0 + z1) / 2, t, room.h - t * 2, -1, 0],
   ];
-  for (const [px, pz, w, d] of segs) {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w, 0.1, d), mat);
-    m.position.set(px, y, pz);
+  for (const [px, pz, w, d, ix, iz] of segs) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), board);
+    m.position.set(px, 0.2 + h / 2, pz);
+    m.receiveShadow = true;
     parent.add(m);
-    const halo = new THREE.Mesh(
-      new THREE.BoxGeometry(w + 0.5, 0.02, d + 0.5),
-      basic(tint, 0.16)
+    const wash = new THREE.Mesh(
+      new THREE.BoxGeometry(w + spill * Math.abs(ix), 0.008, d + spill * Math.abs(iz)),
+      cove(tint)
     );
-    halo.position.set(px, 0.215, pz);
-    parent.add(halo);
+    wash.position.set(px + (ix * spill) / 2, 0.204, pz + (iz * spill) / 2);
+    parent.add(wash);
   }
 }
 
@@ -848,7 +866,7 @@ function buildMeetingRoom(parent, room, floor, cx, cz, tier) {
 
   checkerFloor(parent, room, cx, cz, tint);
   buildWalls(parent, room, cx, cz, "-x", "-x", tint, [], low);
-  neonEdge(parent, room, cx, cz, tint);
+  roomTrim(parent, room, cx, cz, tint);
   parent.add(place(buildMeetingTable(tint), mx, 0.2, mz).group);
 
   for (let i = 0; i < 6; i++) {
@@ -886,7 +904,7 @@ function buildExtraRoom(parent, room, floor, cx, cz, hole = null) {
       const tint = 0xe0a55a;
       checkerFloor(parent, room, cx, cz, tint);
       buildWalls(parent, room, cx, cz, doorSideFor(room, cx, cz), null, tint, [], low);
-      neonEdge(parent, room, cx, cz, tint);
+      roomTrim(parent, room, cx, cz, tint);
       rug(parent, mx - 1.2, mz - 0.1, 5.2, 3.6, tint);
       for (let i = 0; i < 3; i++) {
         const tx = rx + 3.0 + i * 2.6, tz = rz + room.h - 2.6;
@@ -1171,7 +1189,7 @@ export function buildOffice(floor, scene) {
     const low = partitionSides(room, floor).filter((k) => k !== glass);
     checkerFloor(rg, room, cx, cz, tint);
     buildWalls(rg, room, cx, cz, door, glass === door ? null : glass, tint, open, low);
-    neonEdge(rg, room, cx, cz, tint);
+    roomTrim(rg, room, cx, cz, tint);
     wallScreens(rg, room, cx, cz, tint, door, glass, open.concat(low));
     wallPosters(rg, room, cx, cz, tint, door, glass, open.concat(low));
     poisByDept.set(room.department, roomProps(rg, room, cx, cz, tint));

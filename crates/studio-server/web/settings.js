@@ -39,11 +39,6 @@ function read(key, fallback) {
   return value === undefined || value === null ? fallback : value;
 }
 
-function section(title, hint) {
-  const box = el("div", { class: "sec", text: title });
-  return hint ? [box, el("div", { class: "hint", text: hint })] : [box];
-}
-
 function choose(options, value, onPick) {
   const node = el("select", {
     onchange: (e) => onPick(e.target.value),
@@ -66,12 +61,68 @@ function check(label, key, fallback, onToggle) {
   return el("label", { class: "check" }, input, el("span", { text: label }));
 }
 
-function field(label, node) {
-  return el("div", { class: "field" }, el("label", { text: label }), node);
+function field(label, node, revert) {
+  const control = revert ? el("div", { class: "ctl" }, node, revert) : node;
+  return el("div", { class: "field" }, el("label", { text: label }), control);
 }
 
 function mark(ok) {
   return el("span", { class: ok ? "ok" : "bad", text: ok ? "yes" : "no" });
+}
+
+const OPEN_KEY = "studio.settings.open";
+const summaries = [];
+
+function openGroups() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(OPEN_KEY) || "[]"));
+  } catch (err) {
+    return new Set();
+  }
+}
+
+function rememberGroup(id, on) {
+  const open = openGroups();
+  if (on) open.add(id);
+  else open.delete(id);
+  try {
+    localStorage.setItem(OPEN_KEY, JSON.stringify([...open]));
+  } catch (err) {
+    return;
+  }
+}
+
+function band(root, title, blurb) {
+  root.append(el("div", { class: "band" }, el("b", { text: title }), el("span", { text: blurb })));
+}
+
+function group(root, id, title, summary, build) {
+  const box = el("details", { class: "grp" });
+  box.open = openGroups().has(id);
+  const tail = el("span", { class: "grp-sum", text: summary() });
+  box.append(el("summary", {}, el("span", { class: "grp-name", text: title }), tail));
+  const body = el("div", { class: "grp-body" });
+  box.append(body);
+  box.addEventListener("toggle", () => rememberGroup(id, box.open));
+  summaries.push(() => { tail.textContent = summary(); });
+  build(body);
+  root.append(box);
+  return body;
+}
+
+function reset(key, fallback, after) {
+  const btn = el("button", {
+    class: "revert",
+    title: "back to the shipped default",
+    text: "↺",
+    onclick: () => {
+      store(key, fallback);
+      if (after) after();
+      else redraw();
+    },
+  });
+  btn.disabled = read(key, fallback) === fallback;
+  return btn;
 }
 
 let catalogue = { providers: [], probe: {} };
@@ -191,17 +242,31 @@ function whenIsThat(unixSeconds) {
   return `${clock} (in ${Math.floor(minutes / 60)}h ${minutes % 60}m)`;
 }
 
-function crewSection(root, roles, providers) {
-  const box = el("div", { class: "sec", text: "crew" });
-  const hint = el("div", {
-    class: "hint",
-    text: "the model each tier runs on, and any single seat you want somewhere else",
-  });
-  root.append(box, hint);
-
+function providerChoices(providers) {
   const installed = providers.filter((p) => p.installed);
-  const providerOptions = installed.map((p) => [p.id, p.title]);
-  if (!providerOptions.length) providerOptions.push(["claude", "Claude Code"]);
+  const options = installed.map((p) => [p.id, p.title]);
+  if (!options.length) options.push(["claude", "Claude Code"]);
+  return { installed, options };
+}
+
+function seatsMoved(roles) {
+  let moved = 0;
+  for (const r of roles) {
+    if (read(`models.role.${r.id}`, "") || read(`effort.role.${r.id}`, "")
+      || read(`provider.role.${r.id}`, "")) moved++;
+  }
+  return moved;
+}
+
+function crewSection(root, roles, providers) {
+  root.append(
+    el("div", {
+      class: "hint",
+      text: "the model each tier runs on; every seat follows its tier unless you move it",
+    })
+  );
+
+  const { options: providerOptions } = providerChoices(providers);
 
   root.append(
     field(
@@ -223,17 +288,23 @@ function crewSection(root, roles, providers) {
           [["", "shipped effort"]].concat(EFFORTS.map((e) => [e, e])),
           read(`effort.tier${tier}`, ""),
           (v) => store(`effort.tier${tier}`, v)
-        )
+        ),
+        reset(`effort.tier${tier}`, "")
       )
     );
   }
+}
 
-  const seats = el("div", { class: "card" });
-  seats.append(el("b", { text: "one seat at a time" }));
-  seats.append(
+function seatsSection(root, roles, providers) {
+  const { installed, options: providerOptions } = providerChoices(providers);
+  const studioProvider = read("provider", "claude");
+  const seats = el("div");
+
+  root.append(
     el("div", {
-      class: "k",
-      text: "blank means the seat follows its tier. the model is part of the prompt cache key, so moving a seat mints it a fresh prefix.",
+      class: "hint",
+      text: "blank means the seat follows its tier. the model is part of the prompt cache key,"
+        + " so moving a seat mints it a fresh prefix.",
     })
   );
 
@@ -274,7 +345,7 @@ function crewSection(root, roles, providers) {
 }
 
 function providerSection(root, providers) {
-  root.append(...section("coding CLIs", "only the ones on your PATH can be chosen"));
+  root.append(el("div", { class: "hint", text: "only the ones on your PATH can be chosen" }));
 
   for (const p of providers) {
     const card = el("div", { class: "card" });
@@ -431,10 +502,10 @@ function paintModels() {
   const root = panes.models;
   if (!root) return;
   root.replaceChildren(
-    ...section(
-      "models",
-      "no CLI here has a subcommand that lists its models, so the studio checks them by asking one"
-    )
+    el("div", {
+      class: "hint",
+      text: "no CLI here has a subcommand that lists its models, so the studio checks them by asking one",
+    })
   );
   for (const row of catalogue.providers) {
     root.append(providerModelsCard(row));
@@ -442,8 +513,6 @@ function paintModels() {
 }
 
 function limitsSection(root) {
-  root.append(...section("claude subscription"));
-
   root.append(check("keep an eye on the limit windows", "limits.enabled", true, () => redraw()));
   root.append(
     field(
@@ -526,7 +595,7 @@ function audioElement() {
 }
 
 function musicSection(root) {
-  root.append(...section("music", "drop audio files in a folder and the studio will find them"));
+  root.append(el("div", { class: "hint", text: "drop audio files in a folder and the studio will find them" }));
 
   const audio = audioElement();
   const status = el("div", { class: "hint", text: "" });
@@ -727,7 +796,7 @@ function engineCard(row, repaint) {
 function enginesSection(root) {
   const paint = () => {
     root.replaceChildren(
-      ...section("engines", "what the studio compiles and runs the crew's work with")
+      el("div", { class: "hint", text: "what the studio compiles and runs the crew's work with" })
     );
     api("/engines")
       .then((rows) => {
@@ -740,12 +809,33 @@ function enginesSection(root) {
   paint();
 }
 
+function ceiling(root, label, key, fallback, step, hint) {
+  const box = el("input", {
+    type: "number",
+    min: "0",
+    step: String(step),
+    value: String(read(key, fallback) || fallback),
+    onchange: (e) => store(key, Number(e.target.value)),
+  });
+  const off = el("input", { type: "checkbox" });
+  off.checked = Number(read(key, fallback)) === 0;
+  box.disabled = off.checked;
+  off.onchange = () => {
+    box.disabled = off.checked;
+    store(key, off.checked ? 0 : Number(box.value) || fallback);
+  };
+
+  root.append(field(label, box));
+  root.append(el("label", { class: "check" }, off, el("span", { text: hint })));
+}
+
 function budgetSection(root) {
   root.append(
-    ...section(
-      "spend",
-      "what one run may cost before it stops and waits for you; a stopped run can be picked up again from the run panel"
-    )
+    el("div", {
+      class: "hint",
+      text: "what one run may cost before it stops and waits for you; a stopped run can be"
+        + " picked up again from the run panel",
+    })
   );
 
   root.append(
@@ -755,7 +845,8 @@ function budgetSection(root) {
         [["400000", "400k tokens"], ["1000000", "1M tokens"], ["", "never, just run"]],
         String(read("budget.askAbove", 400000)),
         (v) => store("budget.askAbove", v === "" ? "" : Number(v))
-      )
+      ),
+      reset("budget.askAbove", 400000)
     )
   );
   root.append(
@@ -766,36 +857,14 @@ function budgetSection(root) {
     })
   );
 
-  const money = el("input", {
-    type: "number",
-    min: "0",
-    step: "1",
-    value: String(read("budget.usd", 25)),
-    onchange: (e) => store("budget.usd", Number(e.target.value)),
-  });
-  root.append(field("dollars per run", money));
-  root.append(
-    el("div", { class: "hint", text: "0 means no dollar ceiling at all" })
-  );
-
-  const tokens = el("input", {
-    type: "number",
-    min: "0",
-    step: "10000",
-    value: String(read("budget.tokens", 0)),
-    onchange: (e) => store("budget.tokens", Number(e.target.value)),
-  });
-  root.append(field("billed tokens per run", tokens));
-  root.append(
-    el("div", {
-      class: "hint",
-      text: "0 means the plan's own declared budget, which is 120,000 tokens per step",
-    })
+  ceiling(root, "dollars per run", "budget.usd", 25, 1, "no dollar ceiling at all");
+  ceiling(
+    root, "billed tokens per run", "budget.tokens", 120000, 10000,
+    "use the plan's own declared budget, which is 120,000 tokens per step"
   );
 }
 
 function floorSection(root) {
-  root.append(...section("floor"));
   root.append(check("low spec mode", "lowSpec", false));
   root.append(
     el("div", {
@@ -803,10 +872,19 @@ function floorSection(root) {
       text: "drops the heavy parts of the 3D floor so an older machine keeps a steady frame rate",
     })
   );
+  root.append(check("hardware acceleration", "gpu.acceleration", true));
+  root.append(
+    el("div", {
+      class: "hint",
+      text: "turning this off asks the browser for a low-power context, which is worth trying if"
+        + " the floor stutters or the fans spin up. it takes a reload either way",
+    })
+  );
   root.append(
     field(
       "crew motion",
-      choose(MOTION, read("motion.crew", "auto"), (v) => store("motion.crew", v))
+      choose(MOTION, read("motion.crew", "auto"), (v) => store("motion.crew", v)),
+      reset("motion.crew", "auto")
     )
   );
   root.append(
@@ -819,8 +897,33 @@ function floorSection(root) {
   );
 }
 
+function ambienceSection(root) {
+  root.append(check("office chatter", "chatter.enabled", true));
+  root.append(
+    el("div", {
+      class: "hint",
+      text: "the room tone the floor plays under everything. this had no control at all until"
+        + " now — the only way to silence it was to edit local storage by hand",
+    })
+  );
+
+  const vol = el("input", {
+    type: "range", min: "0", max: "1", step: "0.01",
+    value: String(read("chatter.volume", 0.12)),
+    oninput: (e) => store("chatter.volume", Number(e.target.value)),
+  });
+  root.append(field("chatter volume", vol));
+
+  root.append(check("thought bubbles", "thoughts.enabled", true));
+  root.append(
+    el("div", {
+      class: "hint",
+      text: "the little bubbles the crew put up while they work",
+    })
+  );
+}
+
 function aboutSection(root) {
-  root.append(...section("about"));
   const card = el("div", { class: "card" });
   card.append(el("b", { text: "Tuğcan Topaloğlu" }));
   card.append(
@@ -853,11 +956,17 @@ export function reloadCatalogue() {
     .catch(() => catalogue);
 }
 
-function pane(name) {
-  const box = el("div");
-  panes[name] = box;
-  host.append(box);
-  return box;
+function probeSummary() {
+  let checked = 0;
+  let refused = 0;
+  for (const row of catalogue.providers || []) {
+    for (const c of row.candidates || []) {
+      if (c.verdict === "working") checked++;
+      else if (c.verdict && c.verdict !== "unknown") refused++;
+    }
+  }
+  if (refused) return `${refused} refused`;
+  return checked ? `${checked} answered` : "never checked here";
 }
 
 function redraw() {
@@ -870,16 +979,47 @@ function redraw() {
   Promise.all([api("/roles"), api("/providers"), reloadCatalogue()])
     .then(([roles, providers]) => {
       host.replaceChildren();
-      crewSection(pane("crew"), roles, providers);
-      pane("models");
-      paintModels();
-      providerSection(pane("providers"), providers);
-      enginesSection(pane("engines"));
-      budgetSection(pane("budget"));
-      limitsSection(pane("limits"));
-      musicSection(pane("music"));
-      floorSection(pane("floor"));
-      aboutSection(pane("about"));
+      summaries.length = 0;
+
+      band(host, "Studio", "kept on the daemon; affects every run and every window");
+      group(host, "brain", "brain", () => read("provider", "claude"),
+        (b) => crewSection(b, roles, providers));
+      group(host, "seats", "seat overrides", () => {
+        const moved = seatsMoved(roles);
+        return moved ? `${moved} moved` : `all ${roles.length} follow their tier`;
+      }, (b) => seatsSection(b, roles, providers));
+      group(host, "models", "model health", () => probeSummary(), (b) => {
+        panes.models = b;
+        paintModels();
+      });
+      group(host, "spend", "spend", () => {
+        const usd = Number(read("budget.usd", 25));
+        const ask = read("budget.askAbove", 400000);
+        return `${usd ? "$" + usd : "no ceiling"} · ${ask ? "ask@" + ask / 1000 + "k" : "never asks"}`;
+      }, budgetSection);
+      group(host, "engines", "engines", () => "what the crew builds with", enginesSection);
+      group(host, "limits", "plan & limits", () => read("limits.enabled", true) ? "watching" : "off",
+        limitsSection);
+
+      band(host, "This device", "stored with the studio, but only this window reads it");
+      group(host, "floor", "floor", () => {
+        const bits = [read("lowSpec", false) ? "low spec" : "full quality"];
+        if (read("gpu.acceleration", true) === false) bits.push("gpu off");
+        return bits.join(" · ");
+      }, floorSection);
+      group(host, "ambience", "ambience", () => {
+        const on = read("chatter.enabled", true);
+        return `${on ? "chatter on" : "silent"} · ${read("thoughts.enabled", true) ? "bubbles on" : "no bubbles"}`;
+      }, ambienceSection);
+      group(host, "music", "soundtrack", () => read("music.enabled", false) ? "on" : "off",
+        musicSection);
+
+      band(host, "Diagnostics", "nothing here changes what the studio does");
+      group(host, "clis", "coding CLIs", () => {
+        const found = providers.filter((p) => p.installed).length;
+        return `${found} of ${providers.length} on PATH`;
+      }, (b) => providerSection(b, providers));
+      group(host, "about", "about", () => "who wrote this", aboutSection);
     })
     .catch((err) => {
       host.replaceChildren(
@@ -887,6 +1027,16 @@ function redraw() {
       );
     });
 }
+
+settings.onChange(() => {
+  for (const refresh of summaries) {
+    try {
+      refresh();
+    } catch (err) {
+      continue;
+    }
+  }
+});
 
 export function mount(root) {
   host = root;

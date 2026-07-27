@@ -190,6 +190,32 @@
   .panel .bad { color: var(--error); }
   .panel .warn { color: var(--warn); }
 
+  .band { display: grid; gap: 1px; margin: 12px 0 2px; padding-bottom: 5px;
+    border-bottom: 1px solid var(--line); }
+  .band:first-child { margin-top: 0; }
+  .band b { font-size: 10px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--dim); }
+  .band span { color: var(--faint); font-size: 11px; }
+
+  .grp { border: 1px solid var(--line-2); border-radius: 10px; background: var(--panel-2); }
+  .grp > summary { cursor: pointer; list-style: none; padding: 9px 11px; display: grid;
+    grid-template-columns: minmax(0, auto) minmax(0, 1fr); gap: 9px; align-items: baseline; }
+  .grp > summary::-webkit-details-marker { display: none; }
+  .grp > summary:hover { background: rgba(148,163,184,.05); border-radius: 9px; }
+  .grp[open] > summary { border-bottom: 1px solid var(--line); border-radius: 9px 9px 0 0; }
+  .grp-name { color: var(--text); font-size: 12.5px; font-weight: 600; }
+  .grp-name::before { content: "›"; color: var(--faint); margin-right: 7px;
+    display: inline-block; transition: transform .12s ease; }
+  .grp[open] .grp-name::before { transform: rotate(90deg); }
+  .grp-sum { color: var(--faint); font-size: 11px; text-align: right;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .grp-body { padding: 10px 11px 12px; display: grid; gap: 8px; min-width: 0; }
+
+  .ctl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; }
+  .panel button.revert { padding: 5px 8px; font-weight: 400; color: var(--faint);
+    background: transparent; }
+  .panel button.revert:hover:not(:disabled) { color: var(--text); background: var(--field); }
+
   #help { padding: 9px 16px 11px; border-top: 1px solid var(--line); color: var(--faint); font-size: 11px; }
   kbd { background: rgba(148,163,184,.12); border: 1px solid var(--line-2); border-bottom-width: 2px;
     border-radius: 4px; padding: 0 5px; color: var(--dim); font: 600 10.5px var(--mono); }
