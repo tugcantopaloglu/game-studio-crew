@@ -11,6 +11,16 @@ use studio_events::{plan_resume, Coalescer, Envelope, ResumePlan};
 use studio_store::Store;
 use tokio::sync::broadcast;
 
+pub mod assets;
+pub mod fsapi;
+pub mod games;
+pub mod gitapi;
+pub mod health;
+pub mod resume;
+pub mod runplan;
+pub mod settings;
+pub mod web;
+
 pub const FLOOR_HTML: &str = include_str!("../web/floor.html");
 pub const VOXEL_JS: &str = include_str!("../web/voxel.js");
 pub const SCENE_JS: &str = include_str!("../web/scene.js");
@@ -29,6 +39,10 @@ pub struct MeetingRequest {
     pub kind: String,
     pub participants: Vec<String>,
     pub topic: String,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub ask_above: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -48,6 +62,10 @@ pub struct BuildRequest {
     pub project: Option<String>,
     #[serde(default)]
     pub ask_above: Option<u64>,
+    #[serde(default)]
+    pub guided: bool,
+    #[serde(default)]
+    pub step_confirm: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -56,9 +74,23 @@ pub struct PlayRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct ResumeRequest {
+    pub project: String,
+    #[serde(default)]
+    pub ask_above: Option<u64>,
+    #[serde(default)]
+    pub step_confirm: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct RevertRequest {
     pub project: String,
     pub sha: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SummarizeRequest {
+    pub project: String,
 }
 
 #[derive(Debug, Clone)]
@@ -67,9 +99,33 @@ pub enum StudioCommand {
     Meeting(MeetingRequest),
     Workflow(WorkflowRequest),
     Build(BuildRequest),
+    Summarize(SummarizeRequest),
+    Resume(ResumeRequest),
 }
 
 pub type Approvals = Arc<std::sync::Mutex<HashMap<String, std::sync::mpsc::Sender<bool>>>>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlanVerdict {
+    Start { steps: Vec<studio_workflow::StepEdit> },
+    Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StepVerdict {
+    pub approve: bool,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Interrupt {
+    pub stop: bool,
+    pub note: Option<String>,
+}
+
+pub type PlanGates = Arc<std::sync::Mutex<HashMap<String, std::sync::mpsc::Sender<PlanVerdict>>>>;
+pub type StepGates = Arc<std::sync::Mutex<HashMap<String, std::sync::mpsc::Sender<StepVerdict>>>>;
+pub type Interrupts = Arc<std::sync::Mutex<Vec<Interrupt>>>;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -77,6 +133,18 @@ pub struct AppState {
     pub live: broadcast::Sender<Envelope>,
     pub commands: Option<std::sync::mpsc::Sender<StudioCommand>>,
     pub approvals: Approvals,
+    pub plans: PlanGates,
+    pub steps: StepGates,
+    pub interrupts: Interrupts,
+    pub stopping: Arc<std::sync::atomic::AtomicBool>,
+    pub studio_dir: Arc<std::path::PathBuf>,
+}
+
+pub fn default_studio_dir() -> std::path::PathBuf {
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(".studio"),
+        Err(_) => std::path::PathBuf::from(".studio"),
+    }
 }
 
 impl AppState {
@@ -87,7 +155,17 @@ impl AppState {
             live,
             commands: None,
             approvals: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            plans: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            steps: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            interrupts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            studio_dir: Arc::new(default_studio_dir()),
         }
+    }
+
+    pub fn with_studio_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.studio_dir = Arc::new(dir);
+        self
     }
 
     pub fn await_approval(&self, id: &str) -> std::sync::mpsc::Receiver<bool> {
@@ -106,6 +184,62 @@ impl AppState {
         }
     }
 
+    pub fn await_plan(&self, plan_id: &str) -> std::sync::mpsc::Receiver<PlanVerdict> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Ok(mut waiting) = self.plans.lock() {
+            waiting.insert(plan_id.to_string(), tx);
+        }
+        rx
+    }
+
+    pub fn resolve_plan(&self, plan_id: &str, verdict: PlanVerdict) -> bool {
+        let sender = self.plans.lock().ok().and_then(|mut p| p.remove(plan_id));
+        match sender {
+            Some(tx) => tx.send(verdict).is_ok(),
+            None => false,
+        }
+    }
+
+    pub fn await_step(&self, approval_id: &str) -> std::sync::mpsc::Receiver<StepVerdict> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Ok(mut waiting) = self.steps.lock() {
+            waiting.insert(approval_id.to_string(), tx);
+        }
+        rx
+    }
+
+    pub fn resolve_step(&self, approval_id: &str, verdict: StepVerdict) -> bool {
+        let sender = self.steps.lock().ok().and_then(|mut p| p.remove(approval_id));
+        match sender {
+            Some(tx) => tx.send(verdict).is_ok(),
+            None => false,
+        }
+    }
+
+    pub fn interrupt(&self, interrupt: Interrupt) {
+        if interrupt.stop {
+            self.stopping.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Ok(mut queued) = self.interrupts.lock() {
+            queued.push(interrupt);
+        }
+    }
+
+    pub fn stop_asked(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.stopping.clone()
+    }
+
+    pub fn nothing_is_being_stopped(&self) {
+        self.stopping.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn take_interrupts(&self) -> Vec<Interrupt> {
+        match self.interrupts.lock() {
+            Ok(mut queued) => std::mem::take(&mut *queued),
+            Err(_) => Vec::new(),
+        }
+    }
+
     pub fn with_commands(mut self, tx: std::sync::mpsc::Sender<StudioCommand>) -> Self {
         self.commands = Some(tx);
         self
@@ -121,6 +255,20 @@ impl AppState {
     pub fn publish(&self, event: Envelope) {
         let _ = self.live.send(event);
     }
+}
+
+pub async fn off_the_runtime<T, F>(work: F) -> Result<T, Response>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the thread doing that work died".to_string(),
+        )
+            .into_response()
+    })
 }
 
 pub fn compact_for_snapshot(events: Vec<Envelope>) -> Vec<Envelope> {
@@ -144,15 +292,31 @@ fn origin_is_local(origin: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1")
 }
 
+fn changes_something(method: &axum::http::Method) -> bool {
+    !matches!(
+        *method,
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    )
+}
+
 async fn guard_origin(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<Response, StatusCode> {
-    if let Some(origin) = req.headers().get(header::ORIGIN) {
-        let ok = origin.to_str().map(origin_is_local).unwrap_or(false);
-        if !ok {
-            return Err(StatusCode::FORBIDDEN);
+    match req.headers().get(header::ORIGIN) {
+        Some(origin) => {
+            if !origin.to_str().map(origin_is_local).unwrap_or(false) {
+                return Err(StatusCode::FORBIDDEN);
+            }
         }
+        None if changes_something(req.method()) => {
+            if req.headers().contains_key("sec-fetch-site")
+                || req.headers().contains_key(header::REFERER)
+            {
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+        None => {}
     }
     Ok(next.run(req).await)
 }
@@ -175,10 +339,20 @@ pub fn router(state: AppState) -> Router {
         .route("/workflows", get(workflows))
         .route("/workflow", post(start_workflow))
         .route("/build", post(start_build))
+        .route("/resume", post(start_resume))
+        .route("/resumable", get(resumable))
         .route("/play", post(play))
         .route("/qa", get(qa_report))
         .route("/shot", get(latest_shot))
         .route("/revert", post(revert))
+        .merge(web::routes())
+        .merge(assets::routes())
+        .merge(fsapi::routes())
+        .merge(settings::routes())
+        .merge(games::routes())
+        .merge(gitapi::routes())
+        .merge(runplan::routes())
+        .merge(health::routes())
         .layer(axum::middleware::from_fn(guard_origin))
         .with_state(state)
 }
@@ -245,6 +419,13 @@ async fn convene_meeting(
         return (
             StatusCode::BAD_REQUEST,
             "a meeting needs at least two participants".to_string(),
+        )
+            .into_response();
+    }
+    if req.topic.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "a meeting needs a topic; it becomes the title of the decision".to_string(),
         )
             .into_response();
     }
@@ -316,6 +497,54 @@ async fn start_build(
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct WhichProject {
+    pub project: String,
+}
+
+async fn resumable(
+    State(state): State<AppState>,
+    Query(q): Query<WhichProject>,
+) -> Response {
+    let held = resume::read(&state.studio_dir, &q.project);
+    axum::Json(match held {
+        None => serde_json::json!({"resumable": false}),
+        Some(held) => serde_json::json!({
+            "resumable": true,
+            "title": held.title,
+            "done": held.done.len(),
+            "left": held.left(),
+            "steps": held.plan.tasks.len(),
+            "left_at": held.left_at,
+            "why": held.why,
+            "say": held
+                .left()
+                .iter()
+                .filter_map(|id| held.plan.tasks.iter().find(|t| &t.id == id))
+                .map(|t| serde_json::json!({"id": t.id, "role": t.role, "say": t.say()}))
+                .collect::<Vec<_>>(),
+        }),
+    })
+    .into_response()
+}
+
+async fn start_resume(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<ResumeRequest>,
+) -> Response {
+    if resume::read(&state.studio_dir, &req.project).is_none() {
+        return (
+            StatusCode::CONFLICT,
+            "there is no stopped run to pick up for this project".to_string(),
+        )
+            .into_response();
+    }
+    match state.dispatch(StudioCommand::Resume(req)) {
+        Ok(()) => (StatusCode::ACCEPTED, "resuming".to_string()).into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct NewProject {
     pub name: String,
     pub root: String,
@@ -379,7 +608,7 @@ async fn projects(State(state): State<AppState>) -> Result<Response, StatusCode>
     Ok(axum::Json(json).into_response())
 }
 
-fn project_root(state: &AppState, id: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn project_root(state: &AppState, id: &str) -> Option<std::path::PathBuf> {
     state
         .store
         .projects()
@@ -466,6 +695,107 @@ fn windowed_binary(bin: std::path::PathBuf) -> std::path::PathBuf {
     bin
 }
 
+pub const WEB_PLAY_URL: &str = "http://127.0.0.1:8765/";
+
+struct Playing {
+    group: Option<studio_core::ProcessGroup>,
+    child: std::process::Child,
+}
+
+static PLAYING: std::sync::Mutex<std::collections::BTreeMap<String, Playing>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+pub fn stop_playing(project: &str) -> bool {
+    let taken = PLAYING.lock().ok().and_then(|mut held| held.remove(project));
+    let Some(mut was) = taken else {
+        return false;
+    };
+    match was.group.as_mut() {
+        Some(group) => {
+            let _ = group.kill_tree();
+        }
+        None => {
+            let _ = was.child.kill();
+        }
+    }
+    let _ = was.child.wait();
+    true
+}
+
+pub fn stop_playing_everything() {
+    let ids: Vec<String> = PLAYING
+        .lock()
+        .map(|held| held.keys().cloned().collect())
+        .unwrap_or_default();
+    for id in ids {
+        stop_playing(&id);
+    }
+}
+
+fn hold(project: &str, group: Option<studio_core::ProcessGroup>, child: std::process::Child) {
+    if let Ok(mut held) = PLAYING.lock() {
+        held.insert(project.to_string(), Playing { group, child });
+    }
+}
+
+fn start_supervised(
+    mut cmd: std::process::Command,
+) -> std::io::Result<(studio_core::ProcessGroup, std::process::Child)> {
+    let mut group = studio_core::ProcessGroup::new()?;
+    group.prepare(&mut cmd);
+    let child = cmd.spawn()?;
+    group.adopt(&child)?;
+    Ok((group, child))
+}
+
+fn open_in_browser(url: &str, cwd: &str) -> std::io::Result<()> {
+    let (program, args): (&str, Vec<&str>) = if cfg!(windows) {
+        ("cmd", vec!["/C", "start", ""])
+    } else if cfg!(target_os = "macos") {
+        ("open", Vec::new())
+    } else {
+        ("xdg-open", Vec::new())
+    };
+    studio_core::command(program)
+        .args(args)
+        .arg(url)
+        .current_dir(cwd)
+        .spawn()
+        .map(|_| ())
+}
+
+fn start_playing(p: &studio_store::ProjectRow, bin: &std::path::Path) -> std::io::Result<()> {
+    stop_playing(&p.id);
+
+    match p.engine.as_str() {
+        "web" => {
+            let mut cmd = std::process::Command::new(bin);
+            cmd.arg("tools/serve.mjs").current_dir(&p.root);
+            let (group, child) = start_supervised(cmd)?;
+            hold(&p.id, Some(group), child);
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            open_in_browser(WEB_PLAY_URL, &p.root)
+        }
+        "python" => {
+            let mut cmd = studio_core::command("cmd");
+            cmd.args(["/C", "start", ""])
+                .arg(bin)
+                .arg("main.py")
+                .current_dir(&p.root);
+            let child = cmd.spawn()?;
+            hold(&p.id, None, child);
+            Ok(())
+        }
+        _ => {
+            let mut cmd = studio_core::command(bin);
+            cmd.arg("--path").arg(&p.root).current_dir(&p.root);
+            let child = cmd.spawn()?;
+            hold(&p.id, None, child);
+            Ok(())
+        }
+    }
+}
+
 async fn play(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<PlayRequest>,
@@ -490,36 +820,20 @@ async fn play(
         Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
     };
 
-    let launched = match p.engine.as_str() {
-        "web" => std::process::Command::new(&bin)
-            .arg("tools/serve.mjs")
-            .current_dir(&p.root)
-            .spawn()
-            .and_then(|_| {
-                std::thread::sleep(std::time::Duration::from_millis(400));
-                std::process::Command::new("cmd")
-                    .args(["/C", "start", "", "http://127.0.0.1:8765/"])
-                    .current_dir(&p.root)
-                    .spawn()
-            }),
-        "python" => std::process::Command::new("cmd")
-            .args(["/C", "start", ""])
-            .arg(&bin)
-            .arg("main.py")
-            .current_dir(&p.root)
-            .spawn(),
-        _ => std::process::Command::new(&bin)
-            .arg("--path")
-            .arg(&p.root)
-            .current_dir(&p.root)
-            .spawn(),
-    };
+    let name = p.name.clone();
+    let started = tokio::task::spawn_blocking(move || start_playing(&p, &bin).map_err(|e| (e, bin)))
+        .await;
 
-    match launched {
-        Ok(_) => (StatusCode::OK, format!("{} is starting", p.name)).into_response(),
-        Err(e) => (
+    match started {
+        Ok(Ok(())) => (StatusCode::OK, format!("{name} is starting")).into_response(),
+        Ok(Err((e, bin))) => (
             StatusCode::BAD_GATEWAY,
             format!("could not start {}: {e}", bin.display()),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the launch thread died".to_string(),
         )
             .into_response(),
     }
@@ -625,7 +939,7 @@ async fn create_project(
     }
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
@@ -667,11 +981,14 @@ async fn snapshot(
     State(state): State<AppState>,
     Path(run): Path<String>,
 ) -> Result<Response, StatusCode> {
+    let head = state
+        .store
+        .head_seq(&run)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let all = state
         .store
         .events_since(&run, 0)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let head = all.last().map(|e| e.seq).unwrap_or(0);
     let compacted = compact_for_snapshot(all);
     Ok(axum::Json(serde_json::json!({
         "run": run,
@@ -686,22 +1003,30 @@ async fn events(
     Path(run): Path<String>,
     Query(q): Query<SinceQuery>,
 ) -> Result<Response, StatusCode> {
-    let all = state
+    let head = state
         .store
-        .events_since(&run, 0)
+        .head_seq(&run)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let head = all.last().map(|e| e.seq).unwrap_or(0);
 
     let body = match plan_resume(q.since_seq, head) {
         ResumePlan::UpToDate => serde_json::json!({
             "run": run, "head": head, "mode": "up_to_date", "events": Vec::<Envelope>::new()
         }),
-        ResumePlan::Snapshot { head } => serde_json::json!({
-            "run": run, "head": head, "mode": "snapshot",
-            "events": compact_for_snapshot(all)
-        }),
+        ResumePlan::Snapshot { head } => {
+            let all = state
+                .store
+                .events_since(&run, 0)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            serde_json::json!({
+                "run": run, "head": head, "mode": "snapshot",
+                "events": compact_for_snapshot(all)
+            })
+        }
         ResumePlan::Replay { from_seq, .. } => {
-            let tail: Vec<Envelope> = all.into_iter().filter(|e| e.seq >= from_seq).collect();
+            let tail = state
+                .store
+                .events_since(&run, from_seq.saturating_sub(1))
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             serde_json::json!({
                 "run": run, "head": head, "mode": "replay", "events": tail
             })
@@ -723,16 +1048,17 @@ async fn ws_run(mut socket: WebSocket, state: AppState, q: SinceQuery) {
     let mut rx = state.live.subscribe();
 
     if let Some(run) = &q.run {
-        if let Ok(all) = state.store.events_since(run, 0) {
-            let head = all.last().map(|e| e.seq).unwrap_or(0);
+        if let Ok(head) = state.store.head_seq(run) {
             let backlog = match plan_resume(q.since_seq, head) {
-                ResumePlan::UpToDate => Vec::new(),
-                ResumePlan::Snapshot { .. } => compact_for_snapshot(all),
+                ResumePlan::UpToDate => Ok(Vec::new()),
+                ResumePlan::Snapshot { .. } => {
+                    state.store.events_since(run, 0).map(compact_for_snapshot)
+                }
                 ResumePlan::Replay { from_seq, .. } => {
-                    all.into_iter().filter(|e| e.seq >= from_seq).collect()
+                    state.store.events_since(run, from_seq.saturating_sub(1))
                 }
             };
-            for e in backlog {
+            for e in backlog.unwrap_or_default() {
                 if send_event(&mut socket, &e).await.is_err() {
                     return;
                 }
@@ -779,6 +1105,199 @@ mod tests {
     use super::*;
     use studio_events::{EventType, Scene};
 
+    #[test]
+    fn nothing_on_the_play_path_spawns_a_bare_command_and_flashes_a_console() {
+        let source = include_str!("lib.rs");
+        let play = source
+            .split("pub const WEB_PLAY_URL")
+            .nth(1)
+            .and_then(|rest| rest.split("#[cfg(test)]").next())
+            .expect("the play path is between the url constant and the tests");
+        assert!(
+            !play.contains("std::process::Command::new(\"cmd\")"),
+            "a bare Command::new on Windows gives the child its own console; pressing play \
+             would flash a black window every time. Use studio_core::command."
+        );
+        assert!(
+            play.contains("studio_core::command"),
+            "the play path must go through the launcher that sets CREATE_NO_WINDOW"
+        );
+    }
+
+    #[test]
+    fn a_server_the_studio_starts_for_a_game_is_supervised_so_it_cannot_outlive_the_daemon() {
+        let mut cmd = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        cmd.args(if cfg!(windows) {
+            ["/C", "ping -n 30 127.0.0.1 >NUL"]
+        } else {
+            ["-c", "sleep 30"]
+        });
+        let (mut group, mut child) = start_supervised(cmd).expect("a shell always spawns");
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the child must still be running for this to prove anything"
+        );
+
+        group.kill_tree().unwrap();
+        let died = std::time::Instant::now();
+        while child.try_wait().unwrap().is_none() {
+            assert!(
+                died.elapsed() < std::time::Duration::from_secs(5),
+                "killing the group left the serve.mjs the studio started running forever"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn playing_a_project_stops_whatever_the_last_play_left_running() {
+        let mut cmd = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        cmd.args(if cfg!(windows) {
+            ["/C", "ping -n 30 127.0.0.1 >NUL"]
+        } else {
+            ["-c", "sleep 30"]
+        });
+        let (group, child) = start_supervised(cmd).unwrap();
+
+        let project = "proj_test_replacing";
+        hold(project, Some(group), child);
+        assert!(
+            stop_playing(project),
+            "a second play must reclaim the port the first one is holding"
+        );
+        assert!(!stop_playing(project), "there is nothing left to stop twice");
+        assert!(PLAYING.lock().unwrap().get(project).is_none());
+    }
+
+    #[test]
+    fn the_launch_path_reclaims_the_port_before_it_binds_it_again() {
+        let source = include_str!("lib.rs");
+        let launch = source
+            .split("fn start_playing(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nasync fn play(").next())
+            .expect("start_playing sits just above the route");
+        assert!(
+            launch.trim_start().starts_with("p: &studio_store::ProjectRow")
+                && launch.contains("stop_playing(&p.id)"),
+            "serve.mjs binds 8765; starting a second one without stopping the first leaves a \
+             server nobody can reach and nobody kills"
+        );
+    }
+
+    fn a_run_that_stopped(dir: &std::path::Path) -> resume::Unfinished {
+        use studio_workflow::{Plan, PlanTask};
+        let task = |id: &str, say: &str| PlanTask {
+            id: id.into(),
+            role: "artist".into(),
+            brief: format!("brief for {id}"),
+            depends_on: Vec::new(),
+            say: say.into(),
+        };
+        let held = resume::Unfinished {
+            project: "proj_flappy".into(),
+            title: "3D Flappy Bird".into(),
+            brief: "build a 3d flappy bird".into(),
+            plan: Plan {
+                title: "3D Flappy Bird".into(),
+                tasks: vec![
+                    task("t1", "Pin down how the bird flies"),
+                    task("t2", "Draw the bird and the pipes"),
+                    task("t3", "Make the flap thump"),
+                ],
+            },
+            done: vec!["t1".into()],
+            left_at: "2026-07-26T19:40:00Z".into(),
+            why: "the account is out of allowance until 7:40pm".into(),
+        };
+        resume::write(dir, &held).unwrap();
+        held
+    }
+
+    async fn get(state: AppState, uri: &str) -> (StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+        let req = axum::http::Request::builder()
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let res = router(state).oneshot(req).await.unwrap();
+        let status = res.status();
+        let raw = axum::body::to_bytes(res.into_body(), 1_000_000).await.unwrap();
+        (status, serde_json::from_slice(&raw).unwrap_or(serde_json::Value::Null))
+    }
+
+    fn state_for_resume(slug: &str) -> (AppState, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("studio-resume-route-{slug}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(Store::open(dir.join("s.db")).unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::mem::forget(rx);
+        (
+            AppState::new(store).with_commands(tx).with_studio_dir(dir.clone()),
+            dir,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_project_with_nothing_stopped_offers_no_resume() {
+        let (state, _dir) = state_for_resume("nothing");
+        let (status, body) = get(state, "/resumable?project=proj_flappy").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["resumable"], false);
+    }
+
+    #[tokio::test]
+    async fn a_stopped_run_offers_exactly_the_steps_that_never_ran() {
+        let (state, dir) = state_for_resume("offers");
+        a_run_that_stopped(&dir);
+
+        let (status, body) = get(state, "/resumable?project=proj_flappy").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["resumable"], true);
+        assert_eq!(body["done"], 1);
+        assert_eq!(body["steps"], 3);
+        assert_eq!(body["left"], serde_json::json!(["t2", "t3"]));
+        assert!(
+            body["why"].as_str().unwrap().contains("7:40pm"),
+            "the floor has to say why it stopped, or picking it up is a guess"
+        );
+        assert_eq!(
+            body["say"][0]["say"], "Draw the bird and the pipes",
+            "the button names the work in the player's terms, not t2"
+        );
+    }
+
+    #[tokio::test]
+    async fn resuming_a_project_that_finished_is_refused_rather_than_queued() {
+        use tower::ServiceExt;
+        let (state, _dir) = state_for_resume("refused");
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/resume")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"project":"proj_flappy"}"#))
+            .unwrap();
+        let res = router(state).oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn a_stopped_run_can_be_picked_up() {
+        use tower::ServiceExt;
+        let (state, dir) = state_for_resume("accepted");
+        a_run_that_stopped(&dir);
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/resume")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"project":"proj_flappy"}"#))
+            .unwrap();
+        let res = router(state).oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+    }
+
     fn ev(seq: u64, actor: &str, ty: EventType) -> Envelope {
         Envelope::new(seq, "t", "run_1", actor, Scene::daemon(), ty, serde_json::json!({}))
     }
@@ -824,6 +1343,37 @@ mod tests {
             post_with_origin(Some("http://127.0.0.1:7878")).await,
             StatusCode::FORBIDDEN
         );
+    }
+
+    #[tokio::test]
+    async fn a_browser_post_that_carries_no_origin_is_still_refused() {
+        use tower::ServiceExt;
+        let dir = std::env::temp_dir().join("studio-origin-fetchsite");
+        let _ = std::fs::create_dir_all(&dir);
+        let store = Arc::new(Store::open(dir.join("s.db")).unwrap());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let app = router(AppState::new(store).with_commands(tx));
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/task")
+            .header("content-type", "application/json")
+            .header("sec-fetch-site", "cross-site")
+            .body(axum::body::Body::from(
+                r#"{"role":"gameplay_engineer","brief":"x"}"#,
+            ))
+            .unwrap();
+
+        assert_eq!(
+            app.oneshot(req).await.unwrap().status(),
+            StatusCode::FORBIDDEN,
+            "a request a browser sent is a request a page can forge; only a real client with              no fetch metadata at all is trusted without an origin"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plain_client_with_no_browser_headers_is_still_served() {
+        assert_ne!(post_with_origin(None).await, StatusCode::FORBIDDEN);
     }
 
     #[test]
@@ -891,14 +1441,13 @@ mod approval_tests {
     use super::*;
     use std::sync::Arc;
 
+    static NEXT_APPROVAL_DIR: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
     fn state() -> AppState {
-        let dir = std::env::temp_dir().join(format!(
-            "studio-approve-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let nth = NEXT_APPROVAL_DIR.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir()
+            .join(format!("studio-approve-{}-{nth}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         AppState::new(Arc::new(Store::open(dir.join("s.db")).unwrap()))
     }
@@ -938,5 +1487,118 @@ mod approval_tests {
         let rx = s.await_approval("ask_4");
         s.approvals.lock().unwrap().clear();
         assert!(rx.recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod resume_boundary_tests {
+    use super::*;
+    use std::sync::Arc;
+    use studio_events::{EventType, Scene};
+    use tower::ServiceExt;
+
+    fn state_with(run: &str, events: u64) -> AppState {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir()
+            .join(format!("studio-resume-{run}-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(Store::open(dir.join("s.db")).unwrap());
+        for i in 0..events {
+            store
+                .append_event(
+                    run,
+                    "2026-07-25T09:12:44.118Z",
+                    "gameplay_engineer#1",
+                    EventType::ToolCall,
+                    Scene::daemon(),
+                    serde_json::json!({ "i": i }),
+                )
+                .unwrap();
+        }
+        AppState::new(store)
+    }
+
+    async fn resume(state: AppState, uri: &str) -> serde_json::Value {
+        let res = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn seqs(body: &serde_json::Value) -> Vec<u64> {
+        body["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["seq"].as_u64().unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_replay_contains_the_event_whose_seq_is_from_seq_because_the_store_read_is_exclusive() {
+        let body = resume(state_with("edge", 40), "/runs/edge/events?since_seq=9").await;
+        assert_eq!(body["mode"], "replay");
+        assert_eq!(
+            seqs(&body).first().copied(),
+            Some(10),
+            "plan_resume returns from_seq = since_seq + 1 and the store reads seq > ?2, \
+             so the read must be handed from_seq - 1; handing it from_seq drops event 10 \
+             from every replay and every websocket reconnect"
+        );
+        assert_eq!(seqs(&body).last().copied(), Some(40));
+        assert_eq!(seqs(&body).len(), 31);
+    }
+
+    #[tokio::test]
+    async fn two_resumes_either_side_of_a_cut_reproduce_the_log_with_no_gap_and_no_repeat() {
+        let state = state_with("stitch", 60);
+        let first = resume(state.clone(), "/runs/stitch/events?since_seq=0").await;
+        let second = resume(state, "/runs/stitch/events?since_seq=37").await;
+
+        let mut stitched = seqs(&first);
+        let tail = seqs(&second);
+        let cut = stitched.iter().position(|s| *s > 37).unwrap();
+        stitched.truncate(cut);
+        stitched.extend(tail);
+
+        assert_eq!(stitched, (1..=60).collect::<Vec<u64>>());
+    }
+
+    #[tokio::test]
+    async fn a_resume_from_zero_replays_the_whole_log() {
+        let body = resume(state_with("whole", 12), "/runs/whole/events?since_seq=0").await;
+        assert_eq!(seqs(&body), (1..=12).collect::<Vec<u64>>());
+    }
+
+    #[tokio::test]
+    async fn a_client_that_is_already_current_is_sent_nothing() {
+        let body = resume(state_with("current", 25), "/runs/current/events?since_seq=25").await;
+        assert_eq!(body["mode"], "up_to_date");
+        assert_eq!(body["head"], 25);
+        assert!(seqs(&body).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_head_of_a_run_is_reported_without_replaying_it() {
+        let body = resume(state_with("headline", 31), "/runs/headline/snapshot").await;
+        assert_eq!(body["head"], 31, "the snapshot head must survive being read separately from the log");
+        assert!(!seqs(&body).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_run_nobody_has_written_resumes_as_empty_rather_than_failing() {
+        let body = resume(state_with("blank", 0), "/runs/blank/events?since_seq=0").await;
+        assert_eq!(body["head"], 0);
+        assert!(seqs(&body).is_empty());
     }
 }

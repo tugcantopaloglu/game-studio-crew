@@ -166,6 +166,169 @@ normally. The guard stays because the M1 failure was real when it was written an
 a stale refusal costs nothing, while a silently unauthenticated run produces
 confident garbage. Re-test before removing it.
 
+## Floor probes
+
+Answer where the studio floor's time goes, and what a low-spec machine is being
+asked to draw. They run under Node with no browser and no GPU: `three.js` is
+imported from `crates/studio-server/web/vendor`, the DOM and the 2D canvas are
+stubbed, and `renderer.render` never happens. So they measure **the CPU inside
+`animate()`, the shape of the scene graph, and allocation** — never a real frame.
+
+```bash
+node --expose-gc probes/floor-cost.mjs             # default tier
+LOW_SPEC=1 node --expose-gc probes/floor-cost.mjs  # the low-spec tier
+REV=<sha> node --expose-gc probes/floor-cost.mjs   # the same harness against an older revision
+node probes/floor-smoke.mjs                        # does the floor still hold together
+node probes/floor-latency.mjs                      # endpoint latency against a running daemon
+node probes/settings-repaint.mjs                   # does a model check leave the rest of the panel alone
+node probes/settings-repaint.mjs <web-dir>         # the same harness against another revision's web/
+```
+
+`settings-repaint.mjs` mounts the real `settings.js` against a stubbed bus and
+daemon, ticks a model, presses check, and compares the panel's nodes by identity
+either side of the answer. It is the guard on a specific regression: checking one
+model used to call `redraw()`, which tore down and rebuilt the whole right-hand
+panel — losing the ticks, the scroll position, the limits timer and the music
+player, and re-fetching `/roles`, `/providers`, `/limits` and `/music` for a fact
+none of them carry. Run it against `HEAD~1`'s `web/` to watch the four checks fail.
+
+`FRAMES` and `WARMUP` set the sample size; 3000 and 600 are enough for the 95th
+percentile to settle, 900 is not. The layout comes from `probes/out/floor.json`,
+which the probe fetches from `FLOOR_URL` (default `http://127.0.0.1:7878`) the
+first time and caches; `probes/out/` is gitignored, so a daemon has to be up once.
+
+`REV=<sha>` is the before-and-after switch: it extracts `web/*.js` at that commit
+into a temp dir and runs the identical harness against it, which is the only way
+to compare without trusting two different measurements.
+
+`floor-cost.mjs` **reimplements the body of `floor.html`'s `animate()`** — the
+same calls in the same order — because that loop lives inside an inline
+`<script type="module">` and cannot be imported. Keep them in step or the numbers
+stop meaning anything. `floor-smoke.mjs` is the guard: it extracts that inline
+module, parses it, and checks every name it imports is actually exported.
+
+### What they measured
+
+Default tier, 3000 frames, same harness both sides, `2488330` against the work
+that followed it:
+
+| | before | after |
+|---|---|---|
+| whole `animate()` body, mean | 0.193ms | **0.108ms** |
+| whole `animate()` body, p95 | 0.239ms | **0.132ms** |
+| `scene.updateMatrixWorld`, mean | 0.149ms | **0.065ms** |
+| objects walked per frame | 1106 | **510** |
+| distinct materials | 253 | **135** |
+| distinct geometries | 284 | **178** |
+| canvas textures | 41 | **31** |
+| desk-screen surfaces | 18 | **8** |
+| `fillRect` per frame | 7.8 | **2.9** |
+| `fillText` per frame | 4.2 | **0.5** |
+| office build, first paint | ~85ms | **~59ms** |
+
+The low-spec tier lands at **0.074ms mean / 0.108ms p95**, with 0 point and 0
+spot lights instead of 22 and 13, shadows off, and pixel ratio 1.
+
+What the numbers do **not** cover: draw calls, fill rate, shadow-map cost,
+texture upload cost, and shader compilation. The scene census counts **604
+renderable meshes, 472098 triangles, 361 shadow casters and 450816 triangles per
+shadow pass** so the shape of the GPU problem is on the record, but no frame has
+been timed on a GPU. See R15 in [13](../docs/design/13-risks.md).
+
+### Hardware acceleration
+
+`gpu.acceleration` (default **true**) asks the browser for
+`powerPreference: "high-performance"` and, on a hybrid-graphics laptop, that is
+what decides whether the floor gets the discrete GPU or the integrated one. It
+also asks with `failIfMajorPerformanceCaveat: true` first, because a refusal is a
+definitive answer at context-creation time that the browser would render in
+software, which beats inferring it from frame times a few seconds later.
+
+**Whether it makes a frame faster is not measured, and cannot be measured here.**
+There is no GPU, no display, and no connected browser in this environment, and the
+frame harness never rasterises. `floor-smoke.mjs` verifies the parts that *are*
+checkable without one:
+
+| what | how |
+|---|---|
+| three.js really forwards the flag | a canvas stub records the attributes `canvas.getContext` is called with, so this is observed rather than read off the source |
+| acceleration on asks high-performance first, with the caveat flag | `contextAttempts` inspected directly |
+| a refused context retries without the flag instead of failing | a fake renderer that throws three.js's exact "with your selected attributes" error |
+| a refusal is reported as a software fallback | `hardwareHints().software` |
+| a software fallback offers low spec at once, not after 240 frames | `shouldOfferLowSpec(hints)` |
+| off asks for low power, in exactly one attempt | `contextAttempts(false)` |
+| flipping the setting asks for a reload, and stops asking once rebuilt | `gpuNeedsReload()` |
+
+To settle the speed question in about a minute on a real machine: open the floor
+and read the line under the help text in the sidebar. It names the context that
+was granted, the device it landed on, and the live 95th-percentile frame time.
+Toggle the setting there, reload, and compare the two numbers.
+
+### Endpoint latency
+
+`floor-latency.mjs` times each floor endpoint 40 times against a running daemon
+and reports p50/p95/max. It only issues GETs, so it is safe against a live
+studio. `RUN=<run id>` adds the snapshot, resume and websocket-reconnect paths.
+
+Against a read-only `studiod floor` over a **50000-event run generated through
+the real write path** (`SEED_DB=<path> SEED_EVENTS=50000 cargo test -p studio-store
+--release -- --ignored --nocapture a_long_run_can_be_written`):
+
+| endpoint | p50 | bytes |
+|---|---|---|
+| `/` floor document | 0.48ms | 68788 |
+| `/floor` layout | 0.29ms | 4817 |
+| `/roles` | 0.27ms | 1436 |
+| `/projects` | 0.27ms | 376 |
+| `/settings` | 0.25ms | 2 |
+| `/workflows` | 0.45ms | 474 |
+| `/scene.js` | 0.34ms | 40412 |
+| `/vendor/three.module.js` | 2.40ms | 1272972 |
+| **`/games`** | **82.37ms** | 614 |
+
+The resume paths, before and after the call sites were bounded:
+
+| endpoint | before | after | bytes |
+|---|---|---|---|
+| `/runs/:run/snapshot` | 151.8ms | 146.1ms | 7667 |
+| `/runs/:run/events?since_seq=0` | 152.1ms | 145.0ms | 7685 |
+| `/runs/:run/events?since_seq=head` | 139.9ms | **0.26ms** | 64 |
+| websocket reconnect at `since_seq=49900`, first frame | 139.4ms | **1.5ms** | 100 frames |
+
+The two snapshot rows are meant to be flat: a snapshot legitimately reads the
+whole run, and only its head lookup got cheaper. The other two are the fix.
+
+1369 KiB crosses the wire before the floor can build, 1273 KiB of it `three.js`,
+which is already sent with `max-age=86400`.
+
+`/games` remains 170x the next slowest endpoint because it scans the filesystem
+on the request path; it is owned elsewhere.
+
+### Store scale
+
+```bash
+cargo test -p studio-store --release -- --ignored --nocapture
+cargo test -p studio-events --release -- --ignored --nocapture
+```
+
+`events` is keyed `PRIMARY KEY (run, seq)`, so the SQL was never the problem —
+asking for the whole run was.
+
+| events in the run | whole log | tail of 100 | head only |
+|---|---|---|---|
+| 1000 | 11.87ms | 0.289ms | 0.076ms |
+| 10000 | 32.49ms | 0.182ms | 0.051ms |
+| 50000 | 124.08ms | 0.181ms | 0.051ms |
+
+Twenty reconnects against that 50000-event run cost **2622.3ms** read whole-log
+each time and **0.5ms** bounded. Pooling the read connections and caching the
+prepared statements is most of the small numbers: the tail read was 0.925ms and
+the head 0.660ms when every call opened its own SQLite handle.
+
+The coalescer was checked on the same axis and is **linear**, about 0.4us per
+event, 200000 events compacted in 78ms. Replacing its per-push `String` clone
+with the entry API made no difference above run-to-run noise, so it was not kept.
+
 ## What running the probes caught
 
 The token probe was written to confirm a savings claim and instead found a

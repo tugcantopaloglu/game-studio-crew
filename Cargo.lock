@@ -963,6 +963,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "studio-core",
  "tempfile",
  "thiserror 2.0.19",
  "toml",
@@ -1013,11 +1014,24 @@ dependencies = [
  "studio-core",
  "studio-engine",
  "studio-events",
+ "studio-settings",
  "studio-store",
  "studio-workflow",
+ "tempfile",
  "time",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "studio-settings"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "studio-context",
+ "thiserror 2.0.19",
+ "toml",
 ]
 
 [[package]]
@@ -1047,6 +1061,7 @@ dependencies = [
  "quick-xml",
  "serde",
  "serde_json",
+ "studio-core",
  "studio-engine",
  "tempfile",
  "thiserror 2.0.19",
@@ -1080,6 +1095,7 @@ dependencies = [
  "studio-index",
  "studio-mcp",
  "studio-server",
+ "studio-settings",
  "studio-store",
  "studio-verify",
  "studio-workflow",

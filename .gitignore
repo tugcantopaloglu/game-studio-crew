@@ -2,6 +2,7 @@ probes/out/
 probes/prefix.txt
 
 target/
+target-*/
 
 node_modules/
 dist/

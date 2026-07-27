@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Studio Floor</title>
+<link rel="icon" type="image/png" href="/favicon.png">
 <style>
   :root {
     --bg: #08090d;
@@ -20,6 +21,7 @@
     --info: #6fa8d1;
     --glass: rgba(11,13,18,.72);
     --shadow: 0 10px 30px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.35);
+    --side-w: clamp(360px, 25vw, 560px);
     --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
     --mono: "Cascadia Code", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
@@ -28,7 +30,7 @@
   html, body { height: 100%; }
   body { margin: 0; background: var(--bg); color: var(--text);
     font: 12.5px/1.55 var(--sans);
-    display: grid; grid-template-columns: 1fr 344px; overflow: hidden; }
+    display: grid; grid-template-columns: 1fr var(--side-w); overflow: hidden; }
   ::selection { background: rgba(74,217,145,.25); }
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -45,14 +47,19 @@
   .sec { font-size: 10px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase;
     color: var(--faint); }
 
-  #side { border-left: 1px solid var(--line-2); min-height: 0; overflow-y: auto;
+  #side { position: relative; border-left: 1px solid var(--line-2); min-height: 0; overflow-y: auto;
     background: linear-gradient(180deg, var(--panel-2), var(--panel) 140px);
-    display: flex; flex-direction: column; }
+    display: flex; flex-direction: column; min-width: 0; }
+  #grip { position: absolute; left: -3px; top: 0; bottom: 0; width: 7px; z-index: 9;
+    cursor: col-resize; }
+  #grip:hover, #grip.dragging { background: rgba(74,217,145,.35); }
   header { padding: 14px 16px 12px; border-bottom: 1px solid var(--line);
     display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  #brand { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  #mark { height: 19px; width: auto; opacity: .92; flex: none; }
   h1 { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase;
     background: linear-gradient(90deg, #f0f4fb, #97a2b6); -webkit-background-clip: text;
-    background-clip: text; color: transparent; }
+    background-clip: text; color: transparent; white-space: nowrap; }
   #conn { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
     color: var(--dim); padding: 3px 9px 3px 7px; border: 1px solid var(--line-2); border-radius: 999px;
     display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
@@ -76,6 +83,9 @@
 
   #feed-head { padding: 10px 16px 6px; }
   #feed { overflow-y: auto; padding: 0 6px 6px; min-height: 120px; flex: 1; }
+  #feed:empty { min-height: 0; flex: 0 0 auto; padding: 0; }
+  #feed:empty::before { content: "nothing has happened yet"; display: block;
+    padding: 0 10px 8px; color: var(--faint); font-size: 11.5px; }
   .ev { padding: 2.5px 10px; margin: 0 0 1px; border-radius: 6px;
     display: grid; grid-template-columns: 34px 1fr; gap: 9px; align-items: baseline;
     font-family: var(--mono); font-size: 11.5px; }
@@ -127,6 +137,41 @@
   #ask button { font: inherit; border-radius: 8px; padding: 6px 8px; }
   #ask-yes { border-color: rgba(224,188,85,.45) !important; color: var(--warn) !important; }
   #ask-no { border-color: rgba(226,99,109,.4) !important; color: var(--error) !important; }
+
+  #tabs { display: flex; gap: 2px; padding: 8px 12px 0; border-top: 1px solid var(--line); }
+  #tabs button { flex: 1; cursor: pointer; font: 600 10.5px var(--sans); letter-spacing: .1em;
+    text-transform: uppercase; color: var(--faint); background: transparent; padding: 6px 4px;
+    border: 1px solid transparent; border-bottom: 1px solid var(--line-2); border-radius: 7px 7px 0 0; }
+  #tabs button:hover { color: var(--dim); background: rgba(148,163,184,.05); }
+  #tabs button.on { color: var(--text); background: var(--field);
+    border-color: var(--line-2); border-bottom-color: transparent; }
+
+  .panel { padding: 12px 16px; display: grid; gap: 8px; min-width: 0; }
+  .panel *, #compose * { min-width: 0; }
+  .panel .sec { margin-bottom: 2px; }
+  .panel .hint { color: var(--faint); font-size: 11.5px; overflow-wrap: anywhere; }
+  .panel .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; align-items: center; }
+  .panel .field { display: grid; gap: 3px; min-width: 0; }
+  .panel label { color: var(--dim); font-size: 11.5px; overflow-wrap: anywhere; }
+  .panel .card { overflow-wrap: anywhere; }
+  .panel select, .panel input[type=text], .panel input[type=number], .panel textarea { width: 100%; }
+  .panel select, .panel input[type=text], .panel input[type=number], .panel textarea, .panel button {
+    font: inherit; font-size: 12.5px; background: var(--field); color: var(--text);
+    border: 1px solid var(--line-2); border-radius: 8px; padding: 6px 9px; }
+  .panel textarea { resize: vertical; min-height: 46px; font-family: var(--sans); }
+  .panel button { cursor: pointer; font-weight: 600;
+    background: linear-gradient(180deg, #1b212c, #151a23); }
+  .panel button:hover { background: linear-gradient(180deg, #222a37, #1a202b); }
+  .panel button:disabled { opacity: .5; cursor: default; }
+  .panel input[type=checkbox] { accent-color: var(--running); }
+  .panel .check { display: flex; align-items: center; gap: 7px; color: var(--dim); font-size: 11.5px; }
+  .panel .card { border: 1px solid var(--line-2); border-radius: 10px; background: var(--panel-2);
+    padding: 9px 11px; display: grid; gap: 5px; }
+  .panel .card b { font-size: 12.5px; }
+  .panel .card .k { color: var(--faint); font: 10.5px var(--mono); }
+  .panel .ok { color: var(--running); }
+  .panel .bad { color: var(--error); }
+  .panel .warn { color: var(--warn); }
 
   #help { padding: 9px 16px 11px; border-top: 1px solid var(--line); color: var(--faint); font-size: 11px; }
   kbd { background: rgba(148,163,184,.12); border: 1px solid var(--line-2); border-bottom-width: 2px;
@@ -183,6 +228,28 @@
     font: 600 10.5px var(--mono); letter-spacing: .08em; text-transform: uppercase;
     padding: 5px 10px; z-index: 4; }
 
+  .notice { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 10px; padding: 9px 11px 9px 14px; z-index: 7;
+    border-color: rgba(224,188,85,.4); max-width: calc(100% - 28px); }
+  #gpu-reload { bottom: 74px; border-color: rgba(111,168,209,.4); }
+  .notice .txt { display: flex; flex-direction: column; min-width: 0; }
+  .notice b { font-size: 12.5px; letter-spacing: .03em; }
+  .notice span { color: var(--dim); font-size: 11.5px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .notice button { cursor: pointer; font: 600 11.5px var(--sans); border-radius: 8px;
+    padding: 6px 11px; border: 1px solid var(--line-2); color: var(--text);
+    background: linear-gradient(180deg, #1b212c, #151a23); white-space: nowrap; }
+  .notice button:hover { background: linear-gradient(180deg, #222a37, #1a202b); }
+  .notice button.accent { border-color: rgba(224,188,85,.45) !important; color: var(--warn) !important; }
+
+  #gpu { padding: 0 16px 11px; color: var(--faint); font-size: 11px;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  #gpu span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #gpu button { cursor: pointer; font: 600 10px var(--sans); letter-spacing: .08em;
+    text-transform: uppercase; border-radius: 6px; padding: 3px 8px; white-space: nowrap;
+    border: 1px solid var(--line-2); color: var(--dim); background: var(--field); }
+  #gpu button:hover { color: var(--text); border-color: rgba(148,163,184,.3); }
+
   #floors { position: absolute; left: 14px; top: 96px; z-index: 4;
     display: flex; gap: 4px; padding: 5px; }
   #floors button { font: 600 10.5px var(--mono); letter-spacing: .08em; text-transform: uppercase;
@@ -230,6 +297,12 @@
   #shot .cap { font-size: 9.5px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase;
     color: var(--faint); padding: 4px 3px 1px; }
 
+  #detail .think { margin-top: 9px; padding: 7px 9px; border-radius: 8px;
+    background: rgba(111,168,209,.07); border: 1px solid rgba(111,168,209,.22); }
+  #detail .think .lbl2 { font-size: 9.5px; font-weight: 700; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--info); margin-bottom: 3px; }
+  #detail .think .ln2 { font-size: 12px; color: var(--text); }
+
   #detail .act { margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--line); }
   #detail .act .lbl2 { font-size: 9.5px; font-weight: 700; letter-spacing: .14em;
     text-transform: uppercase; color: var(--faint); margin-bottom: 4px; }
@@ -238,14 +311,44 @@
   #detail .act .ln .sq { color: var(--faint); font-variant-numeric: tabular-nums; min-width: 30px; text-align: right; }
   #detail .act .ln.err { color: var(--error); }
 
+  #room { position: absolute; left: 14px; top: 100px; width: 306px; display: none;
+    padding: 12px 14px 11px; z-index: 5; max-height: calc(100% - 200px);
+    display: none; flex-direction: column; border-color: rgba(111,168,209,.34);
+    box-shadow: var(--shadow), 0 0 26px rgba(111,168,209,.12); }
+  #room.on { display: flex; }
+  #room .hd { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  #room .kind { font: 700 9.5px var(--mono); letter-spacing: .16em; text-transform: uppercase;
+    color: var(--info); }
+  #room .chair { font: 600 10.5px var(--mono); color: var(--faint); white-space: nowrap; }
+  #room .topic { margin: 6px 0 9px; font-size: 12.5px; color: var(--text); }
+  #room .said { overflow-y: auto; display: grid; gap: 8px; padding-right: 2px; }
+  #room .pos { display: grid; gap: 2px; padding-left: 9px;
+    border-left: 2px solid rgba(148,163,184,.2); }
+  #room .pos.chair { border-left-color: rgba(111,168,209,.6); }
+  #room .pos .r { font: 700 9.5px var(--mono); letter-spacing: .1em; text-transform: uppercase;
+    color: var(--faint); }
+  #room .pos.chair .r { color: var(--info); }
+  #room .pos .p { font-size: 12px; color: var(--dim); }
+  #room .ruling { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line-2);
+    display: grid; gap: 4px; }
+  #room .ruling .lbl2 { font: 700 9.5px var(--mono); letter-spacing: .14em; text-transform: uppercase;
+    color: var(--running); }
+  #room .ruling .claim { font-size: 12.5px; font-weight: 600; color: var(--text); }
+  #room .ruling .why { font-size: 11.5px; color: var(--dim); }
+  #room .ruling .over { font-size: 11px; color: var(--faint); }
+  #room .ruling .path { font: 10.5px var(--mono); color: var(--faint);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
   @media (max-width: 720px) {
     body { grid-template-columns: 1fr; grid-template-rows: 44vh minmax(0, 1fr); }
     #side { border-left: none; border-top: 1px solid var(--line-2); }
+    #grip { display: none; }
     #track { right: 14px; }
     #scrub { right: 14px; }
     #scrub input { width: auto; flex: 1; min-width: 70px; }
     #minimap, #shot { display: none !important; }
     #done { max-width: calc(100% - 28px); flex-wrap: wrap; }
+    #room { right: 14px; width: auto; top: 92px; max-height: calc(100% - 150px); }
   }
 </style>
 </head>
@@ -255,6 +358,18 @@
   <div id="floors" class="overlay" hidden><button data-level="0" class="on">1F &middot; studio</button><button data-level="1">2F &middot; loft</button></div>
   <div id="scrub" class="overlay"><span class="lbl">live</span><input id="seek" type="range" min="0" max="0" value="0"><button id="tolive">latest</button></div>
   <div id="track" class="overlay"><div class="name"></div><div class="lane"></div></div>
+  <div id="room" class="overlay">
+    <div class="hd"><span class="kind"></span><span class="chair"></span></div>
+    <div class="topic"></div>
+    <div class="said"></div>
+    <div class="ruling" hidden>
+      <div class="lbl2">decision</div>
+      <div class="claim"></div>
+      <div class="why"></div>
+      <div class="over"></div>
+      <div class="path"></div>
+    </div>
+  </div>
   <div id="done" class="overlay" hidden>
     <div class="badge">&#10003;</div>
     <div class="txt"><b id="done-title">build complete</b><span id="done-sub"></span></div>
@@ -267,7 +382,8 @@
   <canvas id="minimap" width="150" height="98"></canvas>
 </div>
 <div id="side">
-  <header><h1>Studio Floor</h1><div id="conn">connecting</div></header>
+  <div id="grip" title="drag to resize"></div>
+  <header><div id="brand"><img id="mark" src="/mark.png" alt=""><h1>Studio Floor</h1></div><div id="conn">connecting</div></header>
   <div id="stats">
     <div class="sec">telemetry</div>
     <div class="stat"><span>run</span><b id="s-run">-</b></div>
@@ -279,6 +395,12 @@
   </div>
   <div id="feed-head" class="sec">event stream</div>
   <div id="feed"></div>
+  <div id="tabs"></div>
+  <div id="panel-run" class="panel" hidden></div>
+  <div id="panel-games" class="panel" hidden></div>
+  <div id="panel-git" class="panel" hidden></div>
+  <div id="panel-assets" class="panel" hidden></div>
+  <div id="panel-settings" class="panel" hidden></div>
   <div id="compose">
     <div class="sec">dispatch</div>
     <div class="row">
@@ -325,11 +447,15 @@
     </div>
   </div>
   <div id="help">drag pan &middot; wheel zoom &middot; click an agent to follow &middot; <kbd>O</kbd> orbit &middot; <kbd>Esc</kbd> release</div>
+  <div id="gpu"></div>
 </div>
 
 <script type="module">
 import * as THREE from "/vendor/three.module.js";
-import { buildOffice, wanderStep, mingle, refreshScreens, seatAtTable, leaveTable, showBoard, hideBoard, LEVEL_H } from "/scene.js";
+import { buildOffice, wanderStep, avatarPose, mingle, refreshScreens, paintScreens, setMotion, seatAtTable, leaveTable, showBoard, boardSays, boardDecided, hideBoard, LEVEL_H } from "/scene.js";
+import { pushEvent, setProject, onProject, setStage, settings } from "/bus.js";
+import { startChatter, chatterSays } from "/chatter.js";
+import { budget, reducedMotion, sampleFrame, frameP95, hardwareHints, shouldOfferLowSpec, noteOffered, reasonForOffer, onTier, createRenderer, describeRenderer, gpuNeedsReload, gpuWanted, onGpu } from "/perf.js";
 
 const RING = { idle: 0x2f3644, running: 0x4ad991, blocked: 0xd9c24a, meeting: 0x6fa8d1, error: 0xd95555 };
 const TERMINAL = new Set(["run_ended","meeting_ended","workflow_ended","decision_recorded","escalated","verify_result","budget_exhausted"]);
@@ -339,10 +465,14 @@ const stage = document.getElementById("stage");
 const tip = document.getElementById("tip");
 const camLabel = document.getElementById("cam");
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+let tier = budget();
+let motionOn = !reducedMotion();
+setMotion(motionOn);
+
+const renderer = createRenderer(THREE, tier).renderer;
+renderer.setPixelRatio(Math.min(devicePixelRatio, tier.pixelRatio));
+renderer.shadowMap.enabled = tier.shadows;
+renderer.shadowMap.type = tier.softShadows ? THREE.PCFSoftShadowMap : THREE.BasicShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.35;
@@ -356,12 +486,14 @@ const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 400);
 const orbit = { theta: Math.PI * 0.25, phi: Math.PI * 0.30, dist: 44, target: new THREE.Vector3(0, 0.5, 0) };
 let freeCam = false;
 
-scene.add(new THREE.AmbientLight(0x8fa0bc, 0.25));
-scene.add(new THREE.HemisphereLight(0xb8ccf0, 0x14181f, 0.9));
+const ambientLight = new THREE.AmbientLight(0x8fa0bc, tier.ambient);
+scene.add(ambientLight);
+const sky = new THREE.HemisphereLight(0xb8ccf0, 0x14181f, tier.hemisphere);
+scene.add(sky);
 const key = new THREE.DirectionalLight(0xfff2dc, 2.0);
 key.position.set(18, 30, 14);
-key.castShadow = true;
-key.shadow.mapSize.set(4096, 4096);
+key.castShadow = tier.shadows;
+key.shadow.mapSize.set(tier.shadowMap, tier.shadowMap);
 key.shadow.camera.near = 1; key.shadow.camera.far = 110;
 const S = 30;
 key.shadow.camera.left = -S; key.shadow.camera.right = S;
@@ -386,6 +518,7 @@ let ambient = [];
 let meetingTable = null;
 let meetingApproach = [];
 let levelGroups = [];
+let mingleList = [];
 let viewLevel = 0;
 
 const floorsEl = document.getElementById("floors");
@@ -399,7 +532,7 @@ floorsEl.addEventListener("click", (e) => {
 
 function applyLevel() {
   levelGroups.forEach((g, i) => { g.visible = i === viewLevel; });
-  renderMinimap();
+  miniDirty = true;
 }
 
 function levelOf(a) {
@@ -416,6 +549,14 @@ let stats = { events: 0, tokens: 0, spend: 0, cacheRead: 0, cacheWrite: 0, symbo
 let screensDirty = true;
 let lastScreenPaint = 0;
 let lastMini = 0;
+let miniDirty = true;
+let statsDirty = true;
+let trackDirty = true;
+let detailDirty = false;
+const feedQueue = [];
+let sinceGpuLine = 0;
+const MAX_HISTORY = 20000;
+let droppedBefore = 0;
 
 function screenData() {
   const crewByDept = {};
@@ -436,13 +577,47 @@ function screenData() {
 }
 
 function deskState(role) {
-  if (!state.has(role)) state.set(role, { ring: "idle", summary: "", tool: "", tokens: 0, log: [] });
+  if (!state.has(role)) {
+    state.set(role, { ring: "idle", summary: "", tool: "", tokens: 0, log: [], thought: "", thoughtPhase: "" });
+  }
   return state.get(role);
 }
 
 function logActivity(st, seq, text, err) {
   st.log.push({ seq, text, err: !!err });
   if (st.log.length > 9) st.log.shift();
+}
+
+const roomEl = document.getElementById("room");
+let room = null;
+
+function renderRoom() {
+  if (!room) { roomEl.classList.remove("on"); return; }
+  roomEl.classList.add("on");
+  roomEl.querySelector(".kind").textContent = room.kind || "meeting";
+  roomEl.querySelector(".chair").textContent = room.chair ? "chair " + room.chair : "";
+  roomEl.querySelector(".topic").textContent = room.topic || "";
+
+  roomEl.querySelector(".said").innerHTML = room.said.length
+    ? room.said
+        .map((p) =>
+          `<div class="pos${p.seat === "chair" ? " chair" : ""}">` +
+          `<div class="r">${esc(p.role)}</div><div class="p">${esc(p.position)}</div></div>`
+        )
+        .join("")
+    : `<div class="pos"><div class="p">waiting for the first position</div></div>`;
+
+  const ruling = roomEl.querySelector(".ruling");
+  ruling.hidden = !room.decision;
+  if (room.decision) {
+    const d = room.decision;
+    ruling.querySelector(".claim").textContent = d.claim || "";
+    ruling.querySelector(".why").textContent = d.rationale || "";
+    ruling.querySelector(".over").textContent = (d.dissent || []).length
+      ? "overrules " + d.dissent.join("; ")
+      : "";
+    ruling.querySelector(".path").textContent = d.path || "";
+  }
 }
 
 function updateCamera() {
@@ -519,18 +694,33 @@ addEventListener("keydown", (e) => {
 
 const ray = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
+const hitList = [];
+const hitRoles = new Map();
+const hits = [];
+
+function rebuildHitList() {
+  hitList.length = 0;
+  hitRoles.clear();
+  for (const [role, a] of avatars) {
+    hitList.push(a.hit);
+    hitRoles.set(a.hit, role);
+  }
+}
+
 function pickAgent(e) {
+  if (!hitList.length) return null;
   const r = el.getBoundingClientRect();
   ndc.x = ((e.clientX - r.left) / r.width) * 2 - 1;
   ndc.y = -((e.clientY - r.top) / r.height) * 2 + 1;
   ray.setFromCamera(ndc, camera);
-  let best = null, bestDist = Infinity;
-  for (const [role, a] of avatars) {
-    if (!a.person.visible) continue;
-    const hits = ray.intersectObject(a.hit, true);
-    if (hits.length && hits[0].distance < bestDist) { bestDist = hits[0].distance; best = role; }
+  hits.length = 0;
+  ray.intersectObjects(hitList, false, hits);
+  for (const h of hits) {
+    const role = hitRoles.get(h.object);
+    const a = role && avatars.get(role);
+    if (a && a.person.visible) return role;
   }
-  return best;
+  return null;
 }
 
 const detail = document.getElementById("detail");
@@ -548,6 +738,9 @@ function showDetail(role) {
   selected = role;
   if (!role) { detail.style.display = "none"; return; }
   const a = avatars.get(role), st = deskState(role);
+  if (st.thought && (!thought || thought.role !== role)) {
+    thought = { role, text: st.thought, phase: st.thoughtPhase || "thinking", at: clock.getElapsedTime() };
+  }
   detail.innerHTML =
     `<h2>${esc(a.title)}</h2>` +
     `<div class="row"><span class="k">role</span><span>${esc(role)}</span></div>` +
@@ -556,6 +749,10 @@ function showDetail(role) {
     `<div class="row"><span class="k">state</span><span>${esc(st.ring)}</span></div>` +
     `<div class="row"><span class="k">tokens</span><span>${esc(st.tokens.toLocaleString())}</span></div>` +
     (st.tool ? `<div class="row"><span class="k">tool</span><span>${esc(st.tool)}</span></div>` : "") +
+    (st.thought
+      ? `<div class="think"><div class="lbl2">${esc(st.thoughtPhase === "speaking" ? "saying" : "thinking")}</div>` +
+        `<div class="ln2">${esc(st.thought)}</div></div>`
+      : "") +
     (st.summary ? `<div class="sum">${esc(st.summary)}</div>` : `<div class="sum k">no capsule yet</div>`) +
     (st.log.length
       ? `<div class="act"><div class="lbl2">activity</div>` +
@@ -583,30 +780,72 @@ addEventListener("keydown", (e) => {
   if (e.key === "Escape") { following = null; showDetail(null); }
 });
 
+let hovered = null;
+let hoveredKey = "";
+
 function hoverTest(e) {
   const r = el.getBoundingClientRect();
-  ndc.x = ((e.clientX - r.left) / r.width) * 2 - 1;
-  ndc.y = -((e.clientY - r.top) / r.height) * 2 + 1;
-  ray.setFromCamera(ndc, camera);
-
-  let best = null, bestDist = Infinity;
-  for (const [role, a] of avatars) {
-    if (!a.person.visible) continue;
-    const hits = ray.intersectObject(a.hit, true);
-    if (hits.length && hits[0].distance < bestDist) { bestDist = hits[0].distance; best = role; }
+  const best = pickAgent(e);
+  if (!best) {
+    if (hovered) { tip.style.display = "none"; hovered = null; hoveredKey = ""; }
+    return;
   }
-  if (!best) { tip.style.display = "none"; return; }
 
   const a = avatars.get(best), st = deskState(best);
-  tip.innerHTML =
-    `<b>${esc(a.title)}</b><div class="s">tier ${esc(a.tier)} &middot; ${esc(a.dept)} &middot; ${esc(st.ring)}</div>` +
-    (st.tool ? `<div class="s">tool: ${esc(st.tool)}</div>` : "") +
-    (st.tokens ? `<div class="s">${esc(st.tokens.toLocaleString())} tokens</div>` : "") +
-    (st.summary ? `<div>${esc(st.summary)}</div>` : "");
+  const key = best + "|" + st.ring + "|" + st.tool + "|" + st.tokens + "|" + st.summary;
+  if (key !== hoveredKey) {
+    hoveredKey = key;
+    tip.innerHTML =
+      `<b>${esc(a.title)}</b><div class="s">tier ${esc(a.tier)} &middot; ${esc(a.dept)} &middot; ${esc(st.ring)}</div>` +
+      (st.tool ? `<div class="s">tool: ${esc(st.tool)}</div>` : "") +
+      (st.tokens ? `<div class="s">${esc(st.tokens.toLocaleString())} tokens</div>` : "") +
+      (st.summary ? `<div>${esc(st.summary)}</div>` : "");
+  }
+  hovered = best;
   tip.style.display = "block";
   tip.style.left = Math.min(e.clientX - r.left + 14, r.width - 300) + "px";
   tip.style.top = (e.clientY - r.top + 14) + "px";
 }
+
+const MIN_SIDE = 300;
+const grip = document.getElementById("grip");
+
+function setSideWidth(px) {
+  const room = Math.max(MIN_SIDE, Math.min(px, innerWidth - 320));
+  document.documentElement.style.setProperty("--side-w", room + "px");
+  try {
+    localStorage.setItem("studio.sideWidth", String(room));
+  } catch (err) {
+    return room;
+  }
+  return room;
+}
+
+try {
+  const remembered = Number(localStorage.getItem("studio.sideWidth"));
+  if (remembered >= MIN_SIDE) setSideWidth(remembered);
+} catch (err) {
+  /* the default clamp stands */
+}
+
+grip.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  grip.classList.add("dragging");
+  grip.setPointerCapture(e.pointerId);
+
+  const move = (m) => {
+    setSideWidth(innerWidth - m.clientX);
+    resize();
+  };
+  const up = () => {
+    grip.classList.remove("dragging");
+    grip.removeEventListener("pointermove", move);
+    grip.removeEventListener("pointerup", up);
+    resize();
+  };
+  grip.addEventListener("pointermove", move);
+  grip.addEventListener("pointerup", up);
+});
 
 function resize() {
   const w = stage.clientWidth, h = stage.clientHeight;
@@ -617,52 +856,268 @@ function resize() {
 }
 addEventListener("resize", resize);
 
+const hints = hardwareHints(renderer);
+let offerBox = null;
+
+function dismissOffer() {
+  noteOffered();
+  if (offerBox) { offerBox.remove(); offerBox = null; }
+}
+
+function offerLowSpec() {
+  if (offerBox) return;
+  offerBox = notice("lowspec", "this machine is struggling", reasonForOffer(hints), [
+    { label: "use low spec", accent: true, run: () => { settings.set("lowSpec", true); settings.save(); dismissOffer(); } },
+    { label: "keep it", run: dismissOffer },
+  ]);
+}
+
+function notice(id, title, detail, actions) {
+  const box = document.createElement("div");
+  box.id = id;
+  box.className = "overlay notice";
+  box.append(
+    (() => {
+      const txt = document.createElement("div");
+      txt.className = "txt";
+      const b = document.createElement("b");
+      b.textContent = title;
+      const s = document.createElement("span");
+      s.textContent = detail;
+      txt.append(b, s);
+      return txt;
+    })()
+  );
+  for (const action of actions) {
+    const button = document.createElement("button");
+    button.textContent = action.label;
+    if (action.accent) button.className = "accent";
+    button.onclick = action.run;
+    box.appendChild(button);
+  }
+  stage.appendChild(box);
+  return box;
+}
+
+let reloadBox = null;
+
+function askForReload() {
+  if (reloadBox || !gpuNeedsReload()) return;
+  reloadBox = notice(
+    "gpu-reload",
+    gpuWanted() ? "hardware acceleration is on" : "hardware acceleration is off",
+    "the renderer picks its GPU when the page loads, so this takes effect on reload",
+    [
+      { label: "reload the floor", accent: true, run: () => location.reload() },
+      { label: "later", run: () => { reloadBox.remove(); reloadBox = null; } },
+    ]
+  );
+}
+
+onGpu(() => {
+  if (gpuNeedsReload()) askForReload();
+  else if (reloadBox) { reloadBox.remove(); reloadBox = null; }
+  renderGpuLine();
+});
+
+const gpuLine = document.getElementById("gpu");
+
+function renderGpuLine() {
+  if (!gpuLine) return;
+  const on = gpuWanted();
+  const p95 = frameP95();
+  const timing = p95 > 0 ? `  ·  ${p95.toFixed(1)}ms p95` : "";
+  gpuLine.innerHTML =
+    `<span>${esc(describeRenderer(hints) + timing)}</span>` +
+    `<button id="gpu-toggle">turn ${on ? "off" : "on"}</button>`;
+  document.getElementById("gpu-toggle").onclick = () => {
+    settings.set("gpu.acceleration", !gpuWanted());
+    settings.save();
+  };
+}
+
+renderGpuLine();
+
+function countSceneLights() {
+  let n = 0;
+  scene.traverse((o) => { if (o.isPointLight || o.isSpotLight) n++; });
+  return n;
+}
+
+onTier((b) => {
+  tier = b;
+  renderer.setPixelRatio(Math.min(devicePixelRatio, b.pixelRatio));
+  renderer.shadowMap.enabled = b.shadows;
+  renderer.shadowMap.type = b.softShadows ? THREE.PCFSoftShadowMap : THREE.BasicShadowMap;
+  key.castShadow = b.shadows;
+  key.shadow.mapSize.set(b.shadowMap, b.shadowMap);
+  if (key.shadow.map) { key.shadow.map.dispose(); key.shadow.map = null; }
+
+  ambientLight.intensity = b.ambient;
+  sky.intensity = b.hemisphere;
+
+  const wantLights = b.roomLights || b.deskLights;
+  scene.traverse((o) => { if (o.isPointLight || o.isSpotLight) o.visible = wantLights; });
+  if (wantLights && !countSceneLights()) {
+    sent.textContent = "reload the floor to bring the room lighting back";
+  }
+  screensDirty = true;
+  miniDirty = true;
+  resize();
+});
+
+if (typeof matchMedia === "function") {
+  const calm = matchMedia("(prefers-reduced-motion: reduce)");
+  const followMotion = () => { motionOn = !calm.matches; setMotion(motionOn); };
+  if (calm.addEventListener) calm.addEventListener("change", followMotion);
+}
+
+const BUBBLE_W = 512, BUBBLE_H = 176;
+const bubbleCanvas = document.createElement("canvas");
+bubbleCanvas.width = BUBBLE_W;
+bubbleCanvas.height = BUBBLE_H;
+const bubbleCtx = bubbleCanvas.getContext("2d");
+const bubbleTex = new THREE.CanvasTexture(bubbleCanvas);
+bubbleTex.colorSpace = THREE.SRGBColorSpace;
+const bubbleMat = new THREE.MeshBasicMaterial({
+  map: bubbleTex, transparent: true, depthWrite: false, depthTest: false, fog: false, opacity: 0,
+});
+const bubble = new THREE.Mesh(new THREE.PlaneGeometry(2.05, 2.05 * (BUBBLE_H / BUBBLE_W)), bubbleMat);
+bubble.renderOrder = 20;
+bubble.visible = false;
+scene.add(bubble);
+
+let thought = null;
+let thoughtDrawn = "";
+
+function focusRole() {
+  return following || selected;
+}
+
+function roundRect(x, px, py, w, h, r) {
+  x.beginPath();
+  x.moveTo(px + r, py);
+  x.arcTo(px + w, py, px + w, py + h, r);
+  x.arcTo(px + w, py + h, px, py + h, r);
+  x.arcTo(px, py + h, px, py, r);
+  x.arcTo(px, py, px + w, py, r);
+  x.closePath();
+}
+
+function drawBubble(text, phase) {
+  const x = bubbleCtx;
+  x.clearRect(0, 0, BUBBLE_W, BUBBLE_H);
+  const accent = phase === "thinking" ? "#8ea9d8" : phase === "done" ? "#5d6675" : "#4ad991";
+
+  roundRect(x, 6, 6, BUBBLE_W - 12, BUBBLE_H - 40, 18);
+  x.fillStyle = "rgba(10,13,18,.93)";
+  x.fill();
+  x.strokeStyle = "rgba(148,163,184,.34)";
+  x.lineWidth = 2;
+  x.stroke();
+
+  x.beginPath();
+  x.moveTo(BUBBLE_W / 2 - 16, BUBBLE_H - 34);
+  x.lineTo(BUBBLE_W / 2, BUBBLE_H - 8);
+  x.lineTo(BUBBLE_W / 2 + 14, BUBBLE_H - 34);
+  x.closePath();
+  x.fillStyle = "rgba(10,13,18,.93)";
+  x.fill();
+
+  x.fillStyle = accent;
+  x.font = "700 15px ui-monospace, monospace";
+  x.fillText(phase === "speaking" ? "SAYING" : phase.toUpperCase(), 22, 32);
+
+  x.fillStyle = "#dfe4ee";
+  x.font = "500 21px ui-monospace, monospace";
+  let line = "", y = 62;
+  for (const w of String(text || "").split(/\s+/)) {
+    if (!w) continue;
+    const next = line ? line + " " + w : w;
+    if (x.measureText(next).width > BUBBLE_W - 48 && line) {
+      x.fillText(line, 22, y);
+      y += 26;
+      line = w;
+      if (y > BUBBLE_H - 46) { line = ""; break; }
+    } else {
+      line = next;
+    }
+  }
+  if (line) x.fillText(line, 22, y);
+  bubbleTex.needsUpdate = true;
+}
+
+function noteThought(role, text, phase) {
+  const st = deskState(role);
+  st.thought = phase === "done" && !text ? st.thought : text;
+  st.thoughtPhase = phase;
+  if (!settings.get("thoughts.enabled") || role !== focusRole()) return;
+  thought = { role, text: st.thought, phase, at: clock.getElapsedTime() };
+}
+
+function stepBubble(dt, t) {
+  const live =
+    thought &&
+    settings.get("thoughts.enabled") &&
+    thought.role === focusRole() &&
+    avatars.has(thought.role) &&
+    t - thought.at < (thought.phase === "done" ? 2.2 : 6.5);
+
+  const want = live ? 1 : 0;
+  bubbleMat.opacity += (want - bubbleMat.opacity) * Math.min(1, dt * 6);
+  bubble.visible = bubbleMat.opacity > 0.02;
+  if (!bubble.visible || !thought) return;
+
+  const key = thought.phase + " " + thought.text;
+  if (key !== thoughtDrawn) {
+    drawBubble(thought.text, thought.phase);
+    thoughtDrawn = key;
+  }
+  const p = avatars.get(thought.role).person.position;
+  bubble.position.set(p.x, p.y + 2.82, p.z);
+  bubble.quaternion.copy(camera.quaternion);
+}
+
 const clock = new THREE.Clock();
+
+function rigStep(a, cam) {
+  if (tier.farRigPeriod <= 0) return 0;
+  return a.person.position.distanceTo(cam) > tier.farRigDistance ? tier.farRigPeriod : 0;
+}
+
+function ringOpacity(ring, stuck, t, seed) {
+  if (!motionOn) return ring === "idle" ? 0.35 : stuck ? 0.95 : 0.8;
+  if (stuck) return 0.55 + Math.sin(t * 7 + seed) * 0.45;
+  return ring === "idle" ? 0.28 : 0.7 + Math.sin(t * 4 + seed) * 0.3;
+}
+
+function flushDom() {
+  if (feedQueue.length) drainFeed();
+  if (statsDirty) { renderStats(); statsDirty = false; }
+  if (trackDirty) { renderTrack(); trackDirty = false; }
+  if (detailDirty) { if (selected) showDetail(selected); detailDirty = false; }
+}
+
 function animate() {
   requestAnimationFrame(animate);
+  const began = performance.now();
   const dt = Math.min(clock.getDelta(), 0.05);
   const t = clock.getElapsedTime();
-  mingle([...avatars.values(), ...ambient], t);
+  const cam = camera.position;
+
+  mingle(mingleList, t);
+
   for (const [role, a] of avatars) {
     const st = deskState(role);
     const stuck = st.ring === "error" || st.ring === "blocked";
     const busy = st.ring === "running" || st.ring === "meeting" || stuck;
-    const walking = wanderStep(a, busy, dt, t);
+    wanderStep(a, busy, dt, t);
     a.person.visible = levelOf(a) === viewLevel;
+    a.rig.update(avatarPose(a, st.ring, t), dt, t, rigStep(a, cam));
 
-    if (walking) {
-      a.body.position.y = Math.abs(Math.sin(t * 9 + a.seed)) * 0.05;
-      a.body.rotation.z = Math.sin(t * 9 + a.seed) * 0.05;
-      let d = a.facing - a.body.rotation.y;
-      while (d > Math.PI) d -= Math.PI * 2;
-      while (d < -Math.PI) d += Math.PI * 2;
-      a.body.rotation.y += d * 0.16;
-    } else if (stuck) {
-      a.body.position.y = 0;
-      a.body.rotation.z = 0;
-      a.body.rotation.y += (0 - a.body.rotation.y) * 0.08;
-    } else {
-      a.body.position.y = busy
-        ? Math.sin(t * 6 + a.seed) * 0.02
-        : Math.sin(t * 1.3 + a.seed) * 0.007;
-      a.body.rotation.z = 0;
-      const rest = !busy && (a.chatWith || a.visit)
-        ? a.facing
-        : busy ? Math.sin(t * 3 + a.seed) * 0.06 : 0;
-      let d = rest - a.body.rotation.y;
-      while (d > Math.PI) d -= Math.PI * 2;
-      while (d < -Math.PI) d += Math.PI * 2;
-      a.body.rotation.y += d * 0.08;
-    }
-
-    if (stuck) {
-      a.ringMat.opacity = 0.55 + Math.sin(t * 7 + a.seed) * 0.45;
-    } else {
-      a.ringMat.opacity = st.ring === "idle" ? 0.28 : 0.7 + Math.sin(t * 4 + a.seed) * 0.3;
-    }
+    a.ringMat.opacity = ringOpacity(st.ring, stuck, t, a.seed);
     if (a.alarm) {
-      a.alarm.visible = stuck;
-      if (stuck) a.alarm.intensity = 2.6 + Math.sin(t * 7 + a.seed) * 2.0;
+      a.alarm.intensity = !stuck ? 0 : motionOn ? 2.6 + Math.sin(t * 7 + a.seed) * 2.0 : 3.0;
     }
 
     const lit = st.ring === "running" || st.ring === "meeting";
@@ -673,46 +1128,41 @@ function animate() {
         a.bulb.material.color.setHex(tint);
         a.cone.material.color.setHex(tint);
         a.pool.material.color.setHex(tint);
-        a.spot.color.setHex(tint);
-        const pulse = stuck ? 7 : 3.4;
-        const w = 0.5 + Math.sin(t * pulse + a.seed) * 0.5;
+        const w = motionOn ? 0.5 + Math.sin(t * (stuck ? 7 : 3.4) + a.seed) * 0.5 : 0.5;
         a.bulb.material.opacity = 0.6 + w * 0.4;
         a.bulb.scale.setScalar(1 + w * 0.2);
         a.cone.material.opacity = 0.11 + w * 0.10;
         a.pool.material.opacity = 0.14 + w * 0.12;
-        a.spot.intensity = 22 + w * 22;
+        if (a.spot) {
+          a.spot.color.setHex(tint);
+          a.spot.intensity = 22 + w * 22;
+        }
+      } else if (a.spot) {
+        a.spot.intensity = 0;
       }
     }
   }
 
   for (const a of ambient) {
-    const walking = wanderStep(a, false, dt, t);
+    wanderStep(a, false, dt, t);
     a.person.visible = levelOf(a) === viewLevel;
-    if (walking) {
-      a.body.position.y = Math.abs(Math.sin(t * 9 + a.seed)) * 0.05;
-      a.body.rotation.z = Math.sin(t * 9 + a.seed) * 0.05;
-      let d = a.facing - a.body.rotation.y;
-      while (d > Math.PI) d -= Math.PI * 2;
-      while (d < -Math.PI) d += Math.PI * 2;
-      a.body.rotation.y += d * 0.16;
-    } else {
-      a.body.position.y = Math.sin(t * 1.3 + a.seed) * 0.007;
-      a.body.rotation.z = 0;
-      if (a.chatWith || a.visit) {
-        let d = a.facing - a.body.rotation.y;
-        while (d > Math.PI) d -= Math.PI * 2;
-        while (d < -Math.PI) d += Math.PI * 2;
-        a.body.rotation.y += d * 0.08;
-      }
-    }
+    a.rig.update(avatarPose(a, "idle", t), dt, t, rigStep(a, cam));
   }
-  if (t - lastMini > 0.25) { renderMinimap(); lastMini = t; }
+  stepBubble(dt, t);
 
-  if (screensDirty && t - lastScreenPaint > 0.4) {
+  if (miniDirty && t - lastMini > tier.minimapPeriod) {
+    renderMinimap();
+    miniDirty = false;
+    lastMini = t;
+  }
+
+  if (screensDirty && t - lastScreenPaint > tier.screenPeriod) {
     refreshScreens(screenData());
     screensDirty = false;
     lastScreenPaint = t;
   }
+  paintScreens(tier.screensPerFrame);
+  flushDom();
 
   if (following && avatars.has(following)) {
     const p = avatars.get(following).person.position;
@@ -722,25 +1172,34 @@ function animate() {
   }
 
   renderer.render(scene, camera);
+  sampleFrame(performance.now() - began);
+  if (shouldOfferLowSpec(hints)) offerLowSpec();
+  if (++sinceGpuLine >= 120) { sinceGpuLine = 0; renderGpuLine(); }
 }
 
 function setRing(role, name) {
   const a = avatars.get(role);
   if (!a) return;
-  deskState(role).ring = name;
+  const st = deskState(role);
+  if (st.ring === name) return;
+  st.ring = name;
   a.ringMat.color.setHex(RING[name] || RING.idle);
+  miniDirty = true;
 }
 
 const roleOf = (actor) => (actor || "").split("#")[0];
 
 function resetState() {
   for (const [role, a] of avatars) {
-    state.set(role, { ring: "idle", summary: "", tool: "", tokens: 0, log: [] });
+    state.set(role, { ring: "idle", summary: "", tool: "", tokens: 0, log: [], thought: "", thoughtPhase: "" });
     a.ringMat.color.setHex(RING.idle);
     if (a.meetingSeat) leaveTable(a, meetingApproach);
   }
   meetings.clear();
+  thought = null;
   hideBoard();
+  room = null;
+  renderRoom();
   workflow = null;
   stats = { events: 0, tokens: 0, spend: 0, cacheRead: 0, cacheWrite: 0, symbols: 0, run: stats.run, history: [], feed: [] };
 }
@@ -754,6 +1213,8 @@ function rebuildTo(seq) {
   renderStats();
   renderTrack();
   refreshScreens(screenData());
+  paintScreens(Infinity);
+  miniDirty = true;
 }
 
 function apply(ev, replaying) {
@@ -786,10 +1247,46 @@ function apply(ev, replaying) {
       const ids = (ev.data.participants || []).filter((r) => avatars.has(r));
       meetings.set(ev.data.meeting_id, ids);
       showBoard(ev.data.kind, ev.data.topic, ev.data.participants, ev.data.chair);
+      room = {
+        id: ev.data.meeting_id,
+        kind: ev.data.kind,
+        topic: ev.data.topic,
+        chair: ev.data.chair,
+        said: [],
+        decision: null,
+      };
+      renderRoom();
       ids.forEach((r, i) => {
         setRing(r, "meeting");
         if (meetingTable) seatAtTable(avatars.get(r), meetingTable, i, ids.length, meetingApproach);
       });
+      break;
+    }
+    case "meeting_spoke": {
+      if (room && room.id === ev.data.meeting_id) {
+        room.said.push({
+          role: ev.data.role,
+          seat: ev.data.seat,
+          position: ev.data.position,
+        });
+        renderRoom();
+      }
+      if (ev.data.seat !== "chair") boardSays(ev.data.role, ev.data.position);
+      if (!replaying && ev.data.role) chatterSays(ev.data.role);
+      if (st) logActivity(st, ev.seq, "spoke: " + String(ev.data.position || "").slice(0, 40));
+      break;
+    }
+    case "decision_recorded": {
+      if (room) {
+        room.decision = {
+          claim: ev.data.claim,
+          rationale: ev.data.rationale,
+          dissent: ev.data.dissent || [],
+          path: ev.data.path,
+        };
+        renderRoom();
+      }
+      if (ev.data.claim) boardDecided(ev.data.claim);
       break;
     }
     case "meeting_ended": {
@@ -799,7 +1296,12 @@ function apply(ev, replaying) {
         leaveTable(avatars.get(r), meetingApproach);
       });
       meetings.delete(ev.data.meeting_id);
-      if (!meetings.size) hideBoard();
+      if (!meetings.size && !(room && room.decision)) hideBoard();
+      break;
+    }
+    case "agent_thought": {
+      const who = ev.data.role && avatars.has(ev.data.role) ? ev.data.role : role;
+      if (avatars.has(who)) noteThought(who, ev.data.text || "", ev.data.phase || "thinking");
       break;
     }
     case "escalated": if (known) setRing(role, "blocked"); break;
@@ -844,16 +1346,23 @@ function apply(ev, replaying) {
       break;
     }
   }
-  if (!replaying) allEvents.push(ev);
+  if (!replaying) {
+    allEvents.push(ev);
+    if (allEvents.length > MAX_HISTORY) {
+      droppedBefore = allEvents[allEvents.length - MAX_HISTORY].seq;
+      allEvents.splice(0, allEvents.length - MAX_HISTORY);
+      seek.min = String(droppedBefore);
+    }
+  }
   stats.events++;
   stats.history.push(Math.min(1, ((ev.data && ev.data.output) || 8) / 120));
   if (stats.history.length > 26) stats.history.shift();
   stats.feed.push({ seq: ev.seq, type: ev.type, bad: BAD.has(ev.type) });
   if (stats.feed.length > 12) stats.feed.shift();
   if (!replaying) {
-    renderStats();
-    renderTrack();
-    if (selected && selected === role) showDetail(selected);
+    statsDirty = true;
+    trackDirty = true;
+    if (selected && selected === role) detailDirty = true;
   }
   screensDirty = true;
 }
@@ -917,13 +1426,24 @@ function renderStats() {
 
 const feed = document.getElementById("feed");
 function logEvent(ev) {
-  const row = document.createElement("div");
-  row.className = "ev" + (TERMINAL.has(ev.type) ? " terminal" : "") + (BAD.has(ev.type) ? " bad" : "");
-  const who = ev.actor === "daemon" ? "" : " " + roleOf(ev.actor);
-  row.innerHTML = `<span class="seq">${esc(ev.seq)}</span><span class="t">${esc(ev.type)}${esc(who)}</span>`;
-  feed.appendChild(row);
+  feedQueue.push(ev);
+  if (feedQueue.length > 400) feedQueue.shift();
+}
+
+function drainFeed() {
+  const pinned = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 26;
+  const batch = document.createDocumentFragment();
+  for (const ev of feedQueue) {
+    const row = document.createElement("div");
+    row.className = "ev" + (TERMINAL.has(ev.type) ? " terminal" : "") + (BAD.has(ev.type) ? " bad" : "");
+    const who = ev.actor === "daemon" ? "" : " " + roleOf(ev.actor);
+    row.innerHTML = `<span class="seq">${esc(ev.seq)}</span><span class="t">${esc(ev.type)}${esc(who)}</span>`;
+    batch.appendChild(row);
+  }
+  feedQueue.length = 0;
+  feed.appendChild(batch);
   while (feed.childElementCount > 400) feed.removeChild(feed.firstChild);
-  feed.scrollTop = feed.scrollHeight;
+  if (pinned) feed.scrollTop = feed.scrollHeight;
 }
 
 const conn = document.getElementById("conn");
@@ -940,6 +1460,7 @@ function connect() {
   ws.onmessage = (m) => {
     let ev; try { ev = JSON.parse(m.data); } catch { return; }
     if (typeof ev.seq === "number") lastSeq = Math.max(lastSeq, ev.seq);
+    pushEvent(ev);
     if (scrubbing) { allEvents.push(ev); seek.max = String(lastSeq); return; }
     apply(ev); logEvent(ev);
     seek.max = String(lastSeq);
@@ -964,7 +1485,7 @@ function applyMode() {
   briefBox.placeholder =
     composeMode === "build" ? "describe the game or the change; the crew reads the project first"
     : composeMode === "task" ? "what should they do?"
-    : "what is the meeting about?";
+    : "what should the room settle? the chair's ruling is written to the repo";
 }
 
 modeBtn.onclick = () => {
@@ -1155,7 +1676,13 @@ function loadProjects() {
 }
 loadProjects();
 
-projectSel.onchange = () => localStorage.setItem("studio.project", projectSel.value);
+projectSel.onchange = () => setProject(projectSel.value);
+
+onProject((id) => {
+  if (!id || projectSel.value === id) return;
+  if (![...projectSel.options].some((o) => o.value === id)) return;
+  projectSel.value = id;
+});
 
 document.getElementById("new-project").onclick = () => {
   projectForm.hidden = !projectForm.hidden;
@@ -1179,7 +1706,7 @@ document.getElementById("np-create").onclick = async () => {
     });
     if (!res.ok) { sent.textContent = await res.text(); return; }
     const made = await res.json();
-    localStorage.setItem("studio.project", made.id);
+    setProject(made.id);
     await loadProjects();
     projectSel.value = made.id;
     projectForm.hidden = true;
@@ -1214,7 +1741,7 @@ document.getElementById("send").onclick = async () => {
 
   const body = composeMode === "build" ? { prompt: brief, project, ask_above }
     : composeMode === "task" ? { role: picked[0], brief, project }
-    : { kind: "arbitration", participants: picked, topic: brief };
+    : { kind: "arbitration", participants: picked, topic: brief, project, ask_above };
 
   sent.textContent = "sending";
   try {
@@ -1224,7 +1751,8 @@ document.getElementById("send").onclick = async () => {
       body: JSON.stringify(body),
     });
     sent.textContent = res.ok
-      ? (composeMode === "build" ? "the director is planning it" : "queued on the floor")
+      ? (composeMode === "build" ? "the director is planning it"
+        : composeMode === "meeting" ? "convening the room" : "queued on the floor")
       : await res.text();
     if (res.ok) briefBox.value = "";
   } catch (err) {
@@ -1255,18 +1783,33 @@ fetch("/floor").then((r) => r.json()).then((f) => {
   levelGroups = built.levels || [];
   meetingTable = built.meetingTable;
   meetingApproach = built.meetingApproach || [];
+  mingleList = [...avatars.values(), ...ambient];
   floorsEl.hidden = (f.levels || 1) < 2;
   if (location.hash === "#2f" && (f.levels || 1) > 1) {
     viewLevel = 1;
-    const btns = floorsEl.querySelectorAll("button");
-    btns.forEach((b) => b.classList.toggle("on", Number(b.dataset.level) === 1));
+    for (const b of floorsEl.querySelectorAll("button")) {
+      b.classList.toggle("on", Number(b.dataset.level) === 1);
+    }
   }
   applyLevel();
+  rebuildHitList();
   resize();
   refreshScreens(screenData());
+  paintScreens(Infinity);
+  renderMinimap();
+  miniDirty = false;
+  setStage({
+    THREE, renderer, scene, camera, orbit, avatars, ambient, world: built.world,
+    deskState, showDetail, updateCamera,
+    now: () => clock.getElapsedTime(),
+    focused: () => following,
+    follow: (role) => { following = role; showDetail(role); },
+  });
+  startChatter();
   animate();
   connect();
 });
 </script>
+<script type="module" src="/panels.js"></script>
 </body>
 </html>

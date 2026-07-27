@@ -11,6 +11,12 @@ precedence = 1
 resolver = "path"
 binary_env = "PYTHON_BIN"
 binary_names = ["python", "python3", "py"]
+search = [
+  "{localappdata}/Programs/Python/Python3*/python.exe",
+  "{programfiles}/Python3*/python.exe",
+  "/usr/local/bin/python3",
+  "/usr/bin/python3",
+]
 
 [commands]
 compile   = "{engine} -m compileall -q {project}"

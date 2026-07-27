@@ -10,6 +10,7 @@ studio-agents.workspace = true
 studio-core.workspace = true
 studio-engine.workspace = true
 studio-events.workspace = true
+studio-settings.workspace = true
 studio-store.workspace = true
 studio-workflow.workspace = true
 anyhow.workspace = true
@@ -21,4 +22,5 @@ axum = { version = "0.7", features = ["ws"] }
 futures-util = "0.3"
 
 [dev-dependencies]
+tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

@@ -11,6 +11,13 @@ precedence = 2
 resolver = "path"
 binary_env = "NODE_BIN"
 binary_names = ["node"]
+search = [
+  "{programfiles}/nodejs/node.exe",
+  "{localappdata}/Programs/nodejs/node.exe",
+  "{home}/scoop/shims/node.exe",
+  "/usr/local/bin/node",
+  "/usr/bin/node",
+]
 
 [commands]
 compile   = "{engine} {project}/tools/studio_ci.mjs {project}"

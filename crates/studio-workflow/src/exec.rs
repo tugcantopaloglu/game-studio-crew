@@ -30,13 +30,32 @@ pub trait WorkflowHost {
     fn skip(&mut self, _node: &Node) {}
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum WaveVerdict {
+    Continue,
+    Redo,
+    Stop { reason: String },
+}
+
 pub trait ParallelWorkflowHost: Sync {
     fn admit(&self, node: &Node) -> Admission;
     fn enter(&self, node: &Node, inputs: &[String]) -> NodeOutcome;
     fn gate(&self, gate: &Gate, node: &Node) -> GateOutcome;
     fn repair(&self, node: &Node, gate: &Gate, round: u32) -> GateOutcome;
     fn skip(&self, _node: &Node) {}
+    fn capsule_of(&self, _node_id: &str) -> Option<String> {
+        None
+    }
+    fn nothing_further_can_run(&self, _failure: &str) -> Option<String> {
+        None
+    }
     fn wave_done(&self, _completed: &[&Node]) {}
+    fn before_wave(&self, _ready: &[&Node]) -> WaveVerdict {
+        WaveVerdict::Continue
+    }
+    fn after_wave(&self, _completed: &[&Node]) -> WaveVerdict {
+        WaveVerdict::Continue
+    }
 }
 
 pub const MAX_REPAIR_ROUNDS: u32 = 3;
@@ -48,6 +67,8 @@ pub enum RunOutcome {
     Escalated { node: String, reason: String },
     RoutedToInfra { node: String, reason: String },
     Refused { node: String, reason: String },
+    Interrupted { node: String, reason: String },
+    Halted { node: String, reason: String },
 }
 
 impl RunOutcome {
@@ -62,6 +83,8 @@ impl RunOutcome {
             RunOutcome::Escalated { .. } => "escalated",
             RunOutcome::RoutedToInfra { .. } => "inconclusive",
             RunOutcome::Refused { .. } => "refused",
+            RunOutcome::Interrupted { .. } => "interrupted",
+            RunOutcome::Halted { .. } => "halted",
         }
     }
 }
@@ -75,6 +98,7 @@ pub struct RunReport {
     pub gates_passed: usize,
     pub gates_failed: usize,
     pub repair_rounds: u32,
+    pub redo_rounds: u32,
     pub degradations: Vec<u8>,
 }
 
@@ -140,6 +164,27 @@ pub fn execute<H: WorkflowHost>(
     Ok(report)
 }
 
+fn what_it_said(panic: Box<dyn std::any::Any + Send>) -> String {
+    let said = panic
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic with no message".into());
+    format!("the step panicked: {said}")
+}
+
+fn enter_without_unwinding<H: ParallelWorkflowHost>(
+    host: &H,
+    node: &Node,
+    inputs: &[String],
+) -> NodeOutcome {
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| host.enter(node, inputs)));
+    match ran {
+        Ok(outcome) => outcome,
+        Err(panic) => NodeOutcome::Failed { reason: what_it_said(panic) },
+    }
+}
+
 pub fn execute_parallel<H: ParallelWorkflowHost>(
     wf: &Workflow,
     host: &H,
@@ -149,6 +194,12 @@ pub fn execute_parallel<H: ParallelWorkflowHost>(
     let order = wf.resume_from(already_done)?;
     let width = max_parallel.max(1);
     let mut report = RunReport::default();
+
+    for id in already_done {
+        if let Some(capsule) = host.capsule_of(id) {
+            report.capsules.insert(id.clone(), capsule);
+        }
+    }
 
     let mut deps: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for id in &order {
@@ -176,8 +227,16 @@ pub fn execute_parallel<H: ParallelWorkflowHost>(
             break;
         }
 
+        if let WaveVerdict::Stop { reason } = host.before_wave(&ready) {
+            stop = Some(RunOutcome::Interrupted {
+                node: ready[0].id.clone(),
+                reason,
+            });
+            break;
+        }
+
         let mut wave: Vec<(&Node, Vec<String>)> = Vec::new();
-        for node in ready {
+        for node in ready.iter().copied() {
             match host.admit(node) {
                 Admission::Admit => {}
                 Admission::Degrade { step } => report.degradations.push(step),
@@ -211,29 +270,52 @@ pub fn execute_parallel<H: ParallelWorkflowHost>(
         }
 
         let mut outcomes: Vec<(&Node, NodeOutcome)> = Vec::new();
+        let mut halted: Option<(String, String)> = None;
         for chunk in wave.chunks(width) {
             let batch = std::thread::scope(|scope| {
                 let handles: Vec<_> = chunk
                     .iter()
-                    .map(|(node, inputs)| scope.spawn(move || (*node, host.enter(node, inputs))))
+                    .map(|(node, inputs)| {
+                        (*node, scope.spawn(move || enter_without_unwinding(host, node, inputs)))
+                    })
                     .collect();
-                handles.into_iter().map(|h| h.join().expect("worker thread panicked")).collect::<Vec<_>>()
+                handles
+                    .into_iter()
+                    .map(|(node, h)| {
+                        let outcome = h.join().unwrap_or_else(|panic| NodeOutcome::Failed {
+                            reason: what_it_said(panic),
+                        });
+                        (node, outcome)
+                    })
+                    .collect::<Vec<_>>()
             });
             outcomes.extend(batch);
+
+            halted = outcomes.iter().find_map(|(node, outcome)| match outcome {
+                NodeOutcome::Failed { reason } => host
+                    .nothing_further_can_run(reason)
+                    .map(|why| (node.id.clone(), why)),
+                _ => None,
+            });
+            if halted.is_some() {
+                break;
+            }
         }
 
         let mut completed: Vec<&Node> = Vec::new();
         for (node, outcome) in outcomes {
             pending.retain(|id| *id != node.id);
             settled.insert(node.id.as_str());
-            report.entered.push(node.id.clone());
+            if !report.entered.contains(&node.id) {
+                report.entered.push(node.id.clone());
+            }
             match outcome {
                 NodeOutcome::Completed { capsule } => {
                     report.capsules.insert(node.id.clone(), capsule);
                     completed.push(node);
                 }
                 NodeOutcome::Failed { reason } => {
-                    if node.optional {
+                    if node.optional && halted.is_none() {
                         report.entered.retain(|id| id != &node.id);
                         report.skipped.push(node.id.clone());
                     } else if stop.is_none() {
@@ -243,11 +325,15 @@ pub fn execute_parallel<H: ParallelWorkflowHost>(
             }
         }
 
+        if let Some((node, reason)) = halted {
+            stop = Some(RunOutcome::Halted { node, reason });
+        }
+
         if !completed.is_empty() {
             host.wave_done(&completed);
         }
 
-        for node in completed {
+        for node in completed.iter().copied() {
             if stop.is_some() {
                 break;
             }
@@ -256,6 +342,32 @@ pub fn execute_parallel<H: ParallelWorkflowHost>(
                     stop = Some(outcome);
                     break;
                 }
+            }
+        }
+
+        if stop.is_some() || completed.is_empty() {
+            continue;
+        }
+
+        match host.after_wave(&completed) {
+            WaveVerdict::Continue => {}
+            WaveVerdict::Stop { reason } => {
+                stop = Some(RunOutcome::Interrupted {
+                    node: completed[0].id.clone(),
+                    reason,
+                });
+            }
+            WaveVerdict::Redo => {
+                report.redo_rounds += 1;
+                for node in completed {
+                    settled.remove(node.id.as_str());
+                    report.capsules.remove(&node.id);
+                }
+                pending = order
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|id| !settled.contains(id))
+                    .collect();
             }
         }
     }
@@ -612,6 +724,13 @@ mod tests {
             entered: Mutex<Vec<String>>,
             waves: Mutex<Vec<Vec<String>>>,
             fail_node: Option<String>,
+            stop_before: Option<String>,
+            redo_after: Option<String>,
+            redone: AtomicUsize,
+            notes: Mutex<Vec<String>>,
+            briefs: Mutex<Vec<String>>,
+            out_of_allowance_at: Option<String>,
+            panic_at: Option<String>,
         }
 
         impl ParallelWorkflowHost for ParHost {
@@ -625,10 +744,50 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(25));
                 self.active.fetch_sub(1, Ordering::SeqCst);
                 self.entered.lock().unwrap().push(node.id.clone());
+                let notes = self.notes.lock().unwrap().join(" ");
+                self.briefs.lock().unwrap().push(format!("{} {notes}", node.id));
+                if self.panic_at.as_deref() == Some(node.id.as_str()) {
+                    panic!("the pipes are on fire");
+                }
+                if self.out_of_allowance_at.as_deref() == Some(node.id.as_str()) {
+                    return NodeOutcome::Failed { reason: "no allowance left".into() };
+                }
                 if self.fail_node.as_deref() == Some(node.id.as_str()) {
                     return NodeOutcome::Failed { reason: "worker crashed".into() };
                 }
                 NodeOutcome::Completed { capsule: format!("cap_{}", node.id) }
+            }
+
+            fn capsule_of(&self, node_id: &str) -> Option<String> {
+                Some(format!("cap_{node_id}"))
+            }
+
+            fn nothing_further_can_run(&self, failure: &str) -> Option<String> {
+                failure
+                    .contains("no allowance left")
+                    .then(|| "the account is out of allowance until 7:40pm".to_string())
+            }
+
+            fn before_wave(&self, ready: &[&Node]) -> WaveVerdict {
+                match &self.stop_before {
+                    Some(id) if ready.iter().any(|n| &n.id == id) => {
+                        WaveVerdict::Stop { reason: "you stopped the run".into() }
+                    }
+                    _ => WaveVerdict::Continue,
+                }
+            }
+
+            fn after_wave(&self, completed: &[&Node]) -> WaveVerdict {
+                self.notes.lock().unwrap().clear();
+                let asked = self
+                    .redo_after
+                    .as_deref()
+                    .is_some_and(|id| completed.iter().any(|n| n.id == id));
+                if !asked || self.redone.fetch_add(1, Ordering::SeqCst) > 0 {
+                    return WaveVerdict::Continue;
+                }
+                self.notes.lock().unwrap().push("make the pipes green".into());
+                WaveVerdict::Redo
             }
 
             fn gate(&self, _gate: &Gate, _node: &Node) -> GateOutcome {
@@ -697,6 +856,151 @@ mod tests {
         }
 
         #[test]
+        fn an_exhausted_account_stops_the_run_rather_than_spending_the_rest_of_the_wave() {
+            let wf = diamond();
+            let h = ParHost {
+                out_of_allowance_at: Some("t2".into()),
+                ..Default::default()
+            };
+            let r = execute_parallel(&wf, &h, &BTreeSet::new(), 1).unwrap();
+
+            match r.outcome {
+                Some(RunOutcome::Halted { ref node, ref reason }) => {
+                    assert_eq!(node, "t2");
+                    assert!(reason.contains("7:40pm"), "the reset time is the point: {reason}");
+                }
+                other => panic!("a refused allowance is not an ordinary block: {other:?}"),
+            }
+
+            let entered = h.entered.lock().unwrap();
+            assert!(entered.contains(&"t2".to_string()));
+            assert!(
+                !entered.contains(&"t3".to_string()) && !entered.contains(&"t4".to_string()),
+                "t3 and t4 were dispatched after the account had already refused, and every one \
+                 of them can only refuse too: {entered:?}"
+            );
+        }
+
+        #[test]
+        fn work_that_landed_before_the_account_ran_out_is_still_committed() {
+            let wf = diamond();
+            let h = ParHost {
+                out_of_allowance_at: Some("t3".into()),
+                ..Default::default()
+            };
+            let r = execute_parallel(&wf, &h, &BTreeSet::new(), 4).unwrap();
+
+            assert!(matches!(r.outcome, Some(RunOutcome::Halted { .. })));
+            assert!(
+                h.waves.lock().unwrap().iter().any(|w| w.contains(&"t1".to_string())),
+                "t1 finished and was paid for; halting must not throw its commit away"
+            );
+        }
+
+        #[test]
+        fn a_step_that_panics_fails_that_step_and_leaves_the_run_standing() {
+            let wf = diamond();
+            let h = ParHost { panic_at: Some("t3".into()), ..Default::default() };
+
+            let r = execute_parallel(&wf, &h, &BTreeSet::new(), 4).unwrap();
+
+            match r.outcome {
+                Some(RunOutcome::Blocked { ref node, ref reason }) => {
+                    assert_eq!(node, "t3");
+                    assert!(
+                        reason.contains("the pipes are on fire"),
+                        "the panic message is the only clue anyone gets: {reason}"
+                    );
+                }
+                other => panic!("a panicking step must be a blocked run, not a dead process: {other:?}"),
+            }
+
+            assert!(
+                h.entered.lock().unwrap().contains(&"t2".to_string()),
+                "a sibling in the same wave must still have been run and reported"
+            );
+        }
+
+        #[test]
+        fn a_panic_in_one_step_does_not_take_its_wave_down_with_it() {
+            let wf = diamond();
+            let h = ParHost { panic_at: Some("t2".into()), ..Default::default() };
+
+            let r = execute_parallel(&wf, &h, &BTreeSet::new(), 4).unwrap();
+            let entered = h.entered.lock().unwrap();
+            assert!(
+                entered.contains(&"t3".to_string()) && entered.contains(&"t4".to_string()),
+                "t2, t3 and t4 share a wave; one of them panicking used to abort the scope and \
+                 unwind the whole daemon: {entered:?}"
+            );
+            assert_eq!(r.entered.len(), 4, "t5 depends on t2, so it cannot run: {:?}", r.entered);
+        }
+
+        #[test]
+        fn a_resumed_run_skips_what_finished_and_runs_only_what_is_left() {
+            let wf = diamond();
+            let h = ParHost::default();
+            let done: BTreeSet<String> = ["t1", "t2"].iter().map(|s| s.to_string()).collect();
+
+            let r = execute_parallel(&wf, &h, &done, 4).unwrap();
+            assert_eq!(r.outcome, Some(RunOutcome::Completed));
+
+            let entered = h.entered.lock().unwrap();
+            assert!(
+                !entered.contains(&"t1".to_string()) && !entered.contains(&"t2".to_string()),
+                "a finished step is paid for once: {entered:?}"
+            );
+            assert_eq!(entered.len(), 3, "t3, t4 and t5 are what is left: {entered:?}");
+        }
+
+        #[test]
+        fn a_resumed_node_still_knows_what_its_finished_dependencies_produced() {
+            let wf = diamond();
+            let h = ParHost::default();
+            let done: BTreeSet<String> = ["t1", "t2", "t3"].iter().map(|s| s.to_string()).collect();
+
+            let r = execute_parallel(&wf, &h, &done, 4).unwrap();
+            assert_eq!(
+                r.capsules.get("t2").map(String::as_str),
+                Some("cap_t2"),
+                "t5 reads t2, t3 and t4; without the capsules of the two that already ran it \
+                 would be briefed as though they never happened"
+            );
+            assert!(r.entered.contains(&"t5".to_string()));
+        }
+
+        #[test]
+        fn an_optional_node_whose_dependency_finished_last_time_is_not_skipped_on_resume() {
+            let mut wf = diamond();
+            for n in wf.nodes.iter_mut().filter(|n| n.id == "t5") {
+                n.optional = true;
+            }
+            let h = ParHost::default();
+            let done: BTreeSet<String> =
+                ["t1", "t2", "t3", "t4"].iter().map(|s| s.to_string()).collect();
+
+            let r = execute_parallel(&wf, &h, &done, 4).unwrap();
+            assert!(
+                r.entered.contains(&"t5".to_string()),
+                "its inputs all landed in the previous run; dropping it as unsatisfied would \
+                 silently lose the last step of every resumed plan: {:?}",
+                r.skipped
+            );
+        }
+
+        #[test]
+        fn an_ordinary_worker_crash_is_still_a_block_and_not_a_halt() {
+            let wf = diamond();
+            let h = ParHost { fail_node: Some("t2".into()), ..Default::default() };
+            let r = execute_parallel(&wf, &h, &BTreeSet::new(), 4).unwrap();
+            assert!(
+                matches!(r.outcome, Some(RunOutcome::Blocked { .. })),
+                "only the host may decide a failure means nothing else can run: {:?}",
+                r.outcome
+            );
+        }
+
+        #[test]
         fn dependencies_still_hold_under_parallelism() {
             let wf = diamond();
             let h = ParHost::default();
@@ -754,6 +1058,77 @@ mod tests {
         }
 
         #[test]
+        fn an_interrupt_lands_between_waves_instead_of_being_swallowed() {
+            let wf = diamond();
+            let h = ParHost { stop_before: Some("t2".into()), ..Default::default() };
+            let r = execute_parallel(&wf, &h, &BTreeSet::new(), 4).unwrap();
+
+            match r.outcome {
+                Some(RunOutcome::Interrupted { ref reason, .. }) => {
+                    assert!(reason.contains("stopped"))
+                }
+                other => panic!("expected an interruption, got {other:?}"),
+            }
+            assert_eq!(r.entered, vec!["t1".to_string()], "t1 was already running when you hit stop");
+            let entered = h.entered.lock().unwrap();
+            for later in ["t2", "t3", "t4", "t5"] {
+                assert!(!entered.contains(&later.to_string()), "{later} started after the stop");
+            }
+        }
+
+        #[test]
+        fn an_interrupt_before_the_first_wave_spends_nothing() {
+            let wf = diamond();
+            let h = ParHost { stop_before: Some("t1".into()), ..Default::default() };
+            let r = execute_parallel(&wf, &h, &BTreeSet::new(), 4).unwrap();
+            assert!(matches!(r.outcome, Some(RunOutcome::Interrupted { .. })));
+            assert!(r.entered.is_empty(), "an interrupt that arrives first pays for no worker");
+        }
+
+        #[test]
+        fn a_rejected_step_runs_its_whole_tier_again_with_the_notes() {
+            let wf = diamond();
+            let h = ParHost { redo_after: Some("t1".into()), ..Default::default() };
+            let r = execute_parallel(&wf, &h, &BTreeSet::new(), 4).unwrap();
+
+            assert_eq!(r.outcome, Some(RunOutcome::Completed));
+            assert_eq!(r.redo_rounds, 1);
+            assert_eq!(r.entered.len(), 5, "a redo re-enters a node, it does not add one");
+
+            let entered = h.entered.lock().unwrap();
+            assert_eq!(
+                entered.iter().filter(|id| *id == "t1").count(),
+                2,
+                "the rejected tier runs a second time"
+            );
+
+            let briefs = h.briefs.lock().unwrap();
+            assert_eq!(briefs[0], "t1 ", "the first attempt had nothing to go on");
+            assert_eq!(
+                briefs[1], "t1 make the pipes green",
+                "the second attempt is briefed with what the human said was wrong"
+            );
+            assert!(
+                briefs[2..].iter().all(|b| !b.contains("make the pipes green")),
+                "notes for one tier must not leak into the next"
+            );
+        }
+
+        #[test]
+        fn a_tier_the_human_sends_back_still_blocks_everything_downstream() {
+            let wf = diamond();
+            let h = ParHost { redo_after: Some("t1".into()), ..Default::default() };
+            execute_parallel(&wf, &h, &BTreeSet::new(), 4).unwrap();
+
+            let entered = h.entered.lock().unwrap();
+            let second_t1 = entered.iter().rposition(|id| id == "t1").unwrap();
+            for later in ["t2", "t3", "t4", "t5"] {
+                let at = entered.iter().position(|id| id == later).unwrap();
+                assert!(at > second_t1, "{later} ran before the redo of t1 finished");
+            }
+        }
+
+        #[test]
         fn resuming_skips_finished_nodes_in_parallel_mode() {
             let wf = diamond();
             let done: BTreeSet<String> = ["t1".into()].into_iter().collect();
@@ -775,6 +1150,10 @@ mod tests {
         assert_eq!(
             RunOutcome::RoutedToInfra { node: "n".into(), reason: "r".into() }.tag(),
             "inconclusive"
+        );
+        assert_eq!(
+            RunOutcome::Interrupted { node: "n".into(), reason: "r".into() }.tag(),
+            "interrupted"
         );
     }
 }

@@ -8,27 +8,40 @@ use serde_json::json;
 
 pub const CHARS_PER_TOKEN: f64 = 3.6;
 
+pub const ESTIMATOR_MARGIN_DIVISOR: usize = 4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Model {
     Fable,
     Opus,
+    Sonnet,
     Haiku,
 }
 
 impl Model {
+    pub const ALL: [Model; 4] = [Model::Fable, Model::Opus, Model::Sonnet, Model::Haiku];
+
     pub fn cli_alias(&self) -> &'static str {
         match self {
             Model::Fable => "fable",
             Model::Opus => "opus",
+            Model::Sonnet => "sonnet",
             Model::Haiku => "haiku",
         }
     }
 
     pub fn min_cacheable_tokens(&self) -> usize {
+        let documented = self.documented_min_cacheable_tokens();
+        documented + documented / ESTIMATOR_MARGIN_DIVISOR
+    }
+
+    pub fn documented_min_cacheable_tokens(&self) -> usize {
         match self {
-            Model::Fable => 2048,
-            Model::Opus | Model::Haiku => 4096,
+            Model::Fable => 512,
+            Model::Opus => 512,
+            Model::Sonnet => 1024,
+            Model::Haiku => 4096,
         }
     }
 }
@@ -299,10 +312,62 @@ mod tests {
 
         let fable = freeze(&src(), &tools(), Model::Fable).unwrap();
         assert!(fable.estimated_tokens >= Model::Fable.min_cacheable_tokens());
+
+        let sonnet = freeze(&src(), &tools(), Model::Sonnet).unwrap();
         assert!(
-            fable.estimated_tokens < opus.estimated_tokens,
-            "fable's lower minimum should need less padding"
+            opus.estimated_tokens < sonnet.estimated_tokens,
+            "opus caches from a lower floor than sonnet, so it should need less padding"
         );
+    }
+
+    #[test]
+    fn the_pad_target_clears_the_published_floor_by_the_estimator_margin() {
+        for m in Model::ALL {
+            let documented = m.documented_min_cacheable_tokens();
+            let padded = m.min_cacheable_tokens();
+            assert!(
+                padded > documented,
+                "{} pads to exactly its floor, leaving nothing for a floor that moves under us",
+                m.cli_alias()
+            );
+            assert_eq!(padded, documented + documented / ESTIMATOR_MARGIN_DIVISOR);
+        }
+    }
+
+    #[test]
+    fn the_estimator_undercounts_real_tokens_so_a_target_is_a_floor_not_a_ceiling() {
+        let frozen = freeze(&src(), &tools(), Model::Opus).unwrap();
+        let measured_chars_per_token = 2.52;
+
+        assert!(
+            CHARS_PER_TOKEN > measured_chars_per_token,
+            "a real opus spawn tokenized a 2333-character charter to 926 tokens, {measured_chars_per_token} \
+             chars a token, against the {CHARS_PER_TOKEN} assumed here. The estimate is therefore a \
+             conservative LOWER bound on real tokens, not an upper one: charter prose is dense, and \
+             the numbered padding lines spend a token per digit. Do not read the margin above as \
+             slack to be trimmed, and do not treat an estimate as a ceiling when sizing anything \
+             against a real limit."
+        );
+
+        let real_tokens_at_least = frozen.estimated_tokens;
+        assert!(
+            real_tokens_at_least >= Model::Opus.documented_min_cacheable_tokens(),
+            "the estimate alone already clears the floor before any margin is applied"
+        );
+    }
+
+    #[test]
+    fn no_model_pads_more_than_twice_what_it_needs() {
+        for m in Model::ALL {
+            let documented = m.documented_min_cacheable_tokens();
+            assert!(
+                m.min_cacheable_tokens() < documented * 2,
+                "{} pads to {} against a floor of {documented}; padding rides inside the cached \
+                 prefix, so every warm read pays for it too",
+                m.cli_alias(),
+                m.min_cacheable_tokens()
+            );
+        }
     }
 
     #[test]
@@ -340,5 +405,117 @@ mod tests {
         assert_eq!(d["role"], "gameplay_engineer");
         assert_eq!(d["prefix_hash"], p.prefix_hash);
         assert_eq!(d["tools"][0], "Glob");
+    }
+}
+
+#[cfg(test)]
+mod widening_tests {
+    use super::*;
+
+    fn probe_charter() -> CharterSource {
+        CharterSource {
+            studio_conventions: "L0 conventions".into(),
+            engine_profile: "L1 engine".into(),
+            role_charter: "L2 charter".into(),
+        }
+    }
+
+    fn probe_tools() -> Vec<String> {
+        vec!["Read".to_string(), "Grep".to_string()]
+    }
+
+    #[test]
+    fn adding_a_model_never_moves_an_existing_models_prefix_hash() {
+        let known = [
+            (Model::Fable, "83d980abc74d65ff3afd1dfe71ad5fb0f806c3f50a7926c24b8ab234ce832ad7"),
+            (Model::Opus, "bed6605082a03c6ed98e5ee9000aebf2b439ffebff8564cccbc46d6cf355487f"),
+            (Model::Sonnet, "4d3612598a7038ed0b04f4da3986d17d12f104f5055e9b228c247c585d17b3a6"),
+            (Model::Haiku, "767639b7bdd2c2bdb12d09ed5d49cc5bdfce501fcca551fd83e8a6c9a61d65c2"),
+        ];
+        for (model, expected) in known {
+            let frozen = freeze(&probe_charter(), &probe_tools(), model).unwrap();
+            assert_eq!(
+                frozen.prefix_hash, expected,
+                "{} moved; every warm prefix in the wild for it is now a cold write",
+                model.cli_alias()
+            );
+        }
+    }
+
+    #[test]
+    fn the_hash_is_built_from_the_cli_alias_not_from_the_enum_position() {
+        let mut hasher = blake3::Hasher::new();
+        let frozen = freeze(&probe_charter(), &probe_tools(), Model::Opus).unwrap();
+        hasher.update(frozen.bytes.as_bytes());
+        hasher.update(b"\x00tools\x00");
+        for t in &frozen.tools {
+            hasher.update(t.as_bytes());
+            hasher.update(b"\x00");
+        }
+        hasher.update(b"\x00model\x00");
+        hasher.update(b"opus");
+
+        assert_eq!(
+            frozen.prefix_hash,
+            hasher.finalize().to_hex().to_string(),
+            "the model enters the hash as its alias bytes; a discriminant would make variant order load-bearing"
+        );
+    }
+
+    #[test]
+    fn every_model_hashes_to_its_own_prefix_so_none_can_be_mistaken_for_another() {
+        let mut seen = std::collections::HashSet::new();
+        for m in Model::ALL {
+            let frozen = freeze(&probe_charter(), &probe_tools(), m).unwrap();
+            assert!(seen.insert(frozen.prefix_hash), "{} collides with another model", m.cli_alias());
+        }
+        assert_eq!(seen.len(), Model::ALL.len());
+    }
+
+    #[test]
+    fn every_model_pads_at_or_above_the_minimum_its_documentation_states() {
+        for m in Model::ALL {
+            assert!(
+                m.min_cacheable_tokens() >= m.documented_min_cacheable_tokens(),
+                "{} pads to {} but needs {}; a short charter would silently never cache",
+                m.cli_alias(),
+                m.min_cacheable_tokens(),
+                m.documented_min_cacheable_tokens()
+            );
+        }
+    }
+
+    #[test]
+    fn sonnet_pads_past_its_documented_minimum_rather_than_exactly_to_it() {
+        assert_eq!(Model::Sonnet.documented_min_cacheable_tokens(), 1024);
+        assert_eq!(
+            Model::Sonnet.min_cacheable_tokens(),
+            1280,
+            "padding above the minimum still caches; padding below it caches nothing, silently"
+        );
+    }
+
+    #[test]
+    fn the_padding_the_studio_uses_is_not_mistaken_for_the_published_minimum() {
+        let over_padded: Vec<&str> = Model::ALL
+            .into_iter()
+            .filter(|m| m.min_cacheable_tokens() > m.documented_min_cacheable_tokens())
+            .map(|m| m.cli_alias())
+            .collect();
+        assert_eq!(
+            over_padded,
+            vec!["fable", "opus", "sonnet", "haiku"],
+            "every model clears its floor by the estimator margin; changing any of them moves its prefix hash"
+        );
+    }
+
+    #[test]
+    fn every_model_alias_is_the_lowercase_name_the_cli_takes() {
+        for m in Model::ALL {
+            let alias = m.cli_alias();
+            assert!(!alias.is_empty());
+            assert_eq!(alias, alias.to_lowercase());
+        }
+        assert_eq!(Model::Sonnet.cli_alias(), "sonnet");
     }
 }

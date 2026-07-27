@@ -22,6 +22,7 @@ studio-workflow.workspace = true
 studio-budget.workspace = true
 studio-agents.workspace = true
 studio-server.workspace = true
+studio-settings.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 serde.workspace = true

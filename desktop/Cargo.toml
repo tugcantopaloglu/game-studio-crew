@@ -1,0 +1,29 @@
+[package]
+name = "game-studio-shell"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+publish = false
+build = "build.rs"
+
+[workspace]
+
+[[bin]]
+name = "game-studio"
+path = "src/main.rs"
+
+[dependencies]
+studio-core = { path = "../crates/studio-core" }
+tao = "0.35"
+wry = "0.55"
+
+[build-dependencies]
+embed-resource = "3"
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

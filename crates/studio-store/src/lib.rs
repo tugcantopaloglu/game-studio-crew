@@ -6,8 +6,16 @@ use rusqlite::{params, Connection, OpenFlags};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use studio_events::{Envelope, EventType, Outcome, Scene, Usage, WorkerState};
+
+const READER_POOL: usize = 4;
+
+fn wire_index() -> &'static HashMap<&'static str, EventType> {
+    static INDEX: OnceLock<HashMap<&'static str, EventType>> = OnceLock::new();
+    INDEX.get_or_init(|| EventType::ALL.iter().map(|t| (t.wire_name(), *t)).collect())
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -139,6 +147,7 @@ enum Cmd {
         reply: Reply<Envelope>,
     },
     RecordUsage(LedgerEntry, String, Reply<()>),
+    Checkpoint(Reply<u64>),
     Shutdown,
 }
 
@@ -147,7 +156,35 @@ type Reply<T> = std::sync::mpsc::Sender<Result<T>>;
 pub struct Store {
     tx: Sender<Cmd>,
     path: PathBuf,
+    readers: Mutex<Vec<Connection>>,
     handle: Option<thread::JoinHandle<()>>,
+}
+
+pub struct Reader<'a> {
+    conn: Option<Connection>,
+    pool: &'a Mutex<Vec<Connection>>,
+}
+
+impl std::ops::Deref for Reader<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().expect("a live reader always holds its connection")
+    }
+}
+
+impl Drop for Reader<'_> {
+    fn drop(&mut self) {
+        let conn = match self.conn.take() {
+            Some(c) => c,
+            None => return,
+        };
+        if let Ok(mut pool) = self.pool.lock() {
+            if pool.len() < READER_POOL {
+                pool.push(conn);
+            }
+        }
+    }
 }
 
 impl Store {
@@ -173,20 +210,27 @@ impl Store {
                     }
                 }
 
+                let _ = fold_the_wal_back_in(&conn);
+
                 for cmd in rx {
                     match cmd {
                         Cmd::Shutdown => break,
                         other => handle_cmd(&conn, &mut seq_by_run, other),
                     }
                 }
+                let _ = fold_the_wal_back_in(&conn);
             })
             .expect("spawn store writer");
 
-        Ok(Self { tx, path, handle: Some(handle) })
+        Ok(Self { tx, path, readers: Mutex::new(Vec::new()), handle: Some(handle) })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn checkpoint(&self) -> Result<u64> {
+        self.send(Cmd::Checkpoint)
     }
 
     fn send<T>(&self, make: impl FnOnce(Reply<T>) -> Cmd) -> Result<T> {
@@ -328,21 +372,36 @@ impl Store {
         self.send(|r| Cmd::RecordUsage(entry, ts, r))
     }
 
-    fn reader(&self) -> Result<Connection> {
-        let conn = Connection::open_with_flags(
-            &self.path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-        )?;
-        Ok(conn)
+    fn reader(&self) -> Result<Reader<'_>> {
+        let pooled = self.readers.lock().ok().and_then(|mut p| p.pop());
+        let conn = match pooled {
+            Some(conn) => conn,
+            None => Connection::open_with_flags(
+                &self.path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+            )?,
+        };
+        Ok(Reader { conn: Some(conn), pool: &self.readers })
+    }
+
+    pub fn head_seq(&self, run: &str) -> Result<u64> {
+        let conn = self.reader()?;
+        let mut stmt = conn.prepare_cached("SELECT MAX(seq) FROM events WHERE run = ?1")?;
+        let head: Option<i64> = stmt.query_row(params![run], |r| r.get(0))?;
+        Ok(head.unwrap_or(0) as u64)
     }
 
     pub fn events_since(&self, run: &str, since_seq: u64) -> Result<Vec<Envelope>> {
+        self.events_between(run, since_seq, u64::MAX)
+    }
+
+    pub fn events_between(&self, run: &str, since_seq: u64, limit: u64) -> Result<Vec<Envelope>> {
         let conn = self.reader()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT run, seq, ts, actor, type, scene_json, data_json
-             FROM events WHERE run = ?1 AND seq > ?2 ORDER BY seq",
+             FROM events WHERE run = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![run, since_seq as i64], |r| {
+        let rows = stmt.query_map(params![run, since_seq as i64, limit as i64], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, i64>(1)?,
@@ -357,13 +416,17 @@ impl Store {
         let mut out = Vec::new();
         for row in rows {
             let (run, seq, ts, actor, ty, scene, data) = row?;
+            let event_type = match wire_index().get(ty.as_str()).copied() {
+                Some(t) => t,
+                None => serde_json::from_str::<EventType>(&format!("\"{ty}\""))?,
+            };
             out.push(Envelope::new(
                 seq as u64,
                 ts,
                 run,
                 actor,
                 serde_json::from_str::<Scene>(&scene)?,
-                serde_json::from_str::<EventType>(&format!("\"{ty}\""))?,
+                event_type,
                 serde_json::from_str(&data)?,
             ));
         }
@@ -470,6 +533,9 @@ impl Store {
 
 impl Drop for Store {
     fn drop(&mut self) {
+        if let Ok(mut pool) = self.readers.lock() {
+            pool.clear();
+        }
         let _ = self.tx.send(Cmd::Shutdown);
         if let Some(h) = self.handle.take() {
             let _ = h.join();
@@ -514,9 +580,19 @@ fn project_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
     })
 }
 
+pub fn fold_the_wal_back_in(conn: &Connection) -> rusqlite::Result<u64> {
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+        r.get::<_, i64>(1).map(|pages| pages.max(0) as u64)
+    })
+}
+
 fn handle_cmd(conn: &Connection, seq_by_run: &mut HashMap<String, u64>, cmd: Cmd) {
     match cmd {
         Cmd::Shutdown => {}
+
+        Cmd::Checkpoint(reply) => {
+            let _ = reply.send(fold_the_wal_back_in(conn).map_err(StoreError::from));
+        }
 
         Cmd::InsertProject(p, ts, reply) => {
             let res = conn
@@ -759,6 +835,124 @@ mod tests {
         }
     }
 
+    fn wal_bytes(path: &Path) -> u64 {
+        let wal = path.with_extension("db-wal");
+        std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0)
+    }
+
+    #[test]
+    fn a_checkpoint_folds_the_write_ahead_log_back_into_the_database_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let store = Store::open(&path).unwrap();
+
+        for i in 0..2000 {
+            store
+                .append_event(
+                    "run_wal",
+                    "2026-07-26T00:00:00Z",
+                    "daemon",
+                    EventType::WorkerSpawned,
+                    Scene::daemon(),
+                    serde_json::json!({"i": i, "padding": "x".repeat(200)}),
+                )
+                .unwrap();
+        }
+
+        let before = wal_bytes(&path);
+        assert!(before > 0, "these writes are supposed to have gone through a wal");
+
+        store.checkpoint().unwrap();
+        assert_eq!(
+            wal_bytes(&path),
+            0,
+            "the daemon is killed rather than closed, so a wal that is only folded in on a clean \
+             close is a wal that survives every run: {before} bytes were left behind"
+        );
+
+        assert_eq!(
+            store.events_between("run_wal", 0, 5000).unwrap().len(),
+            2000,
+            "a checkpoint must move the events into the file, not drop them"
+        );
+    }
+
+    #[test]
+    fn a_store_that_is_dropped_leaves_no_write_ahead_log_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        {
+            let store = Store::open(&path).unwrap();
+            for i in 0..500 {
+                store
+                    .append_event(
+                        "run_drop",
+                        "2026-07-26T00:00:00Z",
+                        "daemon",
+                        EventType::WorkerSpawned,
+                        Scene::daemon(),
+                        serde_json::json!({"i": i}),
+                    )
+                    .unwrap();
+            }
+            let _ = store.events_between("run_drop", 0, 10).unwrap();
+        }
+        assert_eq!(wal_bytes(&path), 0);
+    }
+
+    #[test]
+    fn a_freshly_migrated_store_puts_its_schema_in_the_file_rather_than_the_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let store = Store::open(&path).unwrap();
+        store.checkpoint().unwrap();
+
+        assert_eq!(
+            wal_bytes(&path),
+            0,
+            "a daemon that starts and is then killed used to leave its whole schema in a wal \
+             beside a database file that was still one page long"
+        );
+        assert!(
+            std::fs::metadata(&path).unwrap().len() > 4096,
+            "the schema has to have landed somewhere, and the file is the only place left"
+        );
+    }
+
+    #[test]
+    fn a_warm_reader_pool_does_not_stop_the_log_being_folded_back_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let store = Store::open(&path).unwrap();
+
+        for i in 0..READER_POOL * 2 {
+            store
+                .append_event(
+                    "run_pool",
+                    "2026-07-26T00:00:00Z",
+                    "daemon",
+                    EventType::WorkerSpawned,
+                    Scene::daemon(),
+                    serde_json::json!({"i": i}),
+                )
+                .unwrap();
+            let _ = store.events_between("run_pool", 0, 10).unwrap();
+        }
+        assert!(!store.readers.lock().unwrap().is_empty(), "the pool must be warm");
+
+        store.checkpoint().unwrap();
+        assert_eq!(
+            wal_bytes(&path),
+            0,
+            "an idle pooled reader holds no snapshot, so throwing the pool away to checkpoint \
+             would pay 0.9ms a read for nothing"
+        );
+        assert!(
+            !store.readers.lock().unwrap().is_empty(),
+            "the checkpoint must leave the pool it did not need to clear"
+        );
+    }
+
     #[test]
     fn migration_is_idempotent_and_sets_wal() {
         let dir = tempfile::tempdir().unwrap();
@@ -828,6 +1022,65 @@ mod tests {
         let tail = s.events_since("r", 4).unwrap();
         assert_eq!(tail.len(), 2);
         assert_eq!(tail[0].seq, 5);
+    }
+
+    #[test]
+    fn the_head_of_a_run_is_readable_without_reading_the_run() {
+        let (_d, s) = store();
+        for _ in 0..40 {
+            s.append_event("r", "t", "daemon", EventType::ToolCall, Scene::daemon(), serde_json::json!({}))
+                .unwrap();
+        }
+        for _ in 0..7 {
+            s.append_event("other", "t", "daemon", EventType::ToolCall, Scene::daemon(), serde_json::json!({}))
+                .unwrap();
+        }
+        assert_eq!(s.head_seq("r").unwrap(), 40);
+        assert_eq!(s.head_seq("other").unwrap(), 7);
+    }
+
+    #[test]
+    fn the_head_of_a_run_nobody_has_written_is_zero_rather_than_an_error() {
+        let (_d, s) = store();
+        assert_eq!(s.head_seq("never_ran").unwrap(), 0);
+    }
+
+    #[test]
+    fn a_bounded_read_stops_at_the_limit_it_was_given() {
+        let (_d, s) = store();
+        for _ in 0..100 {
+            s.append_event("r", "t", "daemon", EventType::ToolCall, Scene::daemon(), serde_json::json!({}))
+                .unwrap();
+        }
+        let page = s.events_between("r", 20, 10).unwrap();
+        assert_eq!(page.len(), 10);
+        assert_eq!(page.first().unwrap().seq, 21);
+        assert_eq!(page.last().unwrap().seq, 30);
+        assert_eq!(
+            s.events_since("r", 20).unwrap().len(),
+            80,
+            "an unbounded read still returns the whole tail"
+        );
+    }
+
+    #[test]
+    fn readers_are_reused_across_calls_without_changing_what_they_answer() {
+        let (_d, s) = store();
+        for _ in 0..5 {
+            s.append_event("r", "t", "daemon", EventType::CacheHit, Scene::daemon(), serde_json::json!({"n": 1}))
+                .unwrap();
+        }
+        for _ in 0..20 {
+            assert_eq!(s.events_since("r", 0).unwrap().len(), 5);
+            assert_eq!(s.head_seq("r").unwrap(), 5);
+        }
+        s.append_event("r", "t", "daemon", EventType::CacheHit, Scene::daemon(), serde_json::json!({"n": 2}))
+            .unwrap();
+        assert_eq!(
+            s.head_seq("r").unwrap(),
+            6,
+            "a pooled reader must still see writes that landed after it was parked"
+        );
     }
 
     #[test]
@@ -959,6 +1212,137 @@ mod tests {
             "t",
         );
         assert!(err.is_err());
+    }
+}
+
+#[cfg(test)]
+mod scale_probe {
+    use super::*;
+    use std::time::Instant;
+
+    fn seeded(events: u64) -> (tempfile::TempDir, Store, std::time::Duration) {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path().join("studio-state.db")).unwrap();
+        let data = serde_json::json!({
+            "tool": "Read",
+            "args_digest": "b3:6f1c2d9a4b7e0f3358c1d2e4a5b6c7d8",
+            "bytes": 4096,
+            "ok": true
+        });
+        let started = Instant::now();
+        for i in 0..events {
+            let ty = if i % 7 == 0 { EventType::ToolResult } else { EventType::ToolCall };
+            s.append_event(
+                "r",
+                "2026-07-25T09:12:44.118Z",
+                format!("gameplay_engineer#{}", i % 13),
+                ty,
+                Scene::desk("engineering", "gameplay_engineer#1"),
+                data.clone(),
+            )
+            .unwrap();
+        }
+        let wrote = started.elapsed();
+        (dir, s, wrote)
+    }
+
+    #[test]
+    #[ignore]
+    fn a_long_run_can_be_written_to_a_named_database_for_the_http_probes() {
+        let path = match std::env::var("SEED_DB") {
+            Ok(p) => p,
+            Err(_) => {
+                println!("set SEED_DB=<path> and SEED_EVENTS=<n> to seed a database");
+                return;
+            }
+        };
+        let count: u64 = std::env::var("SEED_EVENTS").ok().and_then(|v| v.parse().ok()).unwrap_or(50_000);
+        let run = std::env::var("SEED_RUN").unwrap_or_else(|_| "probe_run".to_string());
+
+        let s = Store::open(&path).unwrap();
+        let data = serde_json::json!({
+            "tool": "Read",
+            "args_digest": "b3:6f1c2d9a4b7e0f3358c1d2e4a5b6c7d8",
+            "bytes": 4096,
+            "ok": true
+        });
+        let started = Instant::now();
+        for i in 0..count {
+            let ty = if i % 7 == 0 { EventType::ToolResult } else { EventType::ToolCall };
+            s.append_event(
+                &run,
+                "2026-07-25T09:12:44.118Z",
+                format!("gameplay_engineer#{}", i % 13),
+                ty,
+                Scene::desk("engineering", "gameplay_engineer#1"),
+                data.clone(),
+            )
+            .unwrap();
+        }
+        println!(
+            "wrote {count} events into run {run} at {path} in {:.0}ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn reading_a_long_run_costs_what_the_slice_costs_not_what_the_log_costs() {
+        println!("events    write      whole log   tail of 100   head only");
+        for n in [1_000u64, 10_000, 50_000] {
+            let (_d, s, wrote) = seeded(n);
+
+            let t = Instant::now();
+            let all = s.events_since("r", 0).unwrap();
+            let whole = t.elapsed();
+            assert_eq!(all.len() as u64, n);
+
+            let t = Instant::now();
+            let tail = s.events_since("r", n - 100).unwrap();
+            let slice = t.elapsed();
+            assert_eq!(tail.len(), 100);
+
+            let t = Instant::now();
+            let head = s.head_seq("r").unwrap();
+            let only_head = t.elapsed();
+            assert_eq!(head, n);
+
+            println!(
+                "{n:<9} {:>7.1}ms {:>9.2}ms {:>11.3}ms {:>10.3}ms",
+                wrote.as_secs_f64() * 1000.0,
+                whole.as_secs_f64() * 1000.0,
+                slice.as_secs_f64() * 1000.0,
+                only_head.as_secs_f64() * 1000.0,
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn a_reconnecting_client_pays_for_the_backlog_it_asked_for() {
+        let (_d, s, _) = seeded(50_000);
+        let reconnects = 20;
+
+        let t = Instant::now();
+        for _ in 0..reconnects {
+            let all = s.events_since("r", 0).unwrap();
+            let head = all.last().map(|e| e.seq).unwrap_or(0);
+            let _tail: Vec<Envelope> = all.into_iter().filter(|e| e.seq > head - 5).collect();
+        }
+        let whole_log_each_time = t.elapsed();
+
+        let t = Instant::now();
+        for _ in 0..reconnects {
+            let head = s.head_seq("r").unwrap();
+            let _tail = s.events_since("r", head - 5).unwrap();
+        }
+        let bounded = t.elapsed();
+
+        println!(
+            "{reconnects} reconnects to a 50000-event run: whole log each time {:.1}ms, bounded {:.1}ms",
+            whole_log_each_time.as_secs_f64() * 1000.0,
+            bounded.as_secs_f64() * 1000.0,
+        );
     }
 }
 

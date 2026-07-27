@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 
 pub const GODOT_PROFILE: &str = include_str!("../profiles/godot.toml");
 pub const UNITY_PROFILE: &str = include_str!("../profiles/unity.toml");
@@ -22,8 +23,8 @@ pub enum EngineError {
     #[error("command '{command}' has an unsubstituted placeholder {{{placeholder}}}")]
     UnboundPlaceholder { command: String, placeholder: String },
 
-    #[error("could not resolve the {0} binary; set {1} or put it on PATH")]
-    BinaryNotFound(String, String),
+    #[error("could not resolve the {engine} binary; name it in settings, set {env_var}, or put it on PATH")]
+    BinaryNotFound { engine: String, env_var: String },
 
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -76,6 +77,8 @@ pub struct Tooling {
     pub binary_env: String,
     #[serde(default)]
     pub binary_names: Vec<String>,
+    #[serde(default)]
+    pub search: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -184,45 +187,210 @@ fn marker_matches(root: &Path, marker: &str) -> bool {
     root.join(marker).exists()
 }
 
-pub fn resolve_binary(profile: &EngineProfile) -> Result<PathBuf> {
-    if let Ok(p) = std::env::var(&profile.tooling.binary_env) {
-        let path = PathBuf::from(&p);
-        if path.exists() {
-            return Ok(path);
+static NAMED_IN_SETTINGS: RwLock<BTreeMap<String, PathBuf>> = RwLock::new(BTreeMap::new());
+
+pub fn name_the_binary(engine_id: &str, path: Option<&str>) {
+    let Ok(mut held) = NAMED_IN_SETTINGS.write() else {
+        return;
+    };
+    match path.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => held.insert(engine_id.to_string(), PathBuf::from(p)),
+        None => held.remove(engine_id),
+    };
+}
+
+pub fn binary_named_in_settings(engine_id: &str) -> Option<PathBuf> {
+    NAMED_IN_SETTINGS.read().ok()?.get(engine_id).cloned()
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BinaryFound {
+    pub path: PathBuf,
+    pub how: &'static str,
+}
+
+pub fn find_binary(profile: &EngineProfile) -> Option<BinaryFound> {
+    if let Some(named) = binary_named_in_settings(&profile.id) {
+        if let Some(path) = usable(&named.to_string_lossy()) {
+            return Some(BinaryFound { path, how: "named in settings" });
+        }
+    }
+    if let Ok(from_env) = std::env::var(&profile.tooling.binary_env) {
+        if let Some(path) = usable(&from_env) {
+            return Some(BinaryFound { path, how: "from the environment" });
         }
     }
     for name in &profile.tooling.binary_names {
-        if let Some(found) = which(name) {
-            return Ok(found);
+        if let Some(path) = which(name) {
+            return Some(BinaryFound { path, how: "on PATH" });
         }
     }
-    Err(EngineError::BinaryNotFound(
-        profile.id.clone(),
-        profile.tooling.binary_env.clone(),
-    ))
-}
-
-fn which(name: &str) -> Option<PathBuf> {
-    let exts: Vec<String> = if cfg!(windows) {
-        std::env::var("PATHEXT")
-            .unwrap_or_else(|_| ".EXE;.CMD;.BAT".into())
-            .split(';')
-            .map(|s| s.to_lowercase())
-            .collect()
-    } else {
-        vec![String::new()]
-    };
-
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        for ext in &exts {
-            let candidate = dir.join(format!("{name}{ext}"));
-            if candidate.is_file() {
-                return Some(candidate);
-            }
+    for pattern in &profile.tooling.search {
+        if let Some(path) = matching_paths(pattern).into_iter().next() {
+            return Some(BinaryFound { path, how: "where its installer puts it" });
         }
     }
     None
+}
+
+pub fn resolve_binary(profile: &EngineProfile) -> Result<PathBuf> {
+    find_binary(profile)
+        .map(|found| found.path)
+        .ok_or_else(|| EngineError::BinaryNotFound {
+            engine: profile.id.clone(),
+            env_var: profile.tooling.binary_env.clone(),
+        })
+}
+
+pub fn places_searched(profile: &EngineProfile) -> Vec<String> {
+    let mut places = vec![format!(
+        "the engine.{} setting, then the {} environment variable",
+        profile.id, profile.tooling.binary_env
+    )];
+    if !profile.tooling.binary_names.is_empty() {
+        places.push(format!(
+            "PATH, for {}",
+            profile.tooling.binary_names.join(" or ")
+        ));
+    }
+    places.extend(
+        profile
+            .tooling
+            .search
+            .iter()
+            .filter_map(|p| fill_places(p))
+            .filter(|p| within_reach(p))
+            .map(|p| as_this_os_writes_it(&p)),
+    );
+    places
+}
+
+fn within_reach(pattern: &str) -> bool {
+    let head = pattern.split('*').next().unwrap_or("");
+    match head.rfind(['/', '\\']) {
+        Some(cut) if cut > 0 => Path::new(&head[..cut]).is_dir(),
+        _ => false,
+    }
+}
+
+fn as_this_os_writes_it(path: &str) -> String {
+    if cfg!(windows) {
+        path.replace('/', "\\")
+    } else {
+        path.to_string()
+    }
+}
+
+fn usable(named: &str) -> Option<PathBuf> {
+    let direct = PathBuf::from(named);
+    if direct.is_file() {
+        return Some(direct);
+    }
+    which(named)
+}
+
+fn which(name: &str) -> Option<PathBuf> {
+    studio_core::resolve(name)
+}
+
+fn fill_places(pattern: &str) -> Option<String> {
+    let home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let mut out = pattern.to_string();
+    for (token, var) in [
+        ("{localappdata}", "LOCALAPPDATA"),
+        ("{programfiles}", "ProgramFiles"),
+        ("{programfiles86}", "ProgramFiles(x86)"),
+        ("{programdata}", "ProgramData"),
+        ("{home}", home),
+    ] {
+        if !out.contains(token) {
+            continue;
+        }
+        let value = std::env::var(var).ok()?;
+        out = out.replace(token, value.trim_end_matches(['/', '\\']));
+    }
+    (!out.contains('{')).then_some(out)
+}
+
+fn matching_paths(pattern: &str) -> Vec<PathBuf> {
+    let Some(filled) = fill_places(pattern) else {
+        return Vec::new();
+    };
+    let parts: Vec<&str> = filled.split(['/', '\\']).collect();
+    let Some(first_glob) = parts.iter().position(|p| p.contains('*')) else {
+        let whole = PathBuf::from(&filled);
+        return if whole.is_file() { vec![whole] } else { Vec::new() };
+    };
+    if first_glob == 0 {
+        return Vec::new();
+    }
+
+    let head: usize = parts[..first_glob].iter().map(|p| p.len()).sum::<usize>() + first_glob - 1;
+    let mut reached = vec![PathBuf::from(&filled[..head])];
+
+    for (offset, segment) in parts[first_glob..].iter().enumerate() {
+        let last = first_glob + offset == parts.len() - 1;
+        let keep = |p: &Path| if last { p.is_file() } else { p.is_dir() };
+        let mut next = Vec::new();
+
+        for dir in &reached {
+            if !segment.contains('*') {
+                let step = dir.join(segment);
+                if keep(&step) {
+                    next.push(step);
+                }
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if !glob_matches(segment, &entry.file_name().to_string_lossy()) {
+                    continue;
+                }
+                let step = entry.path();
+                if keep(&step) {
+                    next.push(step);
+                }
+            }
+        }
+
+        next.sort();
+        next.reverse();
+        reached = next;
+    }
+
+    reached
+}
+
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    let fold = |s: &str| {
+        if cfg!(windows) {
+            s.to_lowercase()
+        } else {
+            s.to_string()
+        }
+    };
+    let (pattern, name) = (fold(pattern), fold(name));
+    if !pattern.contains('*') {
+        return pattern == name;
+    }
+
+    let mut pieces: Vec<&str> = pattern.split('*').collect();
+    let tail = pieces.pop().unwrap_or("");
+    let head = pieces.remove(0);
+    if !name.starts_with(head) || !name.ends_with(tail) || name.len() < head.len() + tail.len() {
+        return false;
+    }
+
+    let mut rest = &name[head.len()..name.len() - tail.len()];
+    for piece in pieces {
+        match rest.find(piece) {
+            Some(at) => rest = &rest[at + piece.len()..],
+            None => return false,
+        }
+    }
+    true
 }
 
 #[derive(Debug, Clone, Default)]
@@ -469,13 +637,129 @@ mod tests {
         assert_eq!(args[3], "-unattended");
     }
 
-    #[test]
-    fn resolving_a_missing_binary_names_the_env_var_to_set() {
+    fn nowhere_engine() -> EngineProfile {
         let mut p = EngineProfile::parse(GODOT_PROFILE).unwrap();
+        p.id = "studio-test-engine".into();
         p.tooling.binary_env = "STUDIO_NO_SUCH_ENGINE_VAR".into();
         p.tooling.binary_names = vec!["studio-no-such-engine-binary".into()];
-        let err = resolve_binary(&p).unwrap_err();
-        assert!(format!("{err}").contains("STUDIO_NO_SUCH_ENGINE_VAR"));
+        p.tooling.search = Vec::new();
+        p
+    }
+
+    #[test]
+    fn resolving_a_missing_binary_names_every_way_of_pointing_at_it() {
+        let p = nowhere_engine();
+        let err = format!("{}", resolve_binary(&p).unwrap_err());
+        assert!(err.contains("STUDIO_NO_SUCH_ENGINE_VAR"), "{err}");
+        assert!(err.contains("settings"), "{err}");
+        assert!(err.contains("PATH"), "{err}");
+    }
+
+    #[test]
+    fn a_binary_named_in_settings_is_taken_over_anything_on_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mine = dir.path().join("my-own-godot.exe");
+        std::fs::write(&mine, "").unwrap();
+
+        let mut p = nowhere_engine();
+        p.id = "studio-test-engine-named".into();
+        name_the_binary(&p.id, Some(&mine.to_string_lossy()));
+
+        let found = find_binary(&p).unwrap();
+        assert_eq!(found.path, mine);
+        assert_eq!(found.how, "named in settings");
+
+        name_the_binary(&p.id, Some("   "));
+        assert!(
+            resolve_binary(&p).is_err(),
+            "a blank setting must fall through rather than pin the engine to nothing"
+        );
+    }
+
+    #[test]
+    fn a_setting_that_points_at_nothing_does_not_hide_the_engine_on_path() {
+        let mut p = nowhere_engine();
+        p.id = "studio-test-engine-stale".into();
+        p.tooling.binary_names = vec!["cargo".into()];
+        name_the_binary(&p.id, Some("C:/gone/godot.exe"));
+
+        let found = find_binary(&p).expect("a stale setting is not a dead end");
+        assert_eq!(found.how, "on PATH");
+        name_the_binary(&p.id, None);
+    }
+
+    #[test]
+    fn an_installer_directory_is_searched_when_nothing_is_on_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages = dir.path().join("Packages").join("GodotEngine.GodotEngine_x8");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::write(packages.join("Godot_v4.2-stable_win64.exe"), "").unwrap();
+        std::fs::write(packages.join("Godot_v4.7.1-stable_win64.exe"), "").unwrap();
+        std::fs::write(packages.join("Godot_v4.7.1-stable_win64_console.exe"), "").unwrap();
+
+        let pattern = format!(
+            "{}/Packages/GodotEngine.GodotEngine*/Godot_v*_win64.exe",
+            dir.path().display()
+        );
+        let hits = matching_paths(&pattern);
+        assert_eq!(hits.len(), 2, "the console build is a different file name: {hits:?}");
+        assert!(
+            hits[0].ends_with("Godot_v4.7.1-stable_win64.exe"),
+            "the newest build must come first: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn a_pattern_whose_placeholder_is_unset_is_skipped_rather_than_searched_literally() {
+        assert!(fill_places("{no_such_place}/godot.exe").is_none());
+        assert!(matching_paths("{no_such_place}/godot.exe").is_empty());
+    }
+
+    #[test]
+    fn globbing_matches_a_name_the_way_a_shell_would() {
+        assert!(glob_matches("Godot_v*_win64.exe", "Godot_v4.7.1-stable_win64.exe"));
+        assert!(!glob_matches("Godot_v*_win64.exe", "Godot_v4.7.1-stable_win64_console.exe"));
+        assert!(glob_matches("Python3*", "Python313"));
+        assert!(!glob_matches("Python3*", "Python"));
+        assert!(glob_matches("*", "anything"));
+        assert!(glob_matches("godot.exe", "godot.exe"));
+        assert!(!glob_matches("godot.exe", "godot4.exe"));
+        assert!(glob_matches("a*b*c", "axxbyyc"));
+        assert!(!glob_matches("a*b*c", "axxc"));
+    }
+
+    #[test]
+    fn every_search_pattern_a_profile_ships_is_absolute_and_placeholder_only() {
+        let known = ["{localappdata}", "{programfiles}", "{programfiles86}", "{programdata}", "{home}"];
+        for p in EngineProfile::builtin() {
+            for pattern in &p.tooling.search {
+                let rooted = pattern.starts_with('/') || known.iter().any(|k| pattern.starts_with(k));
+                assert!(rooted, "{} searches a relative path: {pattern}", p.id);
+                for token in pattern.split('{').skip(1) {
+                    let name = format!("{{{}", token.split('}').next().unwrap_or(""));
+                    assert!(
+                        known.contains(&format!("{name}}}").as_str()),
+                        "{} uses a placeholder nothing fills: {name}}}",
+                        p.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_places_searched_are_reportable_so_a_missing_engine_can_be_acted_on() {
+        let godot = EngineProfile::parse(GODOT_PROFILE).unwrap();
+        let places = places_searched(&godot);
+        assert!(places[0].contains("engine.godot"));
+        assert!(places.iter().any(|p| p.contains("PATH")));
+        for place in places.iter().skip(2) {
+            assert!(
+                within_reach(place),
+                "{place} is on another OS's disk layout; listing it as somewhere the studio \
+                 looked gives no one anything to act on"
+            );
+        }
     }
 }
 

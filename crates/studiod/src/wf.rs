@@ -10,12 +10,13 @@ use studio_events::{EventType, Scene};
 use studio_verify::{EngineDriver, ProfileDriver, ProjectPaths, Verdict};
 use studio_workflow::{
     execute_parallel, Admission, Gate, GateKind, GateOutcome, Node, NodeOutcome,
-    ParallelWorkflowHost, RunOutcome, Workflow,
+    ParallelWorkflowHost, RunOutcome, WaveVerdict, Workflow,
 };
 
 use crate::m4::Emitter;
 
 pub const DEFAULT_PARALLEL_WORKERS: usize = 4;
+pub const MAX_STEP_REDOS: usize = 3;
 
 fn parallel_workers() -> usize {
     std::env::var("STUDIO_PARALLEL")
@@ -40,6 +41,73 @@ pub struct Host<'a> {
     pub next_ask_at: Mutex<u64>,
     pub spent_usd: Mutex<f64>,
     pub engine_hint: String,
+    pub step_confirm: bool,
+    pub notes: Mutex<Vec<String>>,
+    pub tiers_done: AtomicUsize,
+    pub redos_at_step: AtomicUsize,
+    pub unfinished: Option<Mutex<studio_server::resume::Unfinished>>,
+    pub ceiling_usd: f64,
+}
+
+pub const DEFAULT_RUN_CEILING_USD: f64 = 25.0;
+
+pub fn ceiling_for(studio_dir: &std::path::Path, workflow: &Workflow) -> (u64, f64) {
+    let stored = studio_settings::Settings::load(&studio_settings::Settings::path_in(studio_dir))
+        .unwrap_or_default();
+
+    let tokens = match stored.number("budget.tokens", 0.0) {
+        n if n > 0.0 => n as u64,
+        _ => workflow.total_budget().max(1),
+    };
+    let usd = match stored.number("budget.usd", -1.0) {
+        n if n >= 0.0 => n,
+        _ => DEFAULT_RUN_CEILING_USD,
+    };
+    (tokens, usd)
+}
+
+pub fn capsule_name(node_id: &str) -> String {
+    format!("cap_{node_id}")
+}
+
+pub fn redos_left(used: usize) -> usize {
+    MAX_STEP_REDOS.saturating_sub(used)
+}
+
+pub fn node_brief(
+    planned: Option<&str>,
+    run_brief: &str,
+    node_id: &str,
+    upstream: &[String],
+    notes: &[String],
+    hint: &str,
+) -> String {
+    let head = match planned {
+        Some(planned) => planned.to_string(),
+        None => format!("Workflow node '{node_id}'.\n\n{run_brief}"),
+    };
+
+    let upstream = if upstream.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nUpstream capsules: {}", upstream.join(", "))
+    };
+
+    let steer = if notes.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nThe human steering this run has asked for this, and it outranks the \
+             brief above where they disagree:\n{}",
+            notes
+                .iter()
+                .map(|n| format!("- {n}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+
+    format!("{head}{upstream}{steer}{hint}")
 }
 
 impl<'a> Host<'a> {
@@ -68,20 +136,74 @@ fn acts(r: &studio_agents::Role) -> bool {
     !r.tools().is_empty()
 }
 
+pub fn tier_title(says: &[String]) -> String {
+    match says {
+        [] => "the crew has nothing to show".to_string(),
+        [only] => only.clone(),
+        [first, rest @ ..] => format!("{first} (and {} more)", rest.len()),
+    }
+}
+
+pub fn tier_summary(lines: &[(String, String)]) -> String {
+    lines
+        .iter()
+        .map(|(role, say)| format!("{role}: {say}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 impl<'a> Host<'a> {
+    fn record_progress(&self, completed: &[&Node]) {
+        let Some(held) = &self.unfinished else {
+            return;
+        };
+        let Ok(mut held) = held.lock() else {
+            return;
+        };
+        for node in completed {
+            if !held.done.contains(&node.id) {
+                held.done.push(node.id.clone());
+            }
+        }
+        held.left_at = crate::now();
+        if let Err(e) = studio_server::resume::write(&self.em.state.studio_dir, &held) {
+            println!("  the run could not record where it got to: {e}");
+        }
+    }
+
+    fn say_for(&self, id: &str) -> String {
+        self.plan
+            .as_ref()
+            .and_then(|p| p.say_for(id))
+            .unwrap_or_else(|| id.to_string())
+    }
+
+    fn step_title(&self, completed: &[&Node]) -> String {
+        let says: Vec<String> = completed.iter().map(|n| self.say_for(&n.id)).collect();
+        tier_title(&says)
+    }
+
+    fn step_summary(&self, completed: &[&Node]) -> String {
+        let lines: Vec<(String, String)> = completed
+            .iter()
+            .map(|n| (n.role.clone(), self.say_for(&n.id)))
+            .collect();
+        tier_summary(&lines)
+    }
+
     fn spend_approved(&self, node: &Node) -> Result<(), String> {
         let step = match self.ask_above {
             Some(step) if step > 0 => step,
             _ => return Ok(()),
         };
 
-        let spent = self.budget.lock().unwrap().task.spent;
-        if spent < *self.next_ask_at.lock().unwrap() {
+        let spent = self.budget.lock().unwrap_or_else(|held| held.into_inner()).task.spent;
+        if spent < *self.next_ask_at.lock().unwrap_or_else(|held| held.into_inner()) {
             return Ok(());
         }
 
         let approval_id = crate::id("ask");
-        let usd = *self.spent_usd.lock().unwrap();
+        let usd = *self.spent_usd.lock().unwrap_or_else(|held| held.into_inner());
         println!(
             "  spend check: {spent} billed tokens (~${usd:.2}); waiting for you on the floor"
         );
@@ -94,7 +216,7 @@ impl<'a> Host<'a> {
             serde_json::json!({
                 "approval_id": approval_id,
                 "spent": spent,
-                "threshold": *self.next_ask_at.lock().unwrap(),
+                "threshold": *self.next_ask_at.lock().unwrap_or_else(|held| held.into_inner()),
                 "node": node.id,
                 "usd": usd,
             }),
@@ -103,7 +225,7 @@ impl<'a> Host<'a> {
         match rx.recv() {
             Ok(true) => {
                 let next = spent + step;
-                *self.next_ask_at.lock().unwrap() = next;
+                *self.next_ask_at.lock().unwrap_or_else(|held| held.into_inner()) = next;
                 println!("  spend approved; next check at {next} tokens");
                 Ok(())
             }
@@ -116,6 +238,28 @@ impl<'a> Host<'a> {
 impl<'a> ParallelWorkflowHost for Host<'a> {
     fn admit(&self, node: &Node) -> Admission {
         if let Err(reason) = self.spend_approved(node) {
+            return Admission::Refuse { reason };
+        }
+
+        let spent = *self.spent_usd.lock().unwrap_or_else(|held| held.into_inner());
+        if self.ceiling_usd > 0.0 && spent >= self.ceiling_usd {
+            let reason = format!(
+                "this run has spent ${spent:.2} and its ceiling is ${:.2}; raise budget.usd in \
+                 settings and pick the run up again",
+                self.ceiling_usd
+            );
+            let _ = self.em.emit(
+                "daemon",
+                EventType::BudgetExhausted,
+                Scene::daemon(),
+                serde_json::json!({
+                    "scope": "run",
+                    "reason": reason,
+                    "node": node.id,
+                    "spent_usd": spent,
+                    "ceiling_usd": self.ceiling_usd,
+                }),
+            );
             return Admission::Refuse { reason };
         }
 
@@ -134,9 +278,9 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
             prefix_tokens,
             brief_tokens,
             output_reserve: 2_000,
-            prefix_is_warm: self.warmed.lock().unwrap().contains(&node.role),
+            prefix_is_warm: self.warmed.lock().unwrap_or_else(|held| held.into_inner()).contains(&node.role),
         };
-        match self.budget.lock().unwrap().admit(projection) {
+        match self.budget.lock().unwrap_or_else(|held| held.into_inner()).admit(projection) {
             studio_budget::Admission::Admit => Admission::Admit,
             studio_budget::Admission::Degrade { step, reason } => {
                 let _ = self.em.emit(
@@ -173,31 +317,172 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
         );
 
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-        let upstream = if inputs.is_empty() {
-            String::new()
-        } else {
-            format!("\n\nUpstream capsules: {}", inputs.join(", "))
-        };
-        let brief = match self.plan.as_ref().and_then(|p| p.brief_for(&node.id)) {
-            Some(planned) => format!("{planned}{upstream}{}", self.acting_hint(r)),
-            None => format!(
-                "Workflow node '{}'.\n\n{}{}{}",
-                node.id,
-                self.brief,
-                upstream,
-                self.acting_hint(r)
-            ),
-        };
+        let notes = self.notes.lock().unwrap_or_else(|held| held.into_inner()).clone();
+        let brief = node_brief(
+            self.plan.as_ref().and_then(|p| p.brief_for(&node.id)),
+            &self.brief,
+            &node.id,
+            inputs,
+            &notes,
+            &self.acting_hint(r),
+        );
 
         match crate::m4::run_worker_metered_uncommitted(self.em, r, &brief, seq, acts(r)) {
             Ok(m) => {
-                self.budget.lock().unwrap().record(m.billed_tokens);
-                *self.spent_usd.lock().unwrap() += m.cost_usd;
-                self.warmed.lock().unwrap().insert(node.role.clone());
+                self.budget.lock().unwrap_or_else(|held| held.into_inner()).record(m.billed_tokens);
+                *self.spent_usd.lock().unwrap_or_else(|held| held.into_inner()) += m.cost_usd;
+                self.warmed.lock().unwrap_or_else(|held| held.into_inner()).insert(node.role.clone());
                 NodeOutcome::Completed { capsule: format!("cap_{}", node.id) }
             }
             Err(e) => NodeOutcome::Failed { reason: e.to_string() },
         }
+    }
+
+    fn nothing_further_can_run(&self, failure: &str) -> Option<String> {
+        if self.em.state.stopping.load(Ordering::Relaxed) {
+            return Some("you stopped the run from the floor".to_string());
+        }
+
+        let said = studio_core::account_is_out_of_allowance(failure)?;
+        let reason = format!(
+            "the coding CLI refused on the account's own limit, so every worker after it \
+             would refuse too: {said}"
+        );
+        println!("  {reason}");
+        println!("  nothing further is spawned; start the run again once the window resets");
+        let _ = self.em.emit(
+            "daemon",
+            EventType::RunInterrupted,
+            Scene::daemon(),
+            serde_json::json!({
+                "reason": "out of allowance",
+                "note": said,
+                "step": null,
+            }),
+        );
+        Some(reason)
+    }
+
+    fn before_wave(&self, ready: &[&Node]) -> WaveVerdict {
+        let landing = ready.first().map(|n| self.say_for(&n.id));
+
+        for interrupt in self.em.state.take_interrupts() {
+            if let Some(note) = interrupt.note.filter(|n| !n.trim().is_empty()) {
+                println!("  a note landed on the next step: {note}");
+                let _ = self.em.emit(
+                    "daemon",
+                    EventType::RunInterrupted,
+                    Scene::daemon(),
+                    serde_json::json!({
+                        "reason": "note",
+                        "note": note,
+                        "step": landing,
+                    }),
+                );
+                self.notes.lock().unwrap_or_else(|held| held.into_inner()).push(note);
+            }
+
+            if interrupt.stop {
+                println!("  you stopped the run; the workers already running were killed");
+                let _ = self.em.emit(
+                    "daemon",
+                    EventType::RunInterrupted,
+                    Scene::daemon(),
+                    serde_json::json!({
+                        "reason": "stopped",
+                        "note": null,
+                        "step": landing,
+                    }),
+                );
+                return WaveVerdict::Stop {
+                    reason: "you stopped the run from the floor".to_string(),
+                };
+            }
+        }
+
+        WaveVerdict::Continue
+    }
+
+    fn after_wave(&self, completed: &[&Node]) -> WaveVerdict {
+        self.notes.lock().unwrap_or_else(|held| held.into_inner()).clear();
+        if !self.step_confirm {
+            self.tiers_done.fetch_add(1, Ordering::SeqCst);
+            return WaveVerdict::Continue;
+        }
+
+        let step = self.tiers_done.load(Ordering::SeqCst) + 1;
+        let used = self.redos_at_step.load(Ordering::SeqCst);
+        let left = redos_left(used);
+        let approval_id = crate::id("step");
+        let rx = self.em.state.await_step(&approval_id);
+
+        let modes: Vec<&str> = if left == 0 {
+            vec!["approve", "improve"]
+        } else {
+            vec!["approve", "improve", "redo"]
+        };
+
+        let _ = self.em.emit(
+            "daemon",
+            EventType::StepApprovalNeeded,
+            Scene::daemon(),
+            serde_json::json!({
+                "approval_id": approval_id,
+                "step": step,
+                "title": self.step_title(completed),
+                "summary": self.step_summary(completed),
+                "modes": modes,
+                "redos_used": used,
+                "redos_left": left,
+            }),
+        );
+        println!("  step {step} is done and waiting for you on the floor");
+        if used > 0 {
+            println!("  step {step} has been sent back {used} time(s); {left} left before the run stops");
+        }
+
+        match rx.recv() {
+            Ok(verdict) if verdict.approve => {
+                self.tiers_done.fetch_add(1, Ordering::SeqCst);
+                self.redos_at_step.store(0, Ordering::SeqCst);
+                if let Some(note) = verdict.note.filter(|n| !n.trim().is_empty()) {
+                    println!("  step {step} approved; the next step is briefed with: {note}");
+                    self.notes.lock().unwrap_or_else(|held| held.into_inner()).push(note);
+                } else {
+                    println!("  step {step} approved");
+                }
+                WaveVerdict::Continue
+            }
+            Ok(_) if left == 0 => {
+                println!(
+                    "  step {step} has already been run {} times and is still not right; stopping",
+                    used + 1
+                );
+                WaveVerdict::Stop {
+                    reason: format!(
+                        "step {step} was sent back {MAX_STEP_REDOS} times and is still not right; \
+                         the run stopped rather than spending more on the same step"
+                    ),
+                }
+            }
+            Ok(verdict) => {
+                let note = verdict
+                    .note
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| "Do this step again and make it better.".to_string());
+                self.redos_at_step.fetch_add(1, Ordering::SeqCst);
+                println!("  step {step} sent back: {note}");
+                self.notes.lock().unwrap_or_else(|held| held.into_inner()).push(note);
+                WaveVerdict::Redo
+            }
+            Err(_) => WaveVerdict::Stop {
+                reason: "the floor went away while the run waited on a step".to_string(),
+            },
+        }
+    }
+
+    fn capsule_of(&self, node_id: &str) -> Option<String> {
+        Some(capsule_name(node_id))
     }
 
     fn wave_done(&self, completed: &[&Node]) {
@@ -213,6 +498,7 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
             })
             .collect();
         crate::m4::commit_wave(self.em, &entries);
+        self.record_progress(completed);
     }
 
     fn gate(&self, gate: &Gate, node: &Node) -> GateOutcome {
@@ -288,7 +574,7 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
                     .unwrap_or_else(|| "verification was inconclusive".into()),
             },
         };
-        *self.last_verify.lock().unwrap() = Some(result);
+        *self.last_verify.lock().unwrap_or_else(|held| held.into_inner()) = Some(result);
         outcome
     }
 
@@ -312,7 +598,7 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
             return GateOutcome::Inconclusive { reason: "no scope".into() };
         }
 
-        let failures = match self.last_verify.lock().unwrap().take() {
+        let failures = match self.last_verify.lock().unwrap_or_else(|held| held.into_inner()).take() {
             Some(v) => v,
             None => return GateOutcome::Inconclusive { reason: "no verify result to repair".into() },
         };
@@ -330,8 +616,8 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
 
         match crate::m4::run_worker_metered(self.em, r, &brief, seq, true) {
             Ok(m) => {
-                self.budget.lock().unwrap().record(m.billed_tokens);
-                *self.spent_usd.lock().unwrap() += m.cost_usd;
+                self.budget.lock().unwrap_or_else(|held| held.into_inner()).record(m.billed_tokens);
+                *self.spent_usd.lock().unwrap_or_else(|held| held.into_inner()) += m.cost_usd;
             }
             Err(e) => {
                 return GateOutcome::Inconclusive {
@@ -361,9 +647,10 @@ pub fn run_workflow(
     seq: &mut usize,
     ask_above: Option<u64>,
 ) -> Result<RunOutcome> {
-    run_planned(em, workflow, brief, project, seq, None, ask_above)
+    run_planned(em, workflow, brief, project, seq, None, ask_above, false, None)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_planned(
     em: &Emitter,
     workflow: &Workflow,
@@ -372,12 +659,43 @@ pub fn run_planned(
     seq: &mut usize,
     plan: Option<studio_workflow::Plan>,
     ask_above: Option<u64>,
+    step_confirm: bool,
+    resuming: Option<studio_server::resume::Unfinished>,
 ) -> Result<RunOutcome> {
     let base_sha = project
         .as_deref()
         .and_then(studio_core::git::head_sha);
     if let Some(sha) = &base_sha {
         println!("  base commit {sha}; a bad run can be reverted from the floor");
+    }
+
+    let already_done: BTreeSet<String> =
+        resuming.as_ref().map(|r| r.done_set()).unwrap_or_default();
+    if !already_done.is_empty() {
+        println!(
+            "  resuming: {} step(s) already done, {} left",
+            already_done.len(),
+            workflow.nodes.len().saturating_sub(already_done.len())
+        );
+    }
+
+    let unfinished = match (&resuming, &plan, &em.project_id) {
+        (Some(held), _, _) => Some(held.clone()),
+        (None, Some(plan), Some(id)) => Some(studio_server::resume::Unfinished {
+            project: id.clone(),
+            title: plan.title.clone(),
+            brief: brief.to_string(),
+            plan: plan.clone(),
+            done: Vec::new(),
+            left_at: crate::now(),
+            why: String::new(),
+        }),
+        _ => None,
+    };
+    if let Some(held) = &unfinished {
+        if let Err(e) = studio_server::resume::write(&em.state.studio_dir, held) {
+            println!("  this run cannot be resumed if it stops: {e}");
+        }
     }
 
     em.emit(
@@ -423,6 +741,7 @@ pub fn run_planned(
             Ok(false) => {}
             Err(e) => println!("  img2threejs install failed: {e}"),
         }
+        crate::assets::announce(&em.state.studio_dir, &paths.project);
     }
 
     let engine_hint = match profile.as_ref().map(|p| p.id.as_str()) {
@@ -457,9 +776,15 @@ pub fn run_planned(
     }
     .to_string();
 
+    let engine_hint = format!(
+        "{engine_hint}{}",
+        crate::assets::crew_hint(&em.state.studio_dir, &paths.project)
+    );
+
+    let (ceiling_tokens, ceiling_usd) = ceiling_for(&em.state.studio_dir, workflow);
     let host = Host {
         em,
-        budget: Mutex::new(Enforcer::new(u64::MAX, u64::MAX)),
+        budget: Mutex::new(Enforcer::new(ceiling_tokens, ceiling_tokens)),
         driver,
         paths,
         brief: brief.to_string(),
@@ -472,13 +797,51 @@ pub fn run_planned(
         next_ask_at: Mutex::new(ask_above.unwrap_or(u64::MAX)),
         spent_usd: Mutex::new(0.0),
         engine_hint,
+        step_confirm,
+        notes: Mutex::new(Vec::new()),
+        tiers_done: AtomicUsize::new(0),
+        redos_at_step: AtomicUsize::new(0),
+        unfinished: unfinished.map(Mutex::new),
+        ceiling_usd,
     };
+
+    if step_confirm {
+        println!("  step confirmation is on; the run holds after every step");
+    }
+    em.state.take_interrupts();
+    em.state.nothing_is_being_stopped();
 
     let width = parallel_workers();
     println!("  running up to {width} workers in parallel");
-    let report = execute_parallel(workflow, &host, &BTreeSet::new(), width)
+    println!(
+        "  ceiling: {ceiling_tokens} billed tokens{}",
+        if ceiling_usd > 0.0 {
+            format!(" or ${ceiling_usd:.2}, whichever comes first")
+        } else {
+            ", and no dollar ceiling".to_string()
+        }
+    );
+    let report = execute_parallel(workflow, &host, &already_done, width)
         .map_err(|e| anyhow::anyhow!("workflow failed to execute: {e}"))?;
     *seq = host.seq.load(Ordering::SeqCst);
+
+    for missed in em.state.take_interrupts() {
+        let note = missed.note.filter(|n| !n.trim().is_empty());
+        println!(
+            "  an interrupt arrived after the last step and had nowhere to land{}",
+            note.as_deref().map(|n| format!(": {n}")).unwrap_or_default()
+        );
+        em.emit(
+            "daemon",
+            EventType::RunInterrupted,
+            Scene::daemon(),
+            serde_json::json!({
+                "reason": "too late; the run had already finished",
+                "note": note,
+                "step": null,
+            }),
+        )?;
+    }
 
     let outcome = report.outcome.clone().unwrap_or(RunOutcome::Completed);
 
@@ -494,6 +857,7 @@ pub fn run_planned(
             "gates_passed": report.gates_passed,
             "gates_failed": report.gates_failed,
             "repair_rounds": report.repair_rounds,
+            "redo_rounds": report.redo_rounds,
             "degradations": report.degradations,
         }),
     )?;
@@ -508,15 +872,257 @@ pub fn run_planned(
         report.repair_rounds
     );
 
+    if report.redo_rounds > 0 {
+        println!("    {} step(s) were sent back and run again", report.redo_rounds);
+    }
+
     match &outcome {
         RunOutcome::Blocked { node, reason }
         | RunOutcome::Escalated { node, reason }
         | RunOutcome::RoutedToInfra { node, reason }
-        | RunOutcome::Refused { node, reason } => {
+        | RunOutcome::Refused { node, reason }
+        | RunOutcome::Interrupted { node, reason }
+        | RunOutcome::Halted { node, reason } => {
             println!("    stopped at {node}: {reason}");
         }
         RunOutcome::Completed => {}
     }
 
+    settle_the_resume_point(&host, &outcome);
     Ok(outcome)
+}
+
+fn settle_the_resume_point(host: &Host, outcome: &RunOutcome) {
+    let Some(held) = &host.unfinished else {
+        return;
+    };
+    let Ok(mut held) = held.lock() else {
+        return;
+    };
+
+    let studio_dir = &host.em.state.studio_dir;
+    if held.finished() || outcome.is_clean() {
+        studio_server::resume::clear(studio_dir, &held.project);
+        return;
+    }
+
+    held.why = match outcome {
+        RunOutcome::Blocked { reason, .. }
+        | RunOutcome::Escalated { reason, .. }
+        | RunOutcome::RoutedToInfra { reason, .. }
+        | RunOutcome::Refused { reason, .. }
+        | RunOutcome::Interrupted { reason, .. }
+        | RunOutcome::Halted { reason, .. } => reason.clone(),
+        RunOutcome::Completed => String::new(),
+    };
+    held.left_at = crate::now();
+    let _ = studio_server::resume::write(studio_dir, &held);
+
+    println!(
+        "    {} step(s) never ran; the floor can pick this run up where it stopped",
+        held.left().len()
+    );
+}
+
+#[cfg(test)]
+mod redo_cap_tests {
+    use super::{redos_left, MAX_STEP_REDOS};
+
+    #[test]
+    fn a_step_nobody_has_sent_back_offers_every_redo_the_cap_allows() {
+        assert_eq!(redos_left(0), MAX_STEP_REDOS);
+    }
+
+    #[test]
+    fn each_send_back_spends_one_of_the_allowance() {
+        assert_eq!(redos_left(1), MAX_STEP_REDOS - 1);
+        assert_eq!(redos_left(MAX_STEP_REDOS - 1), 1);
+    }
+
+    #[test]
+    fn the_allowance_runs_out_rather_than_going_negative() {
+        assert_eq!(redos_left(MAX_STEP_REDOS), 0);
+        assert_eq!(
+            redos_left(MAX_STEP_REDOS + 9),
+            0,
+            "a saturating count is what stops the run instead of wrapping into a fresh allowance"
+        );
+    }
+
+    #[test]
+    fn the_cap_leaves_room_to_improve_a_step_more_than_once_before_giving_up() {
+        assert!(
+            MAX_STEP_REDOS >= 2,
+            "one rejection is a typo, not a pattern; the cap must not stop a run on the first"
+        );
+    }
+}
+
+#[cfg(test)]
+mod guided_tests {
+    use super::{node_brief, tier_summary, tier_title};
+
+    fn says(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_step_with_no_notes_is_briefed_exactly_as_it_was_planned() {
+        let brief = node_brief(Some("Draw the bird."), "build flappy", "t1", &[], &[], "");
+        assert_eq!(brief, "Draw the bird.");
+    }
+
+    #[test]
+    fn a_step_sent_back_is_briefed_with_the_notes_that_say_why() {
+        let brief = node_brief(
+            Some("Draw the bird."),
+            "build flappy",
+            "t1",
+            &[],
+            &says(&["the bird reads as a blob at this size"]),
+            "",
+        );
+        assert!(brief.starts_with("Draw the bird."), "the plan still leads the brief");
+        assert!(brief.contains("- the bird reads as a blob at this size"));
+        assert!(
+            brief.contains("outranks the brief above"),
+            "a worker that treats the note as optional will hand back the same thing"
+        );
+    }
+
+    #[test]
+    fn several_notes_all_reach_the_crew() {
+        let brief = node_brief(
+            Some("Draw the bird."),
+            "b",
+            "t1",
+            &[],
+            &says(&["make it a paper plane", "the pipes should be green"]),
+            "",
+        );
+        assert!(brief.contains("- make it a paper plane"));
+        assert!(brief.contains("- the pipes should be green"));
+    }
+
+    #[test]
+    fn notes_sit_between_the_plan_and_the_working_directory_hint() {
+        let brief = node_brief(
+            Some("Draw the bird."),
+            "b",
+            "t1",
+            &["cap_t0".to_string()],
+            &says(&["make it a paper plane"]),
+            "\n\nYou are working in the project at /games/flappy.",
+        );
+        let note_at = brief.find("paper plane").unwrap();
+        let upstream_at = brief.find("cap_t0").unwrap();
+        let hint_at = brief.find("You are working in").unwrap();
+        assert!(upstream_at < note_at && note_at < hint_at);
+    }
+
+    #[test]
+    fn a_workflow_node_with_no_plan_still_carries_the_run_brief() {
+        let brief = node_brief(None, "build flappy", "implement", &[], &[], "");
+        assert!(brief.contains("implement"));
+        assert!(brief.contains("build flappy"));
+    }
+
+    #[test]
+    fn a_single_step_tier_is_titled_with_what_the_crew_just_did() {
+        assert_eq!(tier_title(&says(&["Draw the player"])), "Draw the player");
+    }
+
+    #[test]
+    fn a_tier_that_ran_three_things_at_once_says_so_instead_of_naming_one() {
+        let title = tier_title(&says(&["Draw the player", "Write the score", "Add the flap"]));
+        assert_eq!(title, "Draw the player (and 2 more)");
+    }
+
+    #[test]
+    fn the_step_summary_names_who_did_what() {
+        let summary = tier_summary(&[
+            ("artist".to_string(), "Draw the player".to_string()),
+            ("gameplay_engineer".to_string(), "Add the flap".to_string()),
+        ]);
+        assert_eq!(summary, "artist: Draw the player\ngameplay_engineer: Add the flap");
+    }
+}
+
+#[cfg(test)]
+mod ceiling_tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn eleven_nodes() -> Workflow {
+        let plan = studio_workflow::Plan {
+            title: "t".into(),
+            tasks: (1..=11)
+                .map(|i| studio_workflow::PlanTask {
+                    id: format!("t{i}"),
+                    role: "gameplay_engineer".into(),
+                    brief: "do it".into(),
+                    depends_on: Vec::new(),
+                    say: String::new(),
+                })
+                .collect(),
+        };
+        plan.to_workflow().unwrap()
+    }
+
+    fn dir_with(pairs: &[(&str, Value)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = studio_settings::Settings::new();
+        for (k, v) in pairs {
+            s.set(k, v.clone());
+        }
+        s.save(&studio_settings::Settings::path_in(dir.path())).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_run_nobody_configured_still_gets_a_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tokens, usd) = ceiling_for(dir.path(), &eleven_nodes());
+        assert_eq!(tokens, eleven_nodes().total_budget());
+        assert_eq!(usd, DEFAULT_RUN_CEILING_USD);
+        assert!(
+            tokens < u64::MAX && usd > 0.0,
+            "the enforcer used to be built with u64::MAX, so a plan could spend without limit"
+        );
+    }
+
+    #[test]
+    fn the_ceiling_can_be_raised_or_turned_off_from_settings() {
+        let dir = dir_with(&[
+            ("budget.tokens", Value::from(50_000)),
+            ("budget.usd", Value::from(4.5)),
+        ]);
+        assert_eq!(ceiling_for(dir.path(), &eleven_nodes()), (50_000, 4.5));
+
+        let off = dir_with(&[("budget.usd", Value::from(0))]);
+        assert_eq!(ceiling_for(off.path(), &eleven_nodes()).1, 0.0);
+    }
+
+    #[test]
+    fn a_ceiling_of_zero_tokens_falls_back_rather_than_refusing_everything() {
+        let dir = dir_with(&[("budget.tokens", Value::from(0))]);
+        let (tokens, _) = ceiling_for(dir.path(), &eleven_nodes());
+        assert_eq!(tokens, eleven_nodes().total_budget());
+    }
+
+    #[test]
+    fn the_token_enforcer_refuses_a_node_that_would_cross_the_ceiling() {
+        let mut e = Enforcer::new(100_000, 100_000);
+        e.record(99_000);
+        let projection = Projection {
+            prefix_tokens: 8_000,
+            brief_tokens: 500,
+            output_reserve: 2_000,
+            prefix_is_warm: false,
+        };
+        assert!(
+            matches!(e.admit(projection), studio_budget::Admission::Refuse { .. }),
+            "the ladder the budget crate ships was unreachable while the limit was u64::MAX"
+        );
+    }
 }

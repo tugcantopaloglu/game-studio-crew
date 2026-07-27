@@ -96,7 +96,9 @@ When a role needs another role's judgment without handing off ownership, the dae
 A worker that is blocked, out of scope, or over a trust threshold ([10](10-standards-and-trust.md)) calls `mcp__studio__escalate`. The daemon routes to `escalates_to`, attaching the escalating capsule and a `do_not_revisit` marker so the parent doesn't re-delegate the same dead end. Emits `escalated`.
 
 ### Conflict arbitration (meeting)
-When two capsules assert incompatible decisions (detected at capsule-submit time against the decision store, [03](03-state-store.md)), the daemon convenes an **arbitration meeting**: it spawns the nearest common ancestor in the escalation tree with both capsules as input. The ancestor emits a decision capsule that becomes an ADR ([02 §ADR store](02-context-engine.md)). Emits `meeting_started` (kind `arbitration`) → `decision_recorded` → `meeting_ended`.
+When two capsules assert incompatible decisions (detected at capsule-submit time against the decision store, [03](03-state-store.md)), or when you convene one from the floor, the daemon runs an **arbitration meeting**. It spawns each participant in turn, and **the daemon assembles the room**: every speaker after the first receives the previous positions verbatim in its brief and is asked to answer them, so a participant reads the room without holding a session or owning a tool. The **chair is the nearest common ancestor** in the escalation tree; it receives every position verbatim and is held to a JSON schema, so it returns a `claim`, a `rationale`, and the positions it overrules rather than a summary. That ruling lands in the decision store, where `decision_search` can hand it to a future worker, and — when the meeting names a project — in `docs/decisions/` in that repo, committed daemon-side at zero token cost. Emits `meeting_started` (kind `arbitration`) → one `meeting_spoke` per speaker → `decision_recorded` → `meeting_ended`.
+
+A chair that returns no usable decision **adjourns** the meeting rather than having a decision invented for it: a meeting can end with nothing recorded, but it cannot record something nobody said.
 
 ## What a role is, precisely
 

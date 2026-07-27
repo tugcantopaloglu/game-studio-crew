@@ -73,7 +73,16 @@ impl Index {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
         schema::migrate(&conn)?;
-        Ok(Self { conn })
+        let index = Self { conn };
+        let _ = index.checkpoint();
+        Ok(index)
+    }
+
+    pub fn checkpoint(&self) -> Result<u64> {
+        let pages = self.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            r.get::<_, i64>(1).map(|pages| pages.max(0) as u64)
+        })?;
+        Ok(pages)
     }
 
     pub fn open_in_memory() -> Result<Self> {

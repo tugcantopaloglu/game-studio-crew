@@ -1,17 +1,60 @@
 import * as THREE from "/vendor/three.module.js";
 import {
-  buildCharacter, buildDesk, buildChair, buildPlant, buildCabinet,
+  buildDesk, buildChair, buildPlant, buildCabinet,
   buildWhiteboard, buildServerRack, buildEasel, buildSofa, buildTestBench,
   buildMeetingTable, buildCoffeeBar, buildWaterCooler, buildShelf, buildBoxes,
-  characterBounds,
+  characterBounds, shell,
 } from "/voxel.js";
+import { buildAvatar, voxelMesh, VOX } from "/avatar.js";
+import { budget } from "/perf.js";
 
-export const VOX = 0.085;
+export { VOX, voxelMesh };
 const PICK_MATERIAL = new THREE.MeshBasicMaterial({ visible: false });
 export const WALL_H = 2.6;
 export const WALL_T = 0.16;
 export const LEVEL_H = 3.6;
 const DOOR_W = 2.6;
+
+const lamberts = new Map();
+const basics = new Map();
+
+function lambert(color) {
+  let m = lamberts.get(color);
+  if (!m) {
+    m = new THREE.MeshLambertMaterial({ color });
+    lamberts.set(color, m);
+  }
+  return m;
+}
+
+function basic(color, opacity) {
+  const key = opacity === undefined ? color : color + ":" + opacity;
+  let m = basics.get(key);
+  if (!m) {
+    m = opacity === undefined
+      ? new THREE.MeshBasicMaterial({ color })
+      : new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false });
+    basics.set(key, m);
+  }
+  return m;
+}
+
+const vertexLit = new THREE.MeshLambertMaterial({ vertexColors: true });
+const RING_GEO = new THREE.RingGeometry(0.4, 0.56, 40);
+const SHADE_GEO = new THREE.ConeGeometry(0.2, 0.18, 14, 1, true);
+const BULB_GEO = new THREE.SphereGeometry(0.07, 10, 8);
+const POOL_GEO = new THREE.CircleGeometry(0.75, 24);
+const CONE_GEO = new THREE.CylinderGeometry(0.16, 0.75, 2.2, 18, 1, true);
+const SHADE_MATERIAL = new THREE.MeshLambertMaterial({ color: 0x161c26, side: THREE.DoubleSide });
+
+let pickGeo = null;
+function proxyGeo() {
+  if (!pickGeo) {
+    const cb = characterBounds();
+    pickGeo = new THREE.BoxGeometry(cb.w * VOX, cb.h * VOX, cb.d * VOX);
+  }
+  return pickGeo;
+}
 
 export const FAMILY_TINT = {
   leadership: 0xffc84a, design: 0xa678ff, engineering: 0x4aa8ff,
@@ -24,12 +67,11 @@ const SCREEN_STYLE = {
   qa: "code", infra: "graph",
 };
 
-const cube = new THREE.BoxGeometry(1, 1, 1);
 const tileGeo = new THREE.BoxGeometry(1, 0.2, 1);
-for (const g of [cube, tileGeo]) {
-  const n = g.attributes.position.count;
-  g.setAttribute("color", new THREE.BufferAttribute(new Float32Array(n * 3).fill(1), 3));
-}
+tileGeo.setAttribute(
+  "color",
+  new THREE.BufferAttribute(new Float32Array(tileGeo.attributes.position.count * 3).fill(1), 3)
+);
 
 let rng = 1;
 function rand() {
@@ -37,27 +79,8 @@ function rand() {
   return rng / 4294967296;
 }
 
-export function voxelMesh(voxels, opts = {}) {
-  const mesh = new THREE.InstancedMesh(
-    cube,
-    new THREE.MeshLambertMaterial({ vertexColors: true }),
-    voxels.length
-  );
-  mesh.castShadow = opts.castShadow !== false;
-  mesh.receiveShadow = true;
-  const m = new THREE.Matrix4();
-  const c = new THREE.Color();
-  voxels.forEach((v, i) => {
-    m.makeTranslation(v.x + 0.5, v.y + 0.5, v.z + 0.5);
-    mesh.setMatrixAt(i, m);
-    mesh.setColorAt(i, c.setHex(v.c));
-  });
-  mesh.instanceMatrix.needsUpdate = true;
-  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-  return mesh;
-}
-
-function place(voxels, x, y, z, rotY = 0) {
+function place(raw, x, y, z, rotY = 0) {
+  const voxels = shell(raw);
   const mesh = voxelMesh(voxels);
   const w = Math.max(...voxels.map((v) => v.x)) + 1;
   const d = Math.max(...voxels.map((v) => v.z)) + 1;
@@ -70,7 +93,7 @@ function place(voxels, x, y, z, rotY = 0) {
   return { group: g, mesh };
 }
 
-function drawScreen(x, style, tint, data) {
+function drawScreen(x, style, tint, data, crew) {
   const hex = '#' + tint.toString(16).padStart(6, '0');
   x.fillStyle = '#080b11'; x.fillRect(0, 0, 256, 160);
   x.fillStyle = hex; x.fillRect(0, 0, 256, 3);
@@ -100,7 +123,7 @@ function drawScreen(x, style, tint, data) {
     });
   } else if (style === 'swatch') {
     x.fillText('DEPARTMENT', 10, 24);
-    (data.crew || []).slice(0, 5).forEach((c, i) => {
+    crew.slice(0, 5).forEach((c, i) => {
       const y = 42 + i * 22;
       x.fillStyle = c.color; x.fillRect(10, y - 10, 12, 12);
       x.fillStyle = '#aab3c2'; x.font = '600 13px ui-monospace, monospace';
@@ -133,6 +156,52 @@ function drawScreen(x, style, tint, data) {
 }
 
 const screens = [];
+const screenByKey = new Map();
+const SCREEN_W = 2.0;
+const SCREEN_H = 1.25;
+const screenFrameGeo = new THREE.BoxGeometry(SCREEN_W + 0.16, SCREEN_H + 0.16, 0.08);
+const screenPanelGeo = new THREE.PlaneGeometry(SCREEN_W, SCREEN_H);
+let screenPayload = null;
+let screenCursor = 0;
+
+function screenSurface(style, tint, department) {
+  const key = style + ":" + tint + ":" + department;
+  const known = screenByKey.get(key);
+  if (known) return known;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = 256;
+  canvas.height = 160;
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.magFilter = THREE.NearestFilter;
+  tex.colorSpace = THREE.SRGBColorSpace;
+
+  const surface = {
+    ctx: canvas.getContext("2d"),
+    tex,
+    material: new THREE.MeshBasicMaterial({ map: tex }),
+    style, tint, department,
+    dirty: true,
+    drawn: null,
+  };
+  screenByKey.set(key, surface);
+  screens.push(surface);
+  return surface;
+}
+
+function screenSignature(style, data, crew) {
+  if (style === "code") {
+    const feed = data.feed || [];
+    return feed.length ? feed.length + ":" + feed[feed.length - 1].seq : "0";
+  }
+  if (style === "swatch") {
+    let sig = "";
+    for (const c of crew) sig += c.role + c.color + c.tokens + ";";
+    return sig;
+  }
+  if (style === "graph") return data.cacheRead + "|" + data.cacheWrite;
+  return data.events + "|" + data.tokens + "|" + data.spend;
+}
 
 function mountWall(room, cx, cz, doorSide, glassSide, avoid = []) {
   const order = ["-z", "+z", "-x", "+x"];
@@ -161,8 +230,9 @@ function wallScreens(parent, room, cx, cz, tint, doorSide, glassSide, avoid = []
   const span = m.a1 - m.a0;
   const count = span > 15 ? 3 : 2;
 
+  const surface = screenSurface(style, tint, room.department);
+
   for (let i = 0; i < count; i++) {
-    const w = 2.0, h = 1.25;
     const t = (i + 1) / (count + 1);
     const along = m.a0 + span * t;
 
@@ -174,44 +244,49 @@ function wallScreens(parent, room, cx, cz, tint, doorSide, glassSide, avoid = []
     group.rotation.y = m.rot;
     parent.add(group);
 
-    const frame = new THREE.Mesh(
-      new THREE.BoxGeometry(w + 0.16, h + 0.16, 0.08),
-      new THREE.MeshLambertMaterial({ color: 0x11151d })
-    );
+    const frame = new THREE.Mesh(screenFrameGeo, lambert(0x11151d));
     frame.position.z = -0.03;
     group.add(frame);
 
-    const canvas = document.createElement("canvas");
-    canvas.width = 256; canvas.height = 160;
-    const ctx = canvas.getContext("2d");
-    const tex = new THREE.CanvasTexture(canvas);
-    tex.magFilter = THREE.NearestFilter;
-    tex.colorSpace = THREE.SRGBColorSpace;
-
-    const panel = new THREE.Mesh(
-      new THREE.PlaneGeometry(w, h),
-      new THREE.MeshBasicMaterial({ map: tex })
-    );
+    const panel = new THREE.Mesh(screenPanelGeo, surface.material);
     panel.position.z = 0.03;
     group.add(panel);
-
-    screens.push({ ctx, tex, style, tint, department: room.department });
   }
-
 }
 
 export function refreshScreens(data) {
-  for (const s of screens) {
-    drawScreen(s.ctx, s.style, s.tint, {
-      ...data,
-      crew: (data.crewByDept && data.crewByDept[s.department]) || [],
-    });
+  screenPayload = data;
+  for (const s of screens) s.dirty = true;
+  return screens.length;
+}
+
+export function paintScreens(limit) {
+  if (!screenPayload || !screens.length) return 0;
+  let painted = 0;
+  let looked = 0;
+  while (looked < screens.length && painted < limit) {
+    const s = screens[screenCursor];
+    screenCursor = (screenCursor + 1) % screens.length;
+    looked++;
+    if (!s.dirty) continue;
+    s.dirty = false;
+    const crew = (screenPayload.crewByDept && screenPayload.crewByDept[s.department]) || [];
+    const sig = screenSignature(s.style, screenPayload, crew);
+    if (sig === s.drawn) continue;
+    s.drawn = sig;
+    drawScreen(s.ctx, s.style, s.tint, screenPayload, crew);
     s.tex.needsUpdate = true;
+    painted++;
   }
+  return painted;
+}
+
+export function screenCount() {
+  return screens.length;
 }
 
 function neonEdge(parent, room, cx, cz, tint) {
-  const mat = new THREE.MeshBasicMaterial({ color: tint });
+  const mat = basic(tint);
   const x0 = room.x - cx, z0 = room.y - cz;
   const x1 = x0 + room.w, z1 = z0 + room.h;
   const t = 0.16, y = 0.23, half = t / 2;
@@ -227,7 +302,7 @@ function neonEdge(parent, room, cx, cz, tint) {
     parent.add(m);
     const halo = new THREE.Mesh(
       new THREE.BoxGeometry(w + 0.5, 0.02, d + 0.5),
-      new THREE.MeshBasicMaterial({ color: tint, transparent: true, opacity: 0.16, depthWrite: false })
+      basic(tint, 0.16)
     );
     halo.position.set(px, 0.215, pz);
     parent.add(halo);
@@ -235,7 +310,7 @@ function neonEdge(parent, room, cx, cz, tint) {
 }
 
 function wallSegment(parent, x, z, w, d, color) {
-  const m = new THREE.Mesh(new THREE.BoxGeometry(w, WALL_H, d), new THREE.MeshLambertMaterial({ color }));
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, WALL_H, d), lambert(color));
   m.position.set(x, WALL_H / 2, z);
   m.castShadow = true;
   m.receiveShadow = true;
@@ -254,7 +329,7 @@ function glassSegment(parent, x, z, w, d, tint) {
   for (const y of [0.12, WALL_H - 0.12]) {
     const rail = new THREE.Mesh(
       new THREE.BoxGeometry(w, 0.24, d),
-      new THREE.MeshLambertMaterial({ color: y > 1 ? 0x2b3242 : tint })
+      lambert(y > 1 ? 0x2b3242 : tint)
     );
     rail.position.set(x, y, z);
     rail.castShadow = y > 1;
@@ -305,10 +380,7 @@ function buildShell(parent, floor, cx, cz) {
     [w / 2 + t / 2, 0, t, h + t * 2],
   ];
   for (const [px, pz, sw, sd] of segs) {
-    const m = new THREE.Mesh(
-      new THREE.BoxGeometry(sw, y, sd),
-      new THREE.MeshLambertMaterial({ color: shade })
-    );
+    const m = new THREE.Mesh(new THREE.BoxGeometry(sw, y, sd), lambert(shade));
     m.position.set(px, y / 2 - 0.4, pz);
     m.castShadow = true;
     m.receiveShadow = true;
@@ -316,11 +388,17 @@ function buildShell(parent, floor, cx, cz) {
 
     const strip = new THREE.Mesh(
       new THREE.BoxGeometry(sw + 0.1, 0.16, sd + 0.1),
-      new THREE.MeshBasicMaterial({ color: 0x5fd8ff })
+      basic(0x5fd8ff)
     );
     strip.position.set(px, -0.12, pz);
     parent.add(strip);
   }
+}
+
+function podFacing(desk, room) {
+  if (!room) return 0;
+  const col = Math.round((desk.x - room.x - 1) / 3);
+  return col % 2 === 0 ? 0 : Math.PI;
 }
 
 function doorSideFor(room, cx, cz) {
@@ -336,11 +414,7 @@ function shade(base, tint, amount) {
 }
 
 function checkerFloor(parent, room, cx, cz, tint) {
-  const mesh = new THREE.InstancedMesh(
-    tileGeo,
-    new THREE.MeshLambertMaterial({ vertexColors: true }),
-    room.w * room.h
-  );
+  const mesh = new THREE.InstancedMesh(tileGeo, vertexLit, room.w * room.h);
   mesh.receiveShadow = true;
   const m = new THREE.Matrix4();
   const c = new THREE.Color();
@@ -429,15 +503,11 @@ function roomProps(parent, room, cx, cz, tint) {
   return pois;
 }
 
-function buildLobby(parent, lobby, cx, cz) {
+function buildLobby(parent, lobby, cx, cz, tier) {
   const rx = lobby.x - cx, rz = lobby.y - cz;
   const mid = { x: rx + lobby.w / 2, z: rz + lobby.h / 2 };
 
-  const mesh = new THREE.InstancedMesh(
-    tileGeo,
-    new THREE.MeshLambertMaterial({ vertexColors: true }),
-    lobby.w * lobby.h
-  );
+  const mesh = new THREE.InstancedMesh(tileGeo, vertexLit, lobby.w * lobby.h);
   mesh.receiveShadow = true;
   const m = new THREE.Matrix4();
   const c = new THREE.Color();
@@ -474,9 +544,11 @@ function buildLobby(parent, lobby, cx, cz) {
   parent.add(place(buildWaterCooler(), mid.x + 4.6, 0.2, rz + 1.0).group);
   parent.add(place(buildBoxes(), rx + lobby.w - 1.6, 0.2, rz + lobby.h - 1.9).group);
 
-  const lamp = new THREE.PointLight(0xffe9c8, 46, 24, 1.6);
-  lamp.position.set(mid.x, WALL_H + 0.3, mid.z);
-  parent.add(lamp);
+  if (tier.roomLights) {
+    const lamp = new THREE.PointLight(0xffe9c8, 46, 24, 1.6);
+    lamp.position.set(mid.x, WALL_H + 0.3, mid.z);
+    parent.add(lamp);
+  }
 
   const sign = makeLabel("LOBBY", 0xe8eef8, 1.5);
   sign.position.set(mid.x, 0.03, rz + 1.9);
@@ -486,7 +558,7 @@ function buildLobby(parent, lobby, cx, cz) {
   return pois;
 }
 
-function buildMeetingRoom(parent, room, cx, cz) {
+function buildMeetingRoom(parent, room, cx, cz, tier) {
   const tint = 0x6fa8d1;
   const mx = room.x - cx + room.w / 2, mz = room.y - cz + room.h / 2;
 
@@ -504,9 +576,11 @@ function buildMeetingRoom(parent, room, cx, cz) {
   parent.add(place(buildPlant(), room.x - cx + 0.8, 0.2, room.y - cz + room.h - 0.8).group);
   parent.add(place(buildPlant(), room.x - cx + room.w - 0.9, 0.2, room.y - cz + 0.9).group);
 
-  const lamp = new THREE.PointLight(0xfff0d8, 34, 18, 1.7);
-  lamp.position.set(mx, WALL_H - 0.45, mz);
-  parent.add(lamp);
+  if (tier.roomLights) {
+    const lamp = new THREE.PointLight(0xfff0d8, 34, 18, 1.7);
+    lamp.position.set(mx, WALL_H - 0.45, mz);
+    parent.add(lamp);
+  }
 
   const sign = makeLabel("WAR ROOM", tint, 1.2);
   sign.position.set(mx, 0.03, room.y - cz + room.h - 1.4);
@@ -576,7 +650,7 @@ function buildExtraRoom(parent, room, cx, cz) {
 
 function buildElevatorStop(parent, rect, cx, cz) {
   const mx = rect.x - cx + rect.w / 2, mz = rect.y - cz + rect.h / 2;
-  const frame = new THREE.MeshLambertMaterial({ color: 0x1c222d });
+  const frame = lambert(0x1c222d);
 
   const backW = new THREE.Mesh(new THREE.BoxGeometry(rect.w, WALL_H, 0.14), frame);
   backW.position.set(mx, WALL_H / 2, mz - rect.h / 2 + 0.07);
@@ -594,14 +668,14 @@ function buildElevatorStop(parent, rect, cx, cz) {
 
   const doors = new THREE.Mesh(
     new THREE.BoxGeometry(rect.w - 0.5, WALL_H - 0.6, 0.06),
-    new THREE.MeshLambertMaterial({ color: 0x39404f })
+    lambert(0x39404f)
   );
   doors.position.set(mx, (WALL_H - 0.6) / 2, mz + rect.h / 2 - 0.03);
   parent.add(doors);
 
   const lampStrip = new THREE.Mesh(
     new THREE.BoxGeometry(rect.w - 0.4, 0.12, 0.06),
-    new THREE.MeshBasicMaterial({ color: 0x4ad991 })
+    basic(0x4ad991)
   );
   lampStrip.position.set(mx, WALL_H - 0.4, mz + rect.h / 2 + 0.01);
   parent.add(lampStrip);
@@ -615,40 +689,46 @@ function buildElevatorStop(parent, rect, cx, cz) {
 export function buildOffice(floor, scene) {
   rng = 12345;
   screens.length = 0;
+  screenByKey.clear();
+  screenCursor = 0;
+  screenPayload = null;
+  const tier = budget();
   const cx = floor.width / 2, cz = floor.height / 2;
   const avatars = new Map();
   const world = new THREE.Group();
   scene.add(world);
+  const fixtures = new THREE.Group();
+  world.add(fixtures);
 
   const corridor = new THREE.Mesh(
     new THREE.BoxGeometry(floor.width + 4, 0.2, floor.height + 4),
-    new THREE.MeshLambertMaterial({ color: 0x2a303c })
+    lambert(0x2a303c)
   );
   corridor.receiveShadow = true;
-  world.add(corridor);
+  fixtures.add(corridor);
 
   const skirt = new THREE.Mesh(
     new THREE.BoxGeometry(floor.width + 5, 0.55, floor.height + 5),
-    new THREE.MeshLambertMaterial({ color: 0x12151c })
+    lambert(0x12151c)
   );
   skirt.position.y = -0.28;
-  world.add(skirt);
+  fixtures.add(skirt);
 
   const levels = [new THREE.Group(), new THREE.Group()];
   levels[1].position.y = LEVEL_H;
-  for (const g of levels) world.add(g);
+  for (const g of levels) fixtures.add(g);
 
   if ((floor.levels || 1) > 1) {
     const deck = new THREE.Mesh(
       new THREE.BoxGeometry(floor.width + 4, 0.2, floor.height + 4),
-      new THREE.MeshLambertMaterial({ color: 0x2a303c })
+      lambert(0x2a303c)
     );
     deck.receiveShadow = true;
     levels[1].add(deck);
   }
 
-  const lobbyPois = floor.lobby ? buildLobby(levels[0], floor.lobby, cx, cz) : [];
-  const meetingDoor = floor.meeting ? buildMeetingRoom(levels[0], floor.meeting, cx, cz) : null;
+  const lobbyPois = floor.lobby ? buildLobby(levels[0], floor.lobby, cx, cz, tier) : [];
+  const meetingDoor = floor.meeting ? buildMeetingRoom(levels[0], floor.meeting, cx, cz, tier) : null;
   for (const extra of floor.extras || []) {
     buildExtraRoom(levels[extra.level || 0], extra, cx, cz);
   }
@@ -689,14 +769,16 @@ export function buildOffice(floor, scene) {
     poisByDept.set(room.department, roomProps(rg, room, cx, cz, tint));
 
     const rx = room.x - cx, rz = room.y - cz;
-    const lamp = new THREE.PointLight(0xfff0d8, 30, 17, 1.7);
-    lamp.position.set(rx + room.w / 2, WALL_H - 0.45, rz + room.h / 2);
-    rg.add(lamp);
+    if (tier.roomLights) {
+      const lamp = new THREE.PointLight(0xfff0d8, 30, 17, 1.7);
+      lamp.position.set(rx + room.w / 2, WALL_H - 0.45, rz + room.h / 2);
+      rg.add(lamp);
+    }
 
     for (const fx of [0.28, 0.72]) {
       const fix = new THREE.Mesh(
         new THREE.BoxGeometry(1.5, 0.07, 0.28),
-        new THREE.MeshBasicMaterial({ color: 0xfff4e0 })
+        basic(0xfff4e0)
       );
       fix.position.set(rx + room.w * fx, WALL_H - 0.12, rz + room.h / 2);
       rg.add(fix);
@@ -716,18 +798,21 @@ export function buildOffice(floor, scene) {
     const g = new THREE.Group();
     g.position.set(s.x + s.w / 2 - cx, 0.2, s.y + s.h / 2 - cz);
     levels[s.level || 0].add(g);
-    g.add(place(buildDesk(0x2c3240), 0, 0, 0.28, Math.PI).group);
-    g.add(place(buildChair(tint), 0, 0, -0.42).group);
+    g.rotation.y = podFacing(s, roomsByDept.get(s.department));
+    g.add(place(buildDesk(0x2c3240), 0, 0, 0.28).group);
+    g.add(place(buildChair(tint), 0, 0, -0.42, rand() * 0.7 - 0.35).group);
   }
 
   for (const d of floor.desks) {
     const tint = FAMILY_TINT[d.visual_family] || 0x4aa8ff;
     const room = roomsByDept.get(d.department);
 
+    const facing = podFacing(d, room);
     const fixed = new THREE.Group();
     fixed.position.set(d.x + d.w / 2 - cx, 0.2, d.y + d.h / 2 - cz);
+    fixed.rotation.y = facing;
     levels[d.level || 0].add(fixed);
-    fixed.add(place(buildDesk(tint), 0, 0, 0.28, Math.PI).group);
+    fixed.add(place(buildDesk(tint), 0, 0, 0.28).group);
     fixed.add(place(buildChair(tint), 0, 0, -0.42).group);
 
     const plate = makeLabel(d.role.replace(/_/g, " "), 0xbcc5d4, 0.6);
@@ -736,10 +821,11 @@ export function buildOffice(floor, scene) {
     fixed.add(plate);
 
     const person = new THREE.Group();
+    const deckY = (d.level ? LEVEL_H : 0);
     const home = new THREE.Vector3(
-      d.x + d.w / 2 - cx,
-      (d.level ? LEVEL_H : 0) + 0.22,
-      d.y + d.h / 2 - cz - 0.42
+      d.x + d.w / 2 - cx + Math.sin(facing) * -0.42,
+      deckY + 0.22,
+      d.y + d.h / 2 - cz + Math.cos(facing) * -0.42
     );
     person.position.copy(home);
     world.add(person);
@@ -747,49 +833,37 @@ export function buildOffice(floor, scene) {
     const ringMat = new THREE.MeshBasicMaterial({
       color: 0x394254, side: THREE.DoubleSide, transparent: true, opacity: 0.4,
     });
-    const ring = new THREE.Mesh(new THREE.RingGeometry(0.4, 0.56, 40), ringMat);
+    const ring = new THREE.Mesh(RING_GEO, ringMat);
     ring.rotation.x = -Math.PI / 2;
     ring.position.y = -0.19;
     person.add(ring);
 
-    const body = place(buildCharacter(d.role), 0, 0, 0);
-    person.add(body.group);
+    const rig = buildAvatar(d.role, rand() * 10);
+    person.add(rig.group);
 
-    const cb = characterBounds();
-    const proxy = new THREE.Mesh(
-      new THREE.BoxGeometry(cb.w * VOX, cb.h * VOX, cb.d * VOX),
-      PICK_MATERIAL
-    );
-    proxy.position.y = (cb.h * VOX) / 2;
+    const proxy = new THREE.Mesh(proxyGeo(), PICK_MATERIAL);
+    proxy.position.y = (characterBounds().h * VOX) / 2;
     proxy.visible = false;
     person.add(proxy);
-
-    const alarm = new THREE.PointLight(0xff3b30, 0, 3.4, 2);
-    alarm.position.y = 1.55;
-    alarm.visible = false;
-    person.add(alarm);
 
     const lampY = 2.2;
     const lamp = new THREE.Group();
     lamp.visible = false;
     person.add(lamp);
 
-    const shade = new THREE.Mesh(
-      new THREE.ConeGeometry(0.2, 0.18, 14, 1, true),
-      new THREE.MeshLambertMaterial({ color: 0x161c26, side: THREE.DoubleSide })
-    );
+    const shade = new THREE.Mesh(SHADE_GEO, SHADE_MATERIAL);
     shade.position.y = lampY + 0.1;
     lamp.add(shade);
 
     const bulb = new THREE.Mesh(
-      new THREE.SphereGeometry(0.07, 10, 8),
+      BULB_GEO,
       new THREE.MeshBasicMaterial({ color: 0x4ad991, transparent: true, opacity: 0.95 })
     );
     bulb.position.y = lampY;
     lamp.add(bulb);
 
     const cone = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.16, 0.75, lampY, 18, 1, true),
+      CONE_GEO,
       new THREE.MeshBasicMaterial({
         color: 0x4ad991, transparent: true, opacity: 0.16,
         depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
@@ -799,7 +873,7 @@ export function buildOffice(floor, scene) {
     lamp.add(cone);
 
     const pool = new THREE.Mesh(
-      new THREE.CircleGeometry(0.75, 24),
+      POOL_GEO,
       new THREE.MeshBasicMaterial({
         color: 0x4ad991, transparent: true, opacity: 0.12,
         depthWrite: false, blending: THREE.AdditiveBlending,
@@ -809,18 +883,28 @@ export function buildOffice(floor, scene) {
     pool.position.y = 0.015;
     lamp.add(pool);
 
-    const spot = new THREE.SpotLight(0x4ad991, 0, 5, 0.55, 0.7, 1.5);
-    spot.position.y = lampY;
-    lamp.add(spot);
-    lamp.add(spot.target);
+    let alarm = null;
+    let spot = null;
+    if (tier.deskLights) {
+      alarm = new THREE.PointLight(0xff3b30, 0, 3.4, 2);
+      alarm.position.y = 1.55;
+      person.add(alarm);
+
+      spot = new THREE.SpotLight(0x4ad991, 0, 5, 0.55, 0.7, 1.5);
+      spot.position.y = lampY;
+      person.add(spot);
+      person.add(spot.target);
+    }
 
     const bubble = chatBubble();
     person.add(bubble.sprite);
 
     avatars.set(d.role, {
-      person, body: body.group, hit: proxy, ringMat, alarm, lamp, bulb, cone, pool, spot,
+      person, body: rig.group, rig, hit: proxy, ringMat, alarm, lamp, bulb, cone, pool, spot,
       tier: d.tier, title: d.title, dept: d.department,
       home,
+      deskLook: new THREE.Vector3(d.x + d.w / 2 - cx, deckY + 0.92, d.y + d.h / 2 - cz),
+      homeFacing: facing,
       bounds: {
         x0: room.x - cx + 1.1, x1: room.x - cx + room.w - 1.1,
         z0: room.y - cz + 1.6, z1: room.y - cz + room.h - 1.1,
@@ -835,7 +919,8 @@ export function buildOffice(floor, scene) {
       meetingSeat: null,
       meetingFace: null,
       wait: rand() * 4,
-      facing: 0,
+      facing: facing,
+      speed: 0,
       seed: rand() * 10,
       roomPois: poisByDept.get(d.department) || [],
       lobbyPois,
@@ -846,7 +931,7 @@ export function buildOffice(floor, scene) {
     });
   }
 
-  buildShell(world, floor, cx, cz);
+  buildShell(fixtures, floor, cx, cz);
   const table = floor.meeting
     ? new THREE.Vector3(
         floor.meeting.x - cx + floor.meeting.w / 2,
@@ -860,12 +945,18 @@ export function buildOffice(floor, scene) {
           floor.lobby.y - cz + floor.lobby.h / 2 + 0.4
         )
       : new THREE.Vector3(0, 0.22, 0);
-  const ambient = buildAmbient(world, floor, cx, cz, 5);
+  const ambient = buildAmbient(world, floor, cx, cz, tier.ambientCrew);
   for (const a of ambient) a.lobbyPois = lobbyPois;
   buildBoard(levels[0], table);
 
+  scene.updateMatrixWorld(true);
+  scene.matrixAutoUpdate = false;
+  world.matrixAutoUpdate = false;
+  fixtures.matrixAutoUpdate = false;
+  fixtures.matrixWorldAutoUpdate = false;
+
   return {
-    world, avatars, ambient, levels, meetingTable: table,
+    world, fixtures, avatars, ambient, levels, meetingTable: table,
     meetingApproach: meetingDoor ? [meetingDoor] : [],
   };
 }
@@ -894,10 +985,7 @@ export function buildBoard(parent, table) {
   g.position.set(table.x, 0.2, table.z - 2.1);
   parent.add(g);
 
-  const frame = new THREE.Mesh(
-    new THREE.BoxGeometry(2.5, 1.5, 0.1),
-    new THREE.MeshLambertMaterial({ color: 0x1a1f29 })
-  );
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(2.5, 1.5, 0.1), lambert(0x1a1f29));
   frame.position.y = 1.25;
   g.add(frame);
 
@@ -911,7 +999,7 @@ export function buildBoard(parent, table) {
   for (const x of [-1.2, 1.2]) {
     const leg = new THREE.Mesh(
       new THREE.BoxGeometry(0.09, 1.4, 0.09),
-      new THREE.MeshLambertMaterial({ color: 0x2b3240 })
+      lambert(0x2b3240)
     );
     leg.position.set(x, 0.7, 0);
     g.add(leg);
@@ -922,39 +1010,101 @@ export function buildBoard(parent, table) {
   return g;
 }
 
-export function showBoard(kind, topic, participants, chair) {
-  if (!boardMesh || !boardCtx) return;
+let board = null;
+
+function wrapAt(x, text, left, top, width, lineHeight, maxY) {
+  let line = "", y = top;
+  for (const w of String(text || "").split(/\s+/)) {
+    if (!w) continue;
+    if (line && (line + " " + w).length > width) {
+      x.fillText(line, left, y);
+      y += lineHeight;
+      line = w;
+      if (y > maxY) return y;
+    } else {
+      line = line ? line + " " + w : w;
+    }
+  }
+  if (line && y <= maxY) {
+    x.fillText(line, left, y);
+    y += lineHeight;
+  }
+  return y;
+}
+
+function drawBoard() {
+  if (!boardMesh || !boardCtx || !board) return;
   const x = boardCtx;
+
   x.fillStyle = "#e9ecf2";
   x.fillRect(0, 0, 340, 190);
-  x.fillStyle = "#c9502e";
+  x.fillStyle = board.decided ? "#2aa96b" : "#c9502e";
   x.fillRect(0, 0, 340, 5);
 
   x.fillStyle = "#2b3240";
-  x.font = "700 17px ui-monospace, monospace";
-  x.fillText((kind || "meeting").toUpperCase(), 14, 32);
+  x.font = "700 15px ui-monospace, monospace";
+  x.fillText((board.kind || "meeting").toUpperCase(), 14, 28);
 
-  x.font = "600 14px ui-monospace, monospace";
-  x.fillStyle = "#3d4657";
-  const words = String(topic || "").split(/\s+/);
-  let line = "", y = 60;
-  for (const w of words) {
-    if ((line + " " + w).length > 34) { x.fillText(line, 14, y); y += 20; line = w; }
-    else line = line ? line + " " + w : w;
-    if (y > 132) break;
-  }
-  if (line && y <= 132) x.fillText(line, 14, y);
-
-  x.fillStyle = "#6a7385";
   x.font = "600 12px ui-monospace, monospace";
-  x.fillText((participants || []).join(", ").slice(0, 44), 14, 162);
-  if (chair) { x.fillStyle = "#c9502e"; x.fillText("chair: " + chair, 14, 180); }
+  x.fillStyle = "#3d4657";
+  let y = wrapAt(x, board.topic, 14, 48, 40, 16, 80);
+
+  x.strokeStyle = "#c8cdd8";
+  x.lineWidth = 1;
+  x.beginPath();
+  x.moveTo(14, y);
+  x.lineTo(326, y);
+  x.stroke();
+  y += 18;
+
+  if (board.decided) {
+    x.fillStyle = "#2aa96b";
+    x.font = "700 10px ui-monospace, monospace";
+    x.fillText("DECISION", 14, y);
+    x.fillStyle = "#26303f";
+    x.font = "600 12px ui-monospace, monospace";
+    wrapAt(x, board.decided, 14, y + 17, 40, 15, 158);
+  } else if (board.position) {
+    x.fillStyle = "#c9502e";
+    x.font = "700 10px ui-monospace, monospace";
+    x.fillText(String(board.speaker || "").toUpperCase(), 14, y);
+    x.fillStyle = "#4a5364";
+    x.font = "500 12px ui-monospace, monospace";
+    wrapAt(x, board.position, 14, y + 17, 40, 15, 158);
+  } else {
+    x.fillStyle = "#8a93a4";
+    x.font = "500 12px ui-monospace, monospace";
+    x.fillText("the room is sitting down", 14, y);
+  }
+
+  x.fillStyle = "#8d95a4";
+  x.font = "600 10px ui-monospace, monospace";
+  x.fillText(("chair: " + (board.chair || "-")).slice(0, 46), 14, 182);
 
   boardTex.needsUpdate = true;
   boardMesh.visible = true;
 }
 
+export function showBoard(kind, topic, participants, chair) {
+  board = { kind, topic, participants, chair, speaker: null, position: null, decided: null };
+  drawBoard();
+}
+
+export function boardSays(role, position) {
+  if (!board) return;
+  board.speaker = role;
+  board.position = position;
+  drawBoard();
+}
+
+export function boardDecided(claim) {
+  if (!board) return;
+  board.decided = claim;
+  drawBoard();
+}
+
 export function hideBoard() {
+  board = null;
   if (boardMesh) boardMesh.visible = false;
 }
 
@@ -994,13 +1144,13 @@ let nextMingle = 0;
 
 export function mingle(list, now) {
   for (const a of list) {
-    if (a.chatUntil && (now > a.chatUntil || a.meetingSeat || a.mode !== "idle")) {
+    if (a.chatUntil && (!motion || now > a.chatUntil || a.meetingSeat || a.mode !== "idle")) {
       const b = a.chatWith;
       stopChat(a, now);
       if (b && b.chatWith === a) stopChat(b, now);
     }
   }
-  if (now < nextMingle) return;
+  if (!motion || now < nextMingle) return;
   nextMingle = now + 5 + rand() * 6;
 
   const free = list.filter(
@@ -1023,6 +1173,8 @@ export function mingle(list, now) {
   let j = (rand() * group.length) | 0;
   if (j === i) j = (i + 1) % group.length;
   const a = group[i], b = group[j];
+  if (a === b) return;
+  if (Math.abs(a.person.position.y - b.person.position.y) > 0.5) return;
 
   const mx = (a.person.position.x + b.person.position.x) / 2;
   const mz = (a.person.position.z + b.person.position.z) / 2;
@@ -1052,6 +1204,7 @@ export function seatAtTable(a, table, index, total, approach = []) {
     table.z + Math.sin(angle) * 0.95
   );
   a.meetingFace = Math.atan2(table.x - a.meetingSeat.x, table.z - a.meetingSeat.z);
+  a.meetingLook = new THREE.Vector3(table.x, table.y + 0.95, table.z);
   a.path = pathFrom(a.person.position, [
     ...a.route.map((v) => v.clone()),
     ...approach.map((v) => v.clone()),
@@ -1064,6 +1217,7 @@ export function seatAtTable(a, table, index, total, approach = []) {
 export function leaveTable(a, approach = []) {
   a.meetingSeat = null;
   a.meetingFace = null;
+  a.meetingLook = null;
   a.inLobby = false;
   a.path = [
     ...approach.map((v) => v.clone()).reverse(),
@@ -1073,7 +1227,34 @@ export function leaveTable(a, approach = []) {
   a.target.copy(a.path[0]);
 }
 
+let motion = true;
+
+export function setMotion(on) {
+  motion = !!on;
+  return motion;
+}
+
 export function wanderStep(a, busy, dt, now) {
+  if (!motion) {
+    const rest = a.meetingSeat || a.home;
+    if (rest) {
+      a.person.position.copy(rest);
+      a.target.copy(rest);
+    }
+    a.path.length = 0;
+    a.inLobby = false;
+    a.speed = 0;
+    a.visit = null;
+    if (a.bubble) a.bubble.sprite.visible = false;
+    a.mode = a.meetingSeat ? "meeting" : a.homeFacing === undefined ? "idle" : "desk";
+    if (a.meetingSeat && a.meetingFace !== null && a.meetingFace !== undefined) {
+      a.facing = a.meetingFace;
+    } else if (a.homeFacing !== undefined) {
+      a.facing = a.homeFacing;
+    }
+    return false;
+  }
+
   const p = a.person.position;
   const arrived = Math.hypot(p.x - a.target.x, p.z - a.target.z) < 0.14;
   if (arrived && Math.abs(p.y - a.target.y) > 0.5) p.y = a.target.y;
@@ -1107,7 +1288,7 @@ export function wanderStep(a, busy, dt, now) {
       }
     }
   } else {
-    if (a.mode !== "idle") a.mode = "idle";
+    if (a.mode === "meeting" || a.mode === "returning") a.mode = "idle";
     if (arrived) {
       if (a.path.length) {
         a.path.shift();
@@ -1116,6 +1297,7 @@ export function wanderStep(a, busy, dt, now) {
       } else if (now > a.wait) {
         const goLobby = a.lobby && !a.inLobby && rand() < 0.35;
         const comeBack = a.inLobby && rand() < 0.45;
+        a.mode = "idle";
 
         if (goLobby) {
           a.inLobby = true;
@@ -1145,12 +1327,17 @@ export function wanderStep(a, busy, dt, now) {
   const dx = a.target.x - p.x;
   const dz = a.target.z - p.z;
   const dist = Math.hypot(dx, dz);
-  if (dist > 0.06) {
-    const speed = a.mode === "returning" ? 5.4 : a.mode === "meeting" ? 2.4 : 0.85;
-    const step = Math.min(dist, speed * dt);
+  const cruise = a.mode === "returning" ? 2.9 : a.mode === "meeting" ? 1.7 : 0.9;
+  const want = dist > 0.06 ? Math.min(cruise, 0.22 + dist * 2.4) : 0;
+  const gain = want > a.speed ? 3.6 : 7.0;
+  a.speed += (want - a.speed) * Math.min(1, gain * dt);
+  if (a.speed < 0.03) a.speed = 0;
+
+  if (a.speed > 0 && dist > 0.001) {
+    const step = Math.min(dist, a.speed * dt);
     p.x += (dx / dist) * step;
     p.z += (dz / dist) * step;
-    a.facing = Math.atan2(dx, dz);
+    if (dist > 0.16) a.facing = Math.atan2(dx, dz);
     if (a.bubble && a.bubble.sprite.visible) a.bubble.sprite.visible = false;
     return true;
   }
@@ -1170,8 +1357,26 @@ export function wanderStep(a, busy, dt, now) {
       a.bubble.set(a.visit.emoji);
       a.bubble.sprite.visible = true;
     }
+  } else if (a.mode === "desk" && a.homeFacing !== undefined) {
+    a.facing = a.homeFacing;
   }
   return false;
+}
+
+export function avatarPose(a, ring, t) {
+  const still = a.speed === 0;
+  const seated = still && a.mode === "desk";
+  const p = a.pose || (a.pose = {});
+  p.speed = a.speed;
+  p.facing = a.facing;
+  p.sitting = seated;
+  p.working = ring === "running";
+  p.stuck = ring === "error" || ring === "blocked";
+  p.talking = (a.talkUntil || 0) > t || (a.chatUntil || 0) > t;
+  p.recline = seated && Math.sin(t * 0.17 + a.seed) > 0.84 ? 1 : 0;
+  p.at = a.person.position;
+  p.lookAt = !still ? null : seated ? a.deskLook : a.meetingSeat ? a.meetingLook : null;
+  return p;
 }
 
 export function makeLabel(text, color, scale = 1) {
@@ -1300,18 +1505,18 @@ export function buildAmbient(parent, floor, cx, cz, count = 5) {
     person.position.copy(start);
     parent.add(person);
 
-    const body = place(buildCharacter(AMBIENT_PALETTES[i % AMBIENT_PALETTES.length]), 0, 0, 0);
-    person.add(body.group);
+    const rig = buildAvatar(AMBIENT_PALETTES[i % AMBIENT_PALETTES.length], rand() * 10);
+    person.add(rig.group);
     const bubble = chatBubble();
     person.add(bubble.sprite);
 
     out.push({
-      person, body: body.group,
+      person, body: rig.group, rig,
       home: start.clone(), bounds: rect, lobby: rect,
       target: start.clone(), route: [], path: [], inLobby: true,
       mode: "idle", meetingSeat: null, meetingFace: null,
       door: start.clone(),
-      wait: rand() * 6, facing: 0, seed: rand() * 10,
+      wait: rand() * 6, facing: 0, speed: 0, seed: rand() * 10,
       roomPois: [], lobbyPois: [], bubble,
       visit: null, chatWith: null, chatUntil: 0,
     });

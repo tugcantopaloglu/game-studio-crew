@@ -2,7 +2,7 @@ use crate::parsers::{parse_report, scan_log};
 use crate::{FailureKind, VerifyResult, Verdict};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 use studio_engine::{render_command, resolve_binary, EngineProfile, Substitutions, VerifyScope};
 
@@ -19,7 +19,7 @@ fn is_crash_code(code: i32) -> bool {
 }
 
 fn run_command(args: &[String], cwd: &Path, timeout: Duration) -> std::io::Result<RunOutput> {
-    let mut child = Command::new(&args[0])
+    let mut child = studio_core::command(&args[0])
         .args(&args[1..])
         .current_dir(cwd)
         .stdin(Stdio::null())

@@ -65,6 +65,7 @@ pub fn price_per_mtok(model: Model) -> (f64, f64) {
     match model {
         Model::Fable => (10.0, 50.0),
         Model::Opus => (5.0, 25.0),
+        Model::Sonnet => (3.0, 15.0),
         Model::Haiku => (1.0, 5.0),
     }
 }
@@ -298,9 +299,33 @@ mod tests {
     }
 
     #[test]
+    fn the_summarizer_downshifts_to_the_cheapest_tier_not_the_middle_one() {
+        let chosen = model_for_step(Step::SummarizerDownshift, Model::Opus, true);
+        assert_eq!(
+            chosen,
+            Model::Haiku,
+            "this step exists to cut spend under budget pressure: haiku is $1/$5 against \
+             sonnet's $3/$15, so downshifting to sonnet would save 40% off opus where haiku \
+             saves 80%. Nobody has measured sonnet against haiku on rollup quality, and the \
+             ladder already falls back to a zero-token template when a rollup is unusable, so \
+             the cheapest tier stays the target until a measurement says otherwise."
+        );
+        assert_ne!(chosen, Model::Sonnet);
+    }
+
+    #[test]
+    fn every_model_is_checked_against_the_ladder_including_ones_added_later() {
+        assert_eq!(
+            Model::ALL.len(),
+            4,
+            "a new model variant must be swept through the ladder, not just added to the enum"
+        );
+    }
+
+    #[test]
     fn no_step_ever_routes_work_onto_fable() {
         for s in Step::LADDER {
-            for role_model in [Model::Opus, Model::Fable, Model::Haiku] {
+            for role_model in Model::ALL {
                 for summarizer in [true, false] {
                     let chosen = model_for_step(s, role_model, summarizer);
                     if role_model != Model::Fable {
