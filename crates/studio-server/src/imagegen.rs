@@ -117,6 +117,30 @@ fn interrogate(found: &[PathBuf]) -> Result<PathBuf, String> {
     ))
 }
 
+pub fn interpreter_without_pillow() -> Option<PathBuf> {
+    for candidate in candidates() {
+        let Ok(said) = studio_core::command(&candidate)
+            .args(["-c", "import PIL"])
+            .output()
+        else {
+            continue;
+        };
+        if said.status.success() {
+            return None;
+        }
+        let recorded = format!(
+            "{}{}",
+            String::from_utf8_lossy(&said.stdout),
+            String::from_utf8_lossy(&said.stderr)
+        );
+        if shortcut_not_an_interpreter(&recorded) {
+            continue;
+        }
+        return Some(candidate);
+    }
+    None
+}
+
 pub fn python() -> Result<PathBuf, String> {
     let found = candidates();
     if let Ok(held) = RESOLVED.read() {

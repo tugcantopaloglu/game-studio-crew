@@ -20,6 +20,7 @@ pub enum Kind {
     CodingCli,
     Toolchain,
     Engine,
+    Asset,
 }
 
 impl Kind {
@@ -28,10 +29,11 @@ impl Kind {
             Kind::CodingCli => "coding CLIs (at least one is required)",
             Kind::Toolchain => "toolchain (optional)",
             Kind::Engine => "engines (optional)",
+            Kind::Asset => "asset pipeline (optional; art the crew generates for itself)",
         }
     }
 
-    pub const ALL: [Kind; 3] = [Kind::CodingCli, Kind::Toolchain, Kind::Engine];
+    pub const ALL: [Kind; 4] = [Kind::CodingCli, Kind::Toolchain, Kind::Engine, Kind::Asset];
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -43,6 +45,32 @@ pub struct Tool {
     pub version: Option<String>,
     pub drivable: bool,
     pub cannot_drive: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needed_for: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install: Option<Remedy>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Remedy {
+    pub says: String,
+    pub run: Option<Vec<String>>,
+}
+
+impl Remedy {
+    pub fn told(says: &str) -> Self {
+        Self {
+            says: says.into(),
+            run: None,
+        }
+    }
+
+    pub fn runnable(says: &str, run: &[&str]) -> Self {
+        Self {
+            says: says.into(),
+            run: Some(run.iter().map(|s| s.to_string()).collect()),
+        }
+    }
 }
 
 impl Tool {
@@ -56,6 +84,8 @@ impl Tool {
             version,
             drivable,
             cannot_drive,
+            needed_for: None,
+            install: None,
         }
     }
 
@@ -68,7 +98,21 @@ impl Tool {
             version: None,
             drivable: false,
             cannot_drive: None,
+            needed_for: None,
+            install: None,
         }
+    }
+
+    pub fn for_what(mut self, needed_for: &str) -> Self {
+        self.needed_for = Some(needed_for.into());
+        self
+    }
+
+    pub fn fixed_by(mut self, remedy: Remedy) -> Self {
+        if !self.present {
+            self.install = Some(remedy);
+        }
+        self
     }
 }
 
@@ -153,8 +197,123 @@ pub fn probe() -> Requirements {
     for profile in studio_engine::EngineProfile::builtin() {
         probing.push(std::thread::spawn(move || probe_engine(&profile)));
     }
-    let tools = probing.into_iter().filter_map(|p| p.join().ok()).collect();
+    let mut tools: Vec<Tool> = probing.into_iter().filter_map(|p| p.join().ok()).collect();
+    tools.extend(asset_pipeline());
     Requirements::new(tools)
+}
+
+pub fn node_remedy() -> Remedy {
+    if cfg!(windows) {
+        Remedy::runnable(
+            "install node 18 or newer; on Windows winget has it",
+            &[
+                "winget",
+                "install",
+                "-e",
+                "--id",
+                "OpenJS.NodeJS.LTS",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+            ],
+        )
+    } else {
+        Remedy::told("install node 18 or newer from nodejs.org or your package manager")
+    }
+}
+
+pub fn python_remedy() -> Remedy {
+    if cfg!(windows) {
+        Remedy::runnable(
+            "install python 3.10 or newer; on Windows winget has it, and note that the \
+             `python3` already on PATH may be Windows' Store shortcut rather than an interpreter",
+            &[
+                "winget",
+                "install",
+                "-e",
+                "--id",
+                "Python.Python.3.13",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+            ],
+        )
+    } else {
+        Remedy::told("install python 3.10 or newer from your package manager")
+    }
+}
+
+pub fn pillow_remedy(python: &str) -> Remedy {
+    Remedy::runnable(
+        "pillow is what turns the flat background codex draws into transparency",
+        &[python, "-m", "pip", "install", "pillow"],
+    )
+}
+
+pub fn codex_remedy() -> Remedy {
+    Remedy::runnable(
+        "install the codex CLI and sign in with `codex login` afterwards",
+        &["npm", "install", "-g", "@openai/codex"],
+    )
+}
+
+pub fn asset_pipeline() -> Vec<Tool> {
+    let mut out = Vec::new();
+
+    let node = probe_command("node", "node", Kind::Asset)
+        .for_what("baking a model into the .glb an engine imports, and reading a mixamo clip")
+        .fixed_by(node_remedy());
+    out.push(node);
+
+    let codex = which("codex");
+    out.push(
+        Tool {
+            name: "codex".into(),
+            label: "codex (for art)".into(),
+            kind: Kind::Asset,
+            present: codex.is_some(),
+            version: None,
+            drivable: codex.is_some(),
+            cannot_drive: None,
+            needed_for: Some("drawing sprites and textures, and writing model source".into()),
+            install: None,
+        }
+        .fixed_by(codex_remedy()),
+    );
+
+    match crate::imagegen::python() {
+        Ok(found) => out.push(
+            Tool::found(
+                "python",
+                "python with pillow",
+                Kind::Asset,
+                Some(found.to_string_lossy().into_owned()),
+            )
+            .for_what("removing the background from a generated sprite"),
+        ),
+        Err(why) => {
+            let remedy = match crate::imagegen::interpreter_without_pillow() {
+                Some(python) => pillow_remedy(&python.to_string_lossy()),
+                None => python_remedy(),
+            };
+            let mut absent = Tool::absent("python", "python with pillow", Kind::Asset)
+                .for_what("removing the background from a generated sprite");
+            absent.cannot_drive = Some(why);
+            out.push(absent.fixed_by(remedy));
+        }
+    }
+
+    let script = crate::imagegen::cutout_script();
+    let skill = if script.is_file() {
+        Tool::found("imagegen", "codex imagegen skill", Kind::Asset, None)
+    } else {
+        Tool::absent("imagegen", "codex imagegen skill", Kind::Asset).fixed_by(Remedy::told(
+            "codex ships this and unpacks it the first time it runs; install or update codex and \
+             open it once",
+        ))
+    }
+    .for_what("the background remover codex ships beside its own image skill");
+    out.push(skill);
+
+    out
 }
 
 fn probe_command(name: &str, label: &str, kind: Kind) -> Tool {

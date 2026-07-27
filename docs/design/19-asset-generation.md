@@ -121,6 +121,40 @@ The model name is in it, the blame is placed where it belongs, **codex's own sen
 
 One piece of noise deliberately *not* diagnosed: the user's config registers an MCP server `unityMCP` on `127.0.0.1:8080` which is not running, so every codex invocation logs `HTTP 404 Cannot POST /mcp`. That is their configuration, not this feature's problem, and success is never judged by the absence of stderr — it is judged by the answer file and the mesh count. `an_unrunning_mcp_server_in_the_users_config_is_not_mistaken_for_a_failure` holds that line.
 
+## What a fresh install actually has
+
+This feature quietly grew a dependency list that no installer sets up, and until now nothing told the user. Someone could install the app, have `claude` and `codex`, watch `studiod doctor` print a clean bill of health, and only discover at their first art task that the background remover has no python to run in.
+
+So the doctor reports an **asset pipeline** section beside the coding CLIs, the toolchain and the engines:
+
+| Reported | Needed for | If absent |
+|---|---|---|
+| `node` | baking a model into the `.glb` an engine imports, and reading a mixamo clip | `winget install -e --id OpenJS.NodeJS.LTS` |
+| `codex` | drawing sprites and textures, and writing model source | `npm install -g @openai/codex`, then `codex login` |
+| `python` with `pillow` | removing the background from a generated sprite | `winget install -e --id Python.Python.3.13`, or `<that python> -m pip install pillow` |
+| codex's imagegen skill | the background remover codex ships beside its own image skill | install or update codex and open it once |
+
+`node` was missing from the doctor entirely, and had been since before any of this: `model_export.mjs` has always needed it. That was a real hole and it is closed.
+
+**The report names the interpreter it means.** The first draft of this printed `python3.exe -m pip install pillow` — pointing at Windows' Store shortcut, the same non-interpreter that broke the first real sprite run, so the command it told the user to run would have done nothing. `interpreter_without_pillow()` returns the candidate that actually *starts* and lacks pillow, and the remedy targets that. Presence is not capability, for the fourth time in this document.
+
+### Optional has to stay optional
+
+An incomplete art pipeline is **not a broken install**, and none of this may read as one:
+
+- It is its own exit code, `4`, distinct from "nothing to code with" (`2`) and "nothing the studio can drive" (`3`). A studio with no CLI has a bigger problem than art and still reports `2`.
+- The advice is printed even in the `2` case, because that is the report the installer shows and a user who fixes their CLI should not have to discover the art requirements separately.
+- Every line says what it is needed *for*, so a user who does not want generated art can decide not to care.
+- The installer's message opens with "installed and ready to code" and says in as many words that the studio works without it.
+
+### Installing the missing pieces, only if asked
+
+`studiod doctor --fix` prints exactly what it will run, one line per tool, and then asks. Answering anything but `y` installs nothing. `--yes` skips the prompt, which is what the installer passes after its own Yes/No dialog — the consent is taken once, in the place the user is already looking.
+
+It never claims to do what it cannot: a tool whose remedy has no runnable command is listed as "nothing to run" with the instruction, and `codex login` is called out separately every time, because a sign-in is the user's to give.
+
+The winget package ids were checked against `winget search` on a real machine rather than recalled, because a confidently wrong package id is worse than no suggestion.
+
 ## Where a generated asset lands
 
 Not invented here. `plan_for(engine, slug)` reproduces what the engine profiles and the `engine_hint` prose in `wf.rs` already tell workers:

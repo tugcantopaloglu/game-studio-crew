@@ -71,6 +71,31 @@ begin
     mbConfirmation, MB_YESNO) = IDYES;
 end;
 
+procedure OfferToFixTheArtPipeline(Report: String);
+var
+  Code: Integer;
+begin
+  if MsgBox('Game Studio Crew is installed and ready to code.'
+    + #13#10#13#10 + 'What it cannot do yet is generate its own art: the crew draws sprites and'
+    + #13#10 + 'textures with codex and turns them into rigged models, and some of what that'
+    + #13#10 + 'needs is missing. The studio works without it; every task just builds art by hand.'
+    + #13#10#13#10 + Report
+    + #13#10 + 'Install the missing pieces now? The studio will run the commands listed above'
+    + #13#10 + 'and show you what happens. You can also do it later with: studiod doctor --fix',
+    mbConfirmation, MB_YESNO) <> IDYES then
+    Exit;
+
+  if not Exec(ExpandConstant('{cmd}'),
+    '/C ""' + ExpandConstant('{app}\{#DaemonExe}') + '" doctor --fix --yes & pause"',
+    '', SW_SHOW, ewWaitUntilTerminated, Code) then
+    MsgBox('The studio could not start its own installer step.'
+      + #13#10 + 'Open a terminal and run: studiod doctor --fix', mbError, MB_OK)
+  else
+    MsgBox('Done. Signing codex in is the one step only you can do:'
+      + #13#10#13#10 + '    codex login'
+      + #13#10#13#10 + 'Run studiod doctor afterwards to see what is left.', mbInformation, MB_OK);
+end;
+
 procedure ReportRequirements();
 var
   Report: AnsiString;
@@ -84,7 +109,7 @@ begin
     '/C ""' + ExpandConstant('{app}\{#DaemonExe}') + '" doctor > "' + ReportPath + '""',
     '', SW_HIDE, ewWaitUntilTerminated, Code) then
     Exit;
-  if (Code <> 2) and (Code <> 3) then
+  if (Code <> 2) and (Code <> 3) and (Code <> 4) then
     Exit;
   if not LoadStringFromFile(ReportPath, Report) then
     Report := '';
@@ -92,11 +117,13 @@ begin
     MsgBox('Game Studio Crew is installed, but there is nothing to code with yet.'
       + #13#10 + 'Install one coding CLI, put it on PATH, and it will pick it up.'
       + #13#10#13#10 + String(Report), mbError, MB_OK)
-  else
+  else if Code = 3 then
     MsgBox('Game Studio Crew is installed and it found a coding CLI, but it cannot drive'
       + #13#10 + 'any of the ones you have, so no worker can start yet. The report below says'
       + #13#10 + 'why for each. Install Claude Code and put claude on PATH to fix it.'
-      + #13#10#13#10 + String(Report), mbError, MB_OK);
+      + #13#10#13#10 + String(Report), mbError, MB_OK)
+  else
+    OfferToFixTheArtPipeline(Report);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
