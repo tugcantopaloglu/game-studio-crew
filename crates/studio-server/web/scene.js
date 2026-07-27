@@ -462,6 +462,28 @@ function loose(raw, parent, x, z) {
   parent.add(place(raw, x, 0.2, z, turn).group);
 }
 
+function deskVariant(x, z) {
+  return Math.floor(tileNoise(x * 1.7 + 3.3, z * 2.9 + 5.1) * 3) % 3;
+}
+
+function rug(parent, x, z, w, d, tint) {
+  const trim = new THREE.Mesh(
+    new THREE.BoxGeometry(w + 0.3, 0.02, d + 0.3),
+    lambert(shade(0x3a3129, tint, 0.12))
+  );
+  trim.position.set(x, 0.21, z);
+  trim.receiveShadow = true;
+  parent.add(trim);
+
+  const pile = new THREE.Mesh(
+    new THREE.BoxGeometry(w, 0.03, d),
+    lambert(shade(0x483d33, tint, 0.08))
+  );
+  pile.position.set(x, 0.216, z);
+  pile.receiveShadow = true;
+  parent.add(pile);
+}
+
 function checkerFloor(parent, room, cx, cz, tint, hole = null) {
   const mesh = new THREE.InstancedMesh(tileGeo, vertexLit, room.w * room.h);
   mesh.receiveShadow = true;
@@ -495,7 +517,9 @@ function roomProps(parent, room, cx, cz, tint) {
   const back = rz + 0.62;
   const far = rx + room.w - 0.9;
   const pois = [];
+  const lounge = { x: rx + room.w * 0.5, z: rz + room.h - 1.9 };
 
+  rug(parent, lounge.x, lounge.z, Math.min(room.w - 3, 6.4), 3.2, tint);
   loose(buildPlant(), parent, rx + 0.75, rz + room.h - 0.8);
   loose(buildPlant(), parent, far, rz + room.h - 0.8);
   parent.add(place(buildWaterCooler(), rx + 0.7, 0.2, back).group);
@@ -526,6 +550,9 @@ function roomProps(parent, room, cx, cz, tint) {
       pois.push(poi(rx + room.w * 0.3, back + 0.7, rx + room.w * 0.3, back, "\u{1F4A1}"));
       parent.add(place(buildServerRack(), far, 0.2, back).group);
       loose(buildBoxes(), parent, rx + 1.2, rz + room.h - 1.2);
+      parent.add(place(buildSofa(tint), lounge.x - 1.3, 0.2, lounge.z + 0.5, Math.PI).group);
+      parent.add(place(buildMeetingTable(tint), lounge.x + 1.3, 0.2, lounge.z).group);
+      pois.push(poi(lounge.x - 1.3, lounge.z - 0.4, lounge.x - 1.3, lounge.z + 0.5, "\u{1F60C}"));
       break;
     case "art":
       parent.add(place(buildEasel(tint), rx + room.w * 0.3, 0.2, rz + room.h - 1.6).group);
@@ -543,6 +570,9 @@ function roomProps(parent, room, cx, cz, tint) {
       pois.push(poi(rx + room.w * 0.35, back + 0.65, rx + room.w * 0.35, back, "\u{1F3AE}"));
       parent.add(place(buildTestBench(tint), rx + room.w * 0.62, 0.2, back).group);
       loose(buildBoxes(), parent, far, rz + room.h - 1.2);
+      parent.add(place(buildSofa(tint), lounge.x, 0.2, lounge.z + 0.5, Math.PI).group);
+      parent.add(place(buildMeetingTable(tint), lounge.x, 0.2, lounge.z - 0.9).group);
+      pois.push(poi(lounge.x, lounge.z - 0.3, lounge.x, lounge.z + 0.5, "\u{1F60C}"));
       break;
     case "infra":
       for (let i = 0; i < 5; i++) {
@@ -551,6 +581,9 @@ function roomProps(parent, room, cx, cz, tint) {
       pois.push(poi(rx + 2.2 + 1.24, back + 0.6, rx + 2.2 + 1.24, back, "\u{1F5A5}"));
       parent.add(place(buildServerRack(), far, 0.2, rz + room.h - 1.3).group);
       loose(buildBoxes(), parent, rx + 1.1, rz + room.h - 1.2);
+      parent.add(place(buildSofa(tint), lounge.x, 0.2, lounge.z + 0.5, Math.PI).group);
+      parent.add(place(buildMeetingTable(tint), lounge.x, 0.2, lounge.z - 0.9).group);
+      pois.push(poi(lounge.x, lounge.z - 0.3, lounge.x, lounge.z + 0.5, "\u{1F60C}"));
       break;
   }
   return pois;
@@ -864,9 +897,6 @@ export function buildOffice(floor, scene) {
   levels[1].position.y = LEVEL_H;
   for (const g of levels) fixtures.add(g);
 
-  const well = new THREE.Group();
-  levels[0].add(well);
-  levels[0].userData.seenFromAbove = well;
 
   if ((floor.levels || 1) > 1) {
     buildUpperDeck(levels[1], floor, cx, cz);
@@ -877,7 +907,7 @@ export function buildOffice(floor, scene) {
       if (tier.roomLights) {
         const shaft = new THREE.PointLight(0xffe4bd, 42, 22, 1.5);
         shaft.position.set(wx, LEVEL_H - 0.7, wz);
-        well.add(shaft);
+        levels[0].add(shaft);
 
         const landing = (floor.extras || []).find((r) => r.department === "landing");
         const loft = new THREE.PointLight(0xffe9c8, 48, 32, 1.5);
@@ -891,7 +921,7 @@ export function buildOffice(floor, scene) {
     }
   }
 
-  const lobbyPois = floor.lobby ? buildLobby(well, floor.lobby, cx, cz, tier) : [];
+  const lobbyPois = floor.lobby ? buildLobby(levels[0], floor.lobby, cx, cz, tier) : [];
   const meetingDoor = floor.meeting ? buildMeetingRoom(levels[0], floor.meeting, floor, cx, cz, tier) : null;
   for (const extra of floor.extras || []) {
     buildExtraRoom(levels[extra.level || 0], extra, floor, cx, cz, floor.atrium);
@@ -940,12 +970,19 @@ export function buildOffice(floor, scene) {
       rg.add(lamp);
     }
 
-    for (const fx of [0.28, 0.72]) {
+    for (const side of SIDES) {
+      if (low.includes(side) || side === door) continue;
+      const along = side === "-z" || side === "+z";
+      const len = (along ? room.w : room.h) * 0.62;
       const fix = new THREE.Mesh(
-        new THREE.BoxGeometry(1.5, 0.07, 0.28),
-        basic(0xfff4e0)
+        new THREE.BoxGeometry(along ? len : 0.2, 0.09, along ? 0.2 : len),
+        basic(0xffeccd)
       );
-      fix.position.set(rx + room.w * fx, WALL_H - 0.12, rz + room.h / 2);
+      fix.position.set(
+        side === "-x" ? rx + WALL_T + 0.13 : side === "+x" ? rx + room.w - WALL_T - 0.13 : rx + room.w / 2,
+        WALL_H - 0.34,
+        side === "-z" ? rz + WALL_T + 0.13 : side === "+z" ? rz + room.h - WALL_T - 0.13 : rz + room.h / 2
+      );
       rg.add(fix);
     }
 
@@ -978,7 +1015,7 @@ export function buildOffice(floor, scene) {
     fixed.position.set(d.x + d.w / 2 - cx, 0.2, d.y + d.h / 2 - cz);
     fixed.rotation.y = facing;
     levels[d.level || 0].add(fixed);
-    fixed.add(place(buildDesk(tint), 0, 0, 0.28).group);
+    fixed.add(place(buildDesk(tint, deskVariant(d.x, d.y)), 0, 0, 0.28).group);
     fixed.add(place(buildChair(tint), 0, 0, -0.42).group);
 
     const plate = makeLabel(d.role.replace(/_/g, " "), 0xbcc5d4, 0.6);
@@ -1097,7 +1134,7 @@ export function buildOffice(floor, scene) {
     });
   }
 
-  buildShell(fixtures, floor, cx, cz);
+  buildShell(levels[0], floor, cx, cz);
   const table = floor.meeting
     ? new THREE.Vector3(
         floor.meeting.x - cx + floor.meeting.w / 2,
@@ -1124,12 +1161,6 @@ export function buildOffice(floor, scene) {
   return {
     world, fixtures, avatars, ambient, levels, meetingTable: table,
     meetingApproach: meetingDoor ? [meetingDoor] : [],
-    wellRect: floor.atrium
-      ? {
-          x0: floor.atrium.x - cx, x1: floor.atrium.x - cx + floor.atrium.w,
-          z0: floor.atrium.y - cz, z1: floor.atrium.y - cz + floor.atrium.h,
-        }
-      : null,
   };
 }
 
@@ -1565,6 +1596,8 @@ export function makeLabel(text, color, scale = 1) {
   ctx.fillText(text, 10, c.height / 2);
   const tex = new THREE.CanvasTexture(c);
   tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
   tex.colorSpace = THREE.SRGBColorSpace;
   const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false });
   const h = 0.34 * scale;
