@@ -22,6 +22,9 @@ pub const GRID_COLS: u32 = 3;
 pub const GRID_ROWS: u32 = 3;
 pub const LOBBY_CELL: u32 = 4;
 
+const ATRIUM_MARGIN: u32 = 2;
+const LIFT_CLEARANCE: u32 = 4;
+
 const COL_W: [u32; 3] = [13, 19, 13];
 const ROW_H: [u32; 3] = [9, 11, 9];
 
@@ -100,6 +103,7 @@ pub struct Floor {
     pub meeting: Room,
     pub extras: Vec<Room>,
     pub elevator: Room,
+    pub atrium: Room,
 }
 
 impl Floor {
@@ -227,6 +231,16 @@ pub fn pack_floor(roles: &[Role]) -> Floor {
         level: 0,
     };
 
+    let atrium = Room {
+        department: "atrium".to_string(),
+        visual_family: "atrium".to_string(),
+        x: lobby.x + ATRIUM_MARGIN,
+        y: lobby.y + LIFT_CLEARANCE,
+        w: lobby.w - ATRIUM_MARGIN - LIFT_CLEARANCE,
+        h: lobby.h - ATRIUM_MARGIN - LIFT_CLEARANCE,
+        level: 1,
+    };
+
     let width = rooms.iter().map(|r| r.x + r.w).max().unwrap_or(0) + OUTER_MARGIN;
     let height = rooms.iter().map(|r| r.y + r.h).max().unwrap_or(0) + OUTER_MARGIN;
 
@@ -243,6 +257,7 @@ pub fn pack_floor(roles: &[Role]) -> Floor {
         meeting,
         extras,
         elevator,
+        atrium,
     }
 }
 
@@ -537,6 +552,55 @@ mod lobby_tests {
                 && e.y + e.h <= landing.y + landing.h,
             "the shaft must open onto the landing upstairs"
         );
+    }
+
+    #[test]
+    fn the_atrium_is_a_void_cut_out_of_the_landing_above_the_lobby() {
+        let f = studio_floor();
+        let a = &f.atrium;
+        assert_eq!(a.level, 1, "the void belongs to the storey it is cut out of");
+        assert!(a.w > 0 && a.h > 0, "an empty atrium is not a void, it is nothing");
+
+        let l = &f.lobby;
+        assert!(
+            a.x >= l.x && a.y >= l.y && a.x + a.w <= l.x + l.w && a.y + a.h <= l.y + l.h,
+            "you must be able to see the lobby through it"
+        );
+
+        let landing = f.extras.iter().find(|r| r.department == "landing").unwrap();
+        assert!(
+            a.x >= landing.x && a.y >= landing.y
+                && a.x + a.w <= landing.x + landing.w
+                && a.y + a.h <= landing.y + landing.h,
+            "the void has to be cut out of a floor that exists there"
+        );
+    }
+
+    #[test]
+    fn the_atrium_never_swallows_the_lift() {
+        let f = studio_floor();
+        let a = &f.atrium;
+        let e = &f.elevator;
+        let disjoint = a.x + a.w <= e.x
+            || e.x + e.w <= a.x
+            || a.y + a.h <= e.y
+            || e.y + e.h <= a.y;
+        assert!(disjoint, "the shaft would rise through open air");
+    }
+
+    #[test]
+    fn the_landing_keeps_a_walkway_all_the_way_round_the_atrium() {
+        let f = studio_floor();
+        let a = &f.atrium;
+        let l = &f.lobby;
+        for (name, gap) in [
+            ("west", a.x - l.x),
+            ("east", (l.x + l.w) - (a.x + a.w)),
+            ("north", a.y - l.y),
+            ("south", (l.y + l.h) - (a.y + a.h)),
+        ] {
+            assert!(gap >= ATRIUM_MARGIN, "{name} side of the void is a ledge, not a walkway");
+        }
     }
 
     #[test]

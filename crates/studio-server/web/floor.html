@@ -533,7 +533,13 @@ floorsEl.addEventListener("click", (e) => {
 });
 
 function applyLevel() {
-  levelGroups.forEach((g, i) => { g.visible = i === viewLevel; });
+  levelGroups.forEach((g, i) => {
+    g.visible = i <= viewLevel;
+    const well = g.userData.seenFromAbove;
+    if (!well) return;
+    const covered = i < viewLevel;
+    for (const child of g.children) child.visible = !covered || child === well;
+  });
   miniDirty = true;
 }
 
@@ -1115,7 +1121,7 @@ function animate() {
     const stuck = st.ring === "error" || st.ring === "blocked";
     const busy = st.ring === "running" || st.ring === "meeting" || stuck;
     wanderStep(a, busy, dt, t);
-    a.person.visible = levelOf(a) === viewLevel;
+    a.person.visible = levelOf(a) <= viewLevel;
     a.rig.update(avatarPose(a, st.ring, t), dt, t, rigStep(a, cam));
 
     a.ringMat.opacity = ringOpacity(st.ring, stuck, t, a.seed);
@@ -1148,7 +1154,7 @@ function animate() {
 
   for (const a of ambient) {
     wanderStep(a, false, dt, t);
-    a.person.visible = levelOf(a) === viewLevel;
+    a.person.visible = levelOf(a) <= viewLevel;
     a.rig.update(avatarPose(a, "idle", t), dt, t, rigStep(a, cam));
   }
   stepBubble(dt, t);

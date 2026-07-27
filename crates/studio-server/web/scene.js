@@ -14,6 +14,9 @@ export const WALL_H = 2.6;
 export const WALL_T = 0.16;
 export const LEVEL_H = 3.6;
 const DOOR_W = 2.6;
+const LOW_WALL_H = 1.15;
+const CAP_H = 0.09;
+const SIDES = ["-z", "+z", "-x", "+x"];
 
 const lamberts = new Map();
 const basics = new Map();
@@ -317,6 +320,22 @@ function wallSegment(parent, x, z, w, d, color) {
   parent.add(m);
 }
 
+function partitionSegment(parent, x, z, w, d, color, tint) {
+  const body = new THREE.Mesh(new THREE.BoxGeometry(w, LOW_WALL_H, d), lambert(color));
+  body.position.set(x, LOW_WALL_H / 2, z);
+  body.castShadow = true;
+  body.receiveShadow = true;
+  parent.add(body);
+
+  const cap = new THREE.Mesh(
+    new THREE.BoxGeometry(w + 0.06, CAP_H, d + 0.06),
+    lambert(shade(0x4c5568, tint, 0.3))
+  );
+  cap.position.set(x, LOW_WALL_H + CAP_H / 2, z);
+  cap.castShadow = true;
+  parent.add(cap);
+}
+
 const glassMat = new THREE.MeshLambertMaterial({
   color: 0x7fb4d8, transparent: true, opacity: 0.16, depthWrite: false,
 });
@@ -337,7 +356,7 @@ function glassSegment(parent, x, z, w, d, tint) {
   }
 }
 
-function buildWalls(parent, room, cx, cz, doorSide, glassSide, tint, openThrough = []) {
+function buildWalls(parent, room, cx, cz, doorSide, glassSide, tint, openThrough = [], low = []) {
   const x0 = room.x - cx, z0 = room.y - cz;
   const x1 = x0 + room.w, z1 = z0 + room.h;
   const mx = (x0 + x1) / 2, mz = (z0 + z1) / 2;
@@ -350,10 +369,11 @@ function buildWalls(parent, room, cx, cz, doorSide, glassSide, tint, openThrough
   ];
 
   for (const s of sides) {
-    const draw = (px, pz, pw, pd) =>
-      s.key === glassSide
-        ? glassSegment(parent, px, pz, pw, pd, tint)
-        : wallSegment(parent, px, pz, pw, pd, s.shade);
+    const draw = (px, pz, pw, pd) => {
+      if (s.key === glassSide) return glassSegment(parent, px, pz, pw, pd, tint);
+      if (low.includes(s.key)) return partitionSegment(parent, px, pz, pw, pd, s.shade, tint);
+      return wallSegment(parent, px, pz, pw, pd, s.shade);
+    };
 
     if (s.key !== doorSide && !openThrough.includes(s.key)) { draw(s.x, s.z, s.w, s.d); continue; }
 
@@ -401,6 +421,21 @@ function podFacing(desk, room) {
   return col % 2 === 0 ? 0 : Math.PI;
 }
 
+function facesTheShell(room, floor) {
+  const reach = 2.5;
+  const out = [];
+  if (room.x <= reach) out.push("-x");
+  if (floor.width - (room.x + room.w) <= reach) out.push("+x");
+  if (room.y <= reach) out.push("-z");
+  if (floor.height - (room.y + room.h) <= reach) out.push("+z");
+  return out;
+}
+
+function partitionSides(room, floor) {
+  const solid = facesTheShell(room, floor);
+  return SIDES.filter((k) => !solid.includes(k));
+}
+
 function doorSideFor(room, cx, cz) {
   const dx = room.x + room.w / 2 - cx;
   const dz = room.y + room.h / 2 - cz;
@@ -413,7 +448,11 @@ function shade(base, tint, amount) {
   return b.lerp(t, amount).getHex();
 }
 
-function checkerFloor(parent, room, cx, cz, tint) {
+function insideRect(rect, x, y) {
+  return x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
+}
+
+function checkerFloor(parent, room, cx, cz, tint, hole = null) {
   const mesh = new THREE.InstancedMesh(tileGeo, vertexLit, room.w * room.h);
   mesh.receiveShadow = true;
   const m = new THREE.Matrix4();
@@ -421,6 +460,7 @@ function checkerFloor(parent, room, cx, cz, tint) {
   let i = 0;
   for (let ix = 0; ix < room.w; ix++)
     for (let iz = 0; iz < room.h; iz++) {
+      if (hole && insideRect(hole, room.x + ix, room.y + iz)) continue;
       m.makeTranslation(room.x - cx + ix + 0.5, 0.1, room.y - cz + iz + 0.5);
       mesh.setMatrixAt(i, m);
       mesh.setColorAt(i, c.setHex((ix + iz) % 2
@@ -428,6 +468,7 @@ function checkerFloor(parent, room, cx, cz, tint) {
         : shade(0x323947, tint, 0.09)));
       i++;
     }
+  mesh.count = i;
   mesh.instanceMatrix.needsUpdate = true;
   if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   parent.add(mesh);
@@ -590,7 +631,7 @@ function buildMeetingRoom(parent, room, cx, cz, tier) {
   return doorPoint(room, cx, cz, "-x");
 }
 
-function buildExtraRoom(parent, room, cx, cz) {
+function buildExtraRoom(parent, room, cx, cz, hole = null) {
   const rx = room.x - cx, rz = room.y - cz;
   const mx = rx + room.w / 2, mz = rz + room.h / 2;
   const far = rx + room.w - 0.9;
@@ -633,7 +674,7 @@ function buildExtraRoom(parent, room, cx, cz) {
     }
     case "landing": {
       const tint = 0x97a2b6;
-      checkerFloor(parent, room, cx, cz, tint);
+      checkerFloor(parent, room, cx, cz, tint, hole);
       parent.add(place(buildSofa(0xffc84a), mx + 2.6, 0.2, mz - 0.9, Math.PI).group);
       parent.add(place(buildSofa(0x6fa8d1), mx + 2.6, 0.2, mz + 1.1).group);
       parent.add(place(buildPlant(), rx + 0.9, 0.2, rz + 0.9).group);
@@ -645,6 +686,65 @@ function buildExtraRoom(parent, room, cx, cz) {
       parent.add(sign);
       break;
     }
+  }
+}
+
+function buildUpperDeck(parent, floor, cx, cz) {
+  const mat = lambert(0x2a303c);
+  const w = floor.width + 4, h = floor.height + 4;
+  const x0 = -w / 2, x1 = w / 2, z0 = -h / 2, z1 = h / 2;
+  const a = floor.atrium;
+  const ax0 = a ? a.x - cx : 0, ax1 = a ? ax0 + a.w : 0;
+  const az0 = a ? a.y - cz : 0, az1 = a ? az0 + a.h : 0;
+
+  const bands = a
+    ? [
+        [x0, x1, z0, az0],
+        [x0, x1, az1, z1],
+        [x0, ax0, az0, az1],
+        [ax1, x1, az0, az1],
+      ]
+    : [[x0, x1, z0, z1]];
+
+  for (const [bx0, bx1, bz0, bz1] of bands) {
+    const bw = bx1 - bx0, bd = bz1 - bz0;
+    if (bw <= 0.001 || bd <= 0.001) continue;
+    const slab = new THREE.Mesh(new THREE.BoxGeometry(bw, 0.2, bd), mat);
+    slab.position.set((bx0 + bx1) / 2, 0, (bz0 + bz1) / 2);
+    slab.receiveShadow = true;
+    parent.add(slab);
+  }
+}
+
+function buildAtriumRail(parent, a, cx, cz) {
+  const x0 = a.x - cx, x1 = x0 + a.w, z0 = a.y - cz, z1 = z0 + a.h;
+  const t = 0.18, half = t / 2;
+  const kerb = 0.36, pane = 0.6;
+  const edges = [
+    [(x0 + x1) / 2, z0 - half, a.w + t * 2, t],
+    [(x0 + x1) / 2, z1 + half, a.w + t * 2, t],
+    [x0 - half, (z0 + z1) / 2, t, a.h],
+    [x1 + half, (z0 + z1) / 2, t, a.h],
+  ];
+
+  for (const [px, pz, ew, ed] of edges) {
+    const base = new THREE.Mesh(new THREE.BoxGeometry(ew, kerb, ed), lambert(0x252b37));
+    base.position.set(px, 0.1 + kerb / 2, pz);
+    base.castShadow = true;
+    base.receiveShadow = true;
+    parent.add(base);
+
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(ew, pane, ed), glassMat);
+    glass.position.set(px, 0.1 + kerb + pane / 2, pz);
+    parent.add(glass);
+
+    const cap = new THREE.Mesh(
+      new THREE.BoxGeometry(ew + 0.07, 0.08, ed + 0.07),
+      lambert(0x5b6577)
+    );
+    cap.position.set(px, 0.1 + kerb + pane + 0.04, pz);
+    cap.castShadow = true;
+    parent.add(cap);
   }
 }
 
@@ -718,19 +818,30 @@ export function buildOffice(floor, scene) {
   levels[1].position.y = LEVEL_H;
   for (const g of levels) fixtures.add(g);
 
+  const well = new THREE.Group();
+  levels[0].add(well);
+  levels[0].userData.seenFromAbove = well;
+
   if ((floor.levels || 1) > 1) {
-    const deck = new THREE.Mesh(
-      new THREE.BoxGeometry(floor.width + 4, 0.2, floor.height + 4),
-      lambert(0x2a303c)
-    );
-    deck.receiveShadow = true;
-    levels[1].add(deck);
+    buildUpperDeck(levels[1], floor, cx, cz);
+    if (floor.atrium) {
+      buildAtriumRail(levels[1], floor.atrium, cx, cz);
+      if (tier.roomLights) {
+        const shaft = new THREE.PointLight(0xffe4bd, 42, 22, 1.5);
+        shaft.position.set(
+          floor.atrium.x - cx + floor.atrium.w / 2,
+          LEVEL_H - 0.7,
+          floor.atrium.y - cz + floor.atrium.h / 2
+        );
+        well.add(shaft);
+      }
+    }
   }
 
-  const lobbyPois = floor.lobby ? buildLobby(levels[0], floor.lobby, cx, cz, tier) : [];
+  const lobbyPois = floor.lobby ? buildLobby(well, floor.lobby, cx, cz, tier) : [];
   const meetingDoor = floor.meeting ? buildMeetingRoom(levels[0], floor.meeting, cx, cz, tier) : null;
   for (const extra of floor.extras || []) {
-    buildExtraRoom(levels[extra.level || 0], extra, cx, cz);
+    buildExtraRoom(levels[extra.level || 0], extra, cx, cz, floor.atrium);
   }
   if (floor.elevator) {
     for (const g of levels) buildElevatorStop(g, floor.elevator, cx, cz);
@@ -762,10 +873,11 @@ export function buildOffice(floor, scene) {
     const door = doorSides.get(room.department);
     const glass = lobbyFacingSide(room, floor, cx, cz);
     const open = passThroughSides(room, cx, cz, doorsByDept, room.department);
+    const low = partitionSides(room, floor).filter((k) => k !== glass);
     checkerFloor(rg, room, cx, cz, tint);
-    buildWalls(rg, room, cx, cz, door, glass === door ? null : glass, tint, open);
+    buildWalls(rg, room, cx, cz, door, glass === door ? null : glass, tint, open, low);
     neonEdge(rg, room, cx, cz, tint);
-    wallScreens(rg, room, cx, cz, tint, door, glass, open);
+    wallScreens(rg, room, cx, cz, tint, door, glass, open.concat(low));
     poisByDept.set(room.department, roomProps(rg, room, cx, cz, tint));
 
     const rx = room.x - cx, rz = room.y - cz;
@@ -784,11 +896,12 @@ export function buildOffice(floor, scene) {
       rg.add(fix);
     }
 
+    const signY = low.includes("-z") ? LOW_WALL_H - 0.3 : WALL_H - 0.42;
     const sign = makeLabel(room.department.toUpperCase(), tint, 1.3);
     if (door === "-z") {
-      sign.position.set(rx + room.w * 0.22, WALL_H - 0.42, rz + WALL_T + 0.02);
+      sign.position.set(rx + room.w * 0.22, signY, rz + WALL_T + 0.02);
     } else {
-      sign.position.set(rx + room.w / 2, WALL_H - 0.42, rz + WALL_T + 0.02);
+      sign.position.set(rx + room.w / 2, signY, rz + WALL_T + 0.02);
     }
     rg.add(sign);
   }
