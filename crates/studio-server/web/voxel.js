@@ -371,6 +371,19 @@ function key(x, y, z) {
   return ((x + KEY_BIAS) * KEY_SPAN + (y + KEY_BIAS)) * KEY_SPAN + (z + KEY_BIAS);
 }
 
+const OPEN_FACE = 17;
+const AO_STEP = 0.042;
+const AO_MAX = 0.32;
+
+function occlude(hex, amount) {
+  const f = 1 - amount;
+  return (
+    (Math.round(((hex >> 16) & 255) * f) << 16) |
+    (Math.round(((hex >> 8) & 255) * f) << 8) |
+    Math.round((hex & 255) * f)
+  );
+}
+
 export function shell(voxels) {
   const filled = new Set();
   for (const v of voxels) filled.add(key(v.x, v.y, v.z));
@@ -386,7 +399,21 @@ export function shell(voxels) {
       filled.has(key(v.x, v.y + 1, v.z)) && filled.has(key(v.x, v.y - 1, v.z)) &&
       filled.has(key(v.x, v.y, v.z + 1)) && filled.has(key(v.x, v.y, v.z - 1))
     ) continue;
-    out.push(v);
+
+    let near = 0;
+    for (let dx = -1; dx <= 1; dx++)
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dz = -1; dz <= 1; dz++) {
+          if (!dx && !dy && !dz) continue;
+          if (filled.has(key(v.x + dx, v.y + dy, v.z + dz))) near++;
+        }
+
+    if (near <= OPEN_FACE) {
+      out.push(v);
+      continue;
+    }
+    const dim = Math.min(AO_MAX, (near - OPEN_FACE) * AO_STEP);
+    out.push({ x: v.x, y: v.y, z: v.z, c: occlude(v.c, dim) });
   }
   return out;
 }

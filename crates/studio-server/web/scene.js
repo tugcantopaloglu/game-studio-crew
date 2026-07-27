@@ -35,8 +35,8 @@ function basic(color, opacity) {
   let m = basics.get(key);
   if (!m) {
     m = opacity === undefined
-      ? new THREE.MeshBasicMaterial({ color })
-      : new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false });
+      ? new THREE.MeshBasicMaterial({ color, toneMapped: false })
+      : new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false, toneMapped: false });
     basics.set(key, m);
   }
   return m;
@@ -182,7 +182,7 @@ function screenSurface(style, tint, department) {
   const surface = {
     ctx: canvas.getContext("2d"),
     tex,
-    material: new THREE.MeshBasicMaterial({ map: tex }),
+    material: new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),
     style, tint, department,
     dirty: true,
     drawn: null,
@@ -977,7 +977,8 @@ export function buildOffice(floor, scene) {
 
     const rx = room.x - cx, rz = room.y - cz;
     if (tier.roomLights) {
-      const lamp = new THREE.PointLight(0xfff0d8, 30, 17, 1.7);
+      const glow = new THREE.Color(0xfff0d8).lerp(new THREE.Color(tint), 0.2);
+      const lamp = new THREE.PointLight(glow, 30, 17, 1.7);
       lamp.position.set(rx + room.w / 2, WALL_H - 0.45, rz + room.h / 2);
       rg.add(lamp);
     }

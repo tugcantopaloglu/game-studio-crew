@@ -490,9 +490,9 @@ let freeCam = false;
 
 const ambientLight = new THREE.AmbientLight(0x8fa0bc, tier.ambient);
 scene.add(ambientLight);
-const sky = new THREE.HemisphereLight(0xb8ccf0, 0x14181f, tier.hemisphere);
+const sky = new THREE.HemisphereLight(0xb8ccf0, 0x2b2118, tier.hemisphere);
 scene.add(sky);
-const key = new THREE.DirectionalLight(0xfff2dc, 2.0);
+const key = new THREE.DirectionalLight(0xfff2dc, 2.3);
 key.position.set(18, 30, 14);
 key.castShadow = tier.shadows;
 key.shadow.mapSize.set(tier.shadowMap, tier.shadowMap);

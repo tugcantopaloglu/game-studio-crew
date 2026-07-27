@@ -8,7 +8,7 @@ const HIGH = {
   softShadows: true,
   roomLights: true,
   deskLights: true,
-  ambient: 0.25,
+  ambient: 0.15,
   hemisphere: 0.9,
   fog: true,
   ambientCrew: 5,
