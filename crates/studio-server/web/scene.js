@@ -49,6 +49,8 @@ function basic(color, opacity) {
 }
 
 const vertexLit = new THREE.MeshLambertMaterial({ vertexColors: true });
+const UNIT_BOX = new THREE.BoxGeometry(1, 1, 1);
+const UNIT_PLANE = new THREE.PlaneGeometry(1, 1);
 const RING_GEO = new THREE.RingGeometry(0.4, 0.56, 40);
 const SHADE_GEO = new THREE.ConeGeometry(0.2, 0.18, 14, 1, true);
 const BULB_GEO = new THREE.SphereGeometry(0.07, 10, 8);
@@ -56,13 +58,25 @@ const POOL_GEO = new THREE.CircleGeometry(0.75, 24);
 const CONE_GEO = new THREE.CylinderGeometry(0.16, 0.75, 2.2, 18, 1, true);
 const SHADE_MATERIAL = new THREE.MeshLambertMaterial({ color: 0x161c26, side: THREE.DoubleSide });
 
-let pickGeo = null;
-function proxyGeo() {
-  if (!pickGeo) {
+function boxMesh(w, h, d, material) {
+  const m = new THREE.Mesh(UNIT_BOX, material);
+  m.scale.set(w, h, d);
+  return m;
+}
+
+function planeMesh(w, h, material) {
+  const m = new THREE.Mesh(UNIT_PLANE, material);
+  m.scale.set(w, h, 1);
+  return m;
+}
+
+let pickSize = null;
+function proxySize() {
+  if (!pickSize) {
     const cb = characterBounds();
-    pickGeo = new THREE.BoxGeometry(cb.w * VOX, cb.h * VOX, cb.d * VOX);
+    pickSize = [cb.w * VOX, cb.h * VOX, cb.d * VOX];
   }
-  return pickGeo;
+  return pickSize;
 }
 
 export const FAMILY_TINT = {
@@ -89,6 +103,7 @@ function rand() {
 }
 
 const shadeSpots = [];
+const propMeshes = [];
 
 function place(raw, x, y, z, rotY = 0) {
   const voxels = shell(raw);
@@ -102,6 +117,7 @@ function place(raw, x, y, z, rotY = 0) {
   g.position.set(x, y, z);
   g.rotation.y = rotY;
   if (y < 0.4) shadeSpots.push({ group: g, reach: Math.max(w, d) * VOX });
+  propMeshes.push(mesh);
   return { group: g, mesh };
 }
 
@@ -123,7 +139,6 @@ function contactTexture() {
   return shadeTex;
 }
 
-const SHADE_PLANE = new THREE.PlaneGeometry(1, 1);
 const FLAT = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
 
 function branchUnder(obj, level) {
@@ -154,7 +169,7 @@ function buildContactShade(levels) {
   const size = new THREE.Vector3();
 
   for (const [home, spots] of buckets) {
-    const pool = new THREE.InstancedMesh(SHADE_PLANE, mat, spots.length);
+    const pool = new THREE.InstancedMesh(UNIT_PLANE, mat, spots.length);
     pool.renderOrder = 1;
     spots.forEach((s, i) => {
       const r = s.reach * 1.65;
@@ -166,6 +181,61 @@ function buildContactShade(levels) {
     pool.instanceMatrix.needsUpdate = true;
     home.add(pool);
   }
+}
+
+function propHost(obj, levels) {
+  let node = obj;
+  while (node.parent) {
+    if (levels.indexOf(node.parent) >= 0) {
+      const seen = node.parent.userData.seenFromAbove;
+      return seen && node === seen ? seen : node.parent;
+    }
+    node = node.parent;
+  }
+  return null;
+}
+
+function mergeProps(levels) {
+  const buckets = new Map();
+  for (const mesh of propMeshes) {
+    if (!mesh.count) continue;
+    const home = propHost(mesh, levels);
+    if (!home) continue;
+    if (!buckets.has(home)) buckets.set(home, []);
+    buckets.get(home).push(mesh);
+  }
+
+  const local = new THREE.Matrix4();
+  const base = new THREE.Matrix4();
+  const inst = new THREE.Matrix4();
+  const c = new THREE.Color();
+
+  for (const [home, list] of buckets) {
+    let total = 0;
+    for (const mesh of list) total += mesh.count;
+    const merged = new THREE.InstancedMesh(list[0].geometry, list[0].material, total);
+    merged.castShadow = true;
+    merged.receiveShadow = true;
+    local.copy(home.matrixWorld).invert();
+    let i = 0;
+    for (const mesh of list) {
+      base.multiplyMatrices(local, mesh.matrixWorld);
+      for (let k = 0; k < mesh.count; k++) {
+        mesh.getMatrixAt(k, inst);
+        inst.premultiply(base);
+        merged.setMatrixAt(i, inst);
+        if (mesh.instanceColor) mesh.getColorAt(k, c);
+        else c.setRGB(1, 1, 1);
+        merged.setColorAt(i, c);
+        i++;
+      }
+      mesh.removeFromParent();
+    }
+    merged.instanceMatrix.needsUpdate = true;
+    if (merged.instanceColor) merged.instanceColor.needsUpdate = true;
+    home.add(merged);
+  }
+  propMeshes.length = 0;
 }
 
 function drawScreen(x, style, tint, data, crew) {
@@ -234,8 +304,6 @@ const screens = [];
 const screenByKey = new Map();
 const SCREEN_W = 2.0;
 const SCREEN_H = 1.25;
-const screenFrameGeo = new THREE.BoxGeometry(SCREEN_W + 0.16, SCREEN_H + 0.16, 0.08);
-const screenPanelGeo = new THREE.PlaneGeometry(SCREEN_W, SCREEN_H);
 let screenPayload = null;
 let screenCursor = 0;
 
@@ -319,18 +387,15 @@ function wallScreens(parent, room, cx, cz, tint, doorSide, glassSide, avoid = []
     group.rotation.y = m.rot;
     parent.add(group);
 
-    const frame = new THREE.Mesh(screenFrameGeo, lambert(0x11151d));
+    const frame = boxMesh(SCREEN_W + 0.16, SCREEN_H + 0.16, 0.08, lambert(0x11151d));
     frame.position.z = -0.03;
     group.add(frame);
 
-    const panel = new THREE.Mesh(screenPanelGeo, surface.material);
+    const panel = planeMesh(SCREEN_W, SCREEN_H, surface.material);
     panel.position.z = 0.03;
     group.add(panel);
   }
 }
-
-const POSTER_GEO = new THREE.PlaneGeometry(0.86, 1.18);
-const FRAME_GEO = new THREE.PlaneGeometry(0.96, 1.28);
 
 function posterFace(tint, department, variant) {
   const c = document.createElement("canvas");
@@ -399,12 +464,12 @@ function wallPosters(parent, room, cx, cz, tint, doorSide, glassSide, avoid = []
     g.rotation.y = m.rot;
     parent.add(g);
 
-    const frame = new THREE.Mesh(FRAME_GEO, frameMat);
+    const frame = planeMesh(0.96, 1.28, frameMat);
     frame.position.z = 0.02;
     g.add(frame);
 
-    const face = new THREE.Mesh(
-      POSTER_GEO,
+    const face = planeMesh(
+      0.86, 1.18,
       posterFace(tint, room.department, Math.floor(tileNoise(room.x + t * 10, room.y) * 3) % 3)
     );
     face.position.z = 0.035;
@@ -472,12 +537,12 @@ function roomTrim(parent, room, cx, cz, tint) {
     [x1 - half, (z0 + z1) / 2, t, room.h - t * 2, -1, 0],
   ];
   for (const [px, pz, w, d, ix, iz] of segs) {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), board);
+    const m = boxMesh(w, h, d, board);
     m.position.set(px, 0.2 + h / 2, pz);
     m.receiveShadow = true;
     parent.add(m);
-    const wash = new THREE.Mesh(
-      new THREE.BoxGeometry(w + spill * Math.abs(ix), 0.008, d + spill * Math.abs(iz)),
+    const wash = boxMesh(
+      w + spill * Math.abs(ix), 0.008, d + spill * Math.abs(iz),
       cove(tint)
     );
     wash.position.set(px + (ix * spill) / 2, 0.204, pz + (iz * spill) / 2);
@@ -486,7 +551,7 @@ function roomTrim(parent, room, cx, cz, tint) {
 }
 
 function wallSegment(parent, x, z, w, d, color) {
-  const m = new THREE.Mesh(new THREE.BoxGeometry(w, WALL_H, d), lambert(color));
+  const m = boxMesh(w, WALL_H, d, lambert(color));
   m.position.set(x, WALL_H / 2, z);
   m.castShadow = true;
   m.receiveShadow = true;
@@ -494,14 +559,14 @@ function wallSegment(parent, x, z, w, d, color) {
 }
 
 function partitionSegment(parent, x, z, w, d, color, tint) {
-  const body = new THREE.Mesh(new THREE.BoxGeometry(w, LOW_WALL_H, d), lambert(color));
+  const body = boxMesh(w, LOW_WALL_H, d, lambert(color));
   body.position.set(x, LOW_WALL_H / 2, z);
   body.castShadow = true;
   body.receiveShadow = true;
   parent.add(body);
 
-  const cap = new THREE.Mesh(
-    new THREE.BoxGeometry(w + 0.06, CAP_H, d + 0.06),
+  const cap = boxMesh(
+    w + 0.06, CAP_H, d + 0.06,
     lambert(shade(0x4c5568, tint, 0.3))
   );
   cap.position.set(x, LOW_WALL_H + CAP_H / 2, z);
@@ -514,13 +579,13 @@ const glassMat = new THREE.MeshLambertMaterial({
 });
 
 function glassSegment(parent, x, z, w, d, tint) {
-  const pane = new THREE.Mesh(new THREE.BoxGeometry(w, WALL_H - 0.5, d), glassMat);
+  const pane = boxMesh(w, WALL_H - 0.5, d, glassMat);
   pane.position.set(x, (WALL_H - 0.5) / 2 + 0.25, z);
   parent.add(pane);
 
   for (const y of [0.12, WALL_H - 0.12]) {
-    const rail = new THREE.Mesh(
-      new THREE.BoxGeometry(w, 0.24, d),
+    const rail = boxMesh(
+      w, 0.24, d,
       lambert(y > 1 ? 0x2b3242 : tint)
     );
     rail.position.set(x, y, z);
@@ -574,20 +639,20 @@ function buildShell(parent, floor, cx, cz) {
     [w / 2 + t / 2, 0, t, h + t * 2],
   ];
   for (const [px, pz, sw, sd] of segs) {
-    const base = new THREE.Mesh(new THREE.BoxGeometry(sw, sill - foot, sd), frame);
+    const base = boxMesh(sw, sill - foot, sd, frame);
     base.position.set(px, (foot + sill) / 2, pz);
     base.castShadow = true;
     base.receiveShadow = true;
     parent.add(base);
 
-    const lintel = new THREE.Mesh(new THREE.BoxGeometry(sw, cap - head, sd), frame);
+    const lintel = boxMesh(sw, cap - head, sd, frame);
     lintel.position.set(px, (head + cap) / 2, pz);
     lintel.castShadow = true;
     parent.add(lintel);
 
     const along = sw > sd;
-    const pane = new THREE.Mesh(
-      new THREE.BoxGeometry(along ? sw : sd * 0.4, head - sill, along ? sd * 0.4 : sd),
+    const pane = boxMesh(
+      along ? sw : sd * 0.4, head - sill, along ? sd * 0.4 : sd,
       glassMat
     );
     pane.position.set(px, (sill + head) / 2, pz);
@@ -597,8 +662,8 @@ function buildShell(parent, floor, cx, cz) {
     const bays = Math.max(2, Math.round(span / 9));
     for (let i = 1; i < bays; i++) {
       const f = i / bays - 0.5;
-      const mull = new THREE.Mesh(
-        new THREE.BoxGeometry(along ? 0.22 : sw, head - sill, along ? sd : 0.22),
+      const mull = boxMesh(
+        along ? 0.22 : sw, head - sill, along ? sd : 0.22,
         frame
       );
       mull.position.set(px + (along ? f * sw : 0), (sill + head) / 2, pz + (along ? 0 : f * sd));
@@ -606,8 +671,8 @@ function buildShell(parent, floor, cx, cz) {
       parent.add(mull);
     }
 
-    const strip = new THREE.Mesh(
-      new THREE.BoxGeometry(sw + 0.1, 0.16, sd + 0.1),
+    const strip = boxMesh(
+      sw + 0.1, 0.16, sd + 0.1,
       basic(0x5fd8ff)
     );
     strip.position.set(px, -0.12, pz);
@@ -617,8 +682,8 @@ function buildShell(parent, floor, cx, cz) {
 
 function buildGround(parent, floor) {
   const span = Math.max(floor.width, floor.height);
-  const ground = new THREE.Mesh(
-    new THREE.BoxGeometry(span * 8, 0.6, span * 8),
+  const ground = boxMesh(
+    span * 8, 0.6, span * 8,
     lambert(0x0b0e16)
   );
   ground.position.y = -1.5;
@@ -677,16 +742,16 @@ function deskVariant(x, z) {
 }
 
 function rug(parent, x, z, w, d, tint) {
-  const trim = new THREE.Mesh(
-    new THREE.BoxGeometry(w + 0.3, 0.02, d + 0.3),
+  const trim = boxMesh(
+    w + 0.3, 0.02, d + 0.3,
     lambert(shade(0x3a3129, tint, 0.12))
   );
   trim.position.set(x, 0.21, z);
   trim.receiveShadow = true;
   parent.add(trim);
 
-  const pile = new THREE.Mesh(
-    new THREE.BoxGeometry(w, 0.03, d),
+  const pile = boxMesh(
+    w, 0.03, d,
     lambert(shade(0x483d33, tint, 0.08))
   );
   pile.position.set(x, 0.216, z);
@@ -1000,7 +1065,7 @@ function buildUpperDeck(parent, floor, cx, cz) {
   for (const [bx0, bx1, bz0, bz1] of bands) {
     const bw = bx1 - bx0, bd = bz1 - bz0;
     if (bw <= 0.001 || bd <= 0.001) continue;
-    const slab = new THREE.Mesh(new THREE.BoxGeometry(bw, 0.2, bd), mat);
+    const slab = boxMesh(bw, 0.2, bd, mat);
     slab.position.set((bx0 + bx1) / 2, 0, (bz0 + bz1) / 2);
     slab.receiveShadow = true;
     parent.add(slab);
@@ -1019,18 +1084,18 @@ function buildAtriumRail(parent, a, cx, cz) {
   ];
 
   for (const [px, pz, ew, ed] of edges) {
-    const base = new THREE.Mesh(new THREE.BoxGeometry(ew, kerb, ed), lambert(0x252b37));
+    const base = boxMesh(ew, kerb, ed, lambert(0x252b37));
     base.position.set(px, 0.1 + kerb / 2, pz);
     base.castShadow = true;
     base.receiveShadow = true;
     parent.add(base);
 
-    const glass = new THREE.Mesh(new THREE.BoxGeometry(ew, pane, ed), glassMat);
+    const glass = boxMesh(ew, pane, ed, glassMat);
     glass.position.set(px, 0.1 + kerb + pane / 2, pz);
     parent.add(glass);
 
-    const cap = new THREE.Mesh(
-      new THREE.BoxGeometry(ew + 0.05, 0.06, ed + 0.05),
+    const cap = boxMesh(
+      ew + 0.05, 0.06, ed + 0.05,
       lambert(0x3d4553)
     );
     cap.position.set(px, 0.1 + kerb + pane + 0.04, pz);
@@ -1046,7 +1111,7 @@ function buildAtriumRail(parent, a, cx, cz) {
     [x1 - lip / 2, (z0 + z1) / 2, lip, a.h],
   ];
   for (const [px, pz, ew, ed] of skirt) {
-    const face = new THREE.Mesh(new THREE.BoxGeometry(ew, drop, ed), lambert(0x171c25));
+    const face = boxMesh(ew, drop, ed, lambert(0x171c25));
     face.position.set(px, -0.1 - drop / 2, pz);
     parent.add(face);
   }
@@ -1056,29 +1121,29 @@ function buildElevatorStop(parent, rect, cx, cz) {
   const mx = rect.x - cx + rect.w / 2, mz = rect.y - cz + rect.h / 2;
   const frame = lambert(0x1c222d);
 
-  const backW = new THREE.Mesh(new THREE.BoxGeometry(rect.w, WALL_H, 0.14), frame);
+  const backW = boxMesh(rect.w, WALL_H, 0.14, frame);
   backW.position.set(mx, WALL_H / 2, mz - rect.h / 2 + 0.07);
   backW.castShadow = true;
   parent.add(backW);
   for (const sx of [-1, 1]) {
-    const side = new THREE.Mesh(new THREE.BoxGeometry(0.14, WALL_H, rect.h), frame);
+    const side = boxMesh(0.14, WALL_H, rect.h, frame);
     side.position.set(mx + sx * (rect.w / 2 - 0.07), WALL_H / 2, mz);
     side.castShadow = true;
     parent.add(side);
   }
-  const beam = new THREE.Mesh(new THREE.BoxGeometry(rect.w, 0.5, rect.h), frame);
+  const beam = boxMesh(rect.w, 0.5, rect.h, frame);
   beam.position.set(mx, WALL_H - 0.25, mz);
   parent.add(beam);
 
-  const doors = new THREE.Mesh(
-    new THREE.BoxGeometry(rect.w - 0.5, WALL_H - 0.6, 0.06),
+  const doors = boxMesh(
+    rect.w - 0.5, WALL_H - 0.6, 0.06,
     lambert(0x39404f)
   );
   doors.position.set(mx, (WALL_H - 0.6) / 2, mz + rect.h / 2 - 0.03);
   parent.add(doors);
 
-  const lampStrip = new THREE.Mesh(
-    new THREE.BoxGeometry(rect.w - 0.4, 0.12, 0.06),
+  const lampStrip = boxMesh(
+    rect.w - 0.4, 0.12, 0.06,
     basic(0x4ad991)
   );
   lampStrip.position.set(mx, WALL_H - 0.4, mz + rect.h / 2 + 0.01);
@@ -1093,6 +1158,7 @@ function buildElevatorStop(parent, rect, cx, cz) {
 export function buildOffice(floor, scene) {
   rng = 12345;
   shadeSpots.length = 0;
+  propMeshes.length = 0;
   screens.length = 0;
   screenByKey.clear();
   screenCursor = 0;
@@ -1105,15 +1171,15 @@ export function buildOffice(floor, scene) {
   const fixtures = new THREE.Group();
   world.add(fixtures);
 
-  const corridor = new THREE.Mesh(
-    new THREE.BoxGeometry(floor.width + 4, 0.2, floor.height + 4),
+  const corridor = boxMesh(
+    floor.width + 4, 0.2, floor.height + 4,
     lambert(0x2a303c)
   );
   corridor.receiveShadow = true;
   fixtures.add(corridor);
 
-  const skirt = new THREE.Mesh(
-    new THREE.BoxGeometry(floor.width + 5, 0.55, floor.height + 5),
+  const skirt = boxMesh(
+    floor.width + 5, 0.55, floor.height + 5,
     lambert(0x12151c)
   );
   skirt.position.y = -0.28;
@@ -1206,8 +1272,8 @@ export function buildOffice(floor, scene) {
       if (low.includes(side) || side === door) continue;
       const along = side === "-z" || side === "+z";
       const len = (along ? room.w : room.h) * 0.62;
-      const fix = new THREE.Mesh(
-        new THREE.BoxGeometry(along ? len : 0.2, 0.09, along ? 0.2 : len),
+      const fix = boxMesh(
+        along ? len : 0.2, 0.09, along ? 0.2 : len,
         basic(0xffeccd)
       );
       fix.position.set(
@@ -1276,8 +1342,9 @@ export function buildOffice(floor, scene) {
     const rig = buildAvatar(d.role, rand() * 10);
     person.add(rig.group);
 
-    const proxy = new THREE.Mesh(proxyGeo(), PICK_MATERIAL);
-    proxy.position.y = (characterBounds().h * VOX) / 2;
+    const ps = proxySize();
+    const proxy = boxMesh(ps[0], ps[1], ps[2], PICK_MATERIAL);
+    proxy.position.y = ps[1] / 2;
     proxy.visible = false;
     person.add(proxy);
 
@@ -1387,6 +1454,7 @@ export function buildOffice(floor, scene) {
 
   scene.updateMatrixWorld(true);
   buildContactShade(levels);
+  mergeProps(levels);
   scene.updateMatrixWorld(true);
   scene.matrixAutoUpdate = false;
   world.matrixAutoUpdate = false;
@@ -1429,20 +1497,20 @@ export function buildBoard(parent, table) {
   g.position.set(table.x, 0.2, table.z - 2.1);
   parent.add(g);
 
-  const frame = new THREE.Mesh(new THREE.BoxGeometry(2.5, 1.5, 0.1), lambert(0x1a1f29));
+  const frame = boxMesh(2.5, 1.5, 0.1, lambert(0x1a1f29));
   frame.position.y = 1.25;
   g.add(frame);
 
-  const face = new THREE.Mesh(
-    new THREE.PlaneGeometry(2.32, 1.32),
+  const face = planeMesh(
+    2.32, 1.32,
     new THREE.MeshBasicMaterial({ map: boardTex, transparent: true })
   );
   face.position.set(0, 1.25, 0.06);
   g.add(face);
 
   for (const x of [-1.2, 1.2]) {
-    const leg = new THREE.Mesh(
-      new THREE.BoxGeometry(0.09, 1.4, 0.09),
+    const leg = boxMesh(
+      0.09, 1.4, 0.09,
       lambert(0x2b3240)
     );
     leg.position.set(x, 0.7, 0);
@@ -1843,7 +1911,7 @@ export function makeLabel(text, color, scale = 1) {
   tex.colorSpace = THREE.SRGBColorSpace;
   const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false });
   const h = 0.34 * scale;
-  return new THREE.Mesh(new THREE.PlaneGeometry(h * (c.width / c.height), h), mat);
+  return planeMesh(h * (c.width / c.height), h, mat);
 }
 
 function wp(x, z, y = 0.22) {
