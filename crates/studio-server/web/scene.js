@@ -692,6 +692,13 @@ function buildExtraRoom(parent, room, floor, cx, cz, hole = null) {
       checkerFloor(parent, room, cx, cz, tint);
       buildWalls(parent, room, cx, cz, doorSideFor(room, cx, cz), null, tint, [], low);
       neonEdge(parent, room, cx, cz, tint);
+      rug(parent, mx - 1.2, mz - 0.1, 5.2, 3.6, tint);
+      for (let i = 0; i < 3; i++) {
+        const tx = rx + 3.0 + i * 2.6, tz = rz + room.h - 2.6;
+        parent.add(place(buildMeetingTable(tint), tx, 0.2, tz).group);
+        parent.add(place(buildChair(0x3a4152), tx - 1.0, 0.2, tz, Math.PI / 2).group);
+        parent.add(place(buildChair(0x3a4152), tx + 1.0, 0.2, tz, -Math.PI / 2).group);
+      }
       parent.add(place(buildCoffeeBar(), rx + 2.2, 0.2, back).group);
       parent.add(place(buildSofa(tint), mx - 1.2, 0.2, mz + 0.9, Math.PI).group);
       parent.add(place(buildSofa(0x3ce0c8), mx - 1.2, 0.2, mz - 1.1).group);
@@ -711,6 +718,11 @@ function buildExtraRoom(parent, room, floor, cx, cz, hole = null) {
       buildWalls(parent, room, cx, cz, doorSideFor(room, cx, cz), null, tint, [], low);
       parent.add(place(buildShelf(), rx + 1.4, 0.2, back).group);
       parent.add(place(buildShelf(), rx + 3.4, 0.2, back).group);
+      for (let row = 0; row < 3; row++) {
+        for (let s = 0; s < 4; s++) {
+          parent.add(place(buildShelf(), rx + 1.9 + s * 1.35, 0.2, rz + 2.7 + row * 2.3).group);
+        }
+      }
       parent.add(place(buildCabinet(tint), far, 0.2, back).group);
       parent.add(place(buildServerRack(), far, 0.2, rz + room.h - 1.3).group);
       loose(buildBoxes(), parent, rx + 1.2, rz + room.h - 1.2);
