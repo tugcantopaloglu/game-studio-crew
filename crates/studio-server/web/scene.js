@@ -736,8 +736,8 @@ function buildUpperDeck(parent, floor, cx, cz) {
 
 function buildAtriumRail(parent, a, cx, cz) {
   const x0 = a.x - cx, x1 = x0 + a.w, z0 = a.y - cz, z1 = z0 + a.h;
-  const t = 0.18, half = t / 2;
-  const kerb = 0.36, pane = 0.6;
+  const t = 0.11, half = t / 2;
+  const kerb = 0.3, pane = 0.56;
   const edges = [
     [(x0 + x1) / 2, z0 - half, a.w + t * 2, t],
     [(x0 + x1) / 2, z1 + half, a.w + t * 2, t],
@@ -757,8 +757,8 @@ function buildAtriumRail(parent, a, cx, cz) {
     parent.add(glass);
 
     const cap = new THREE.Mesh(
-      new THREE.BoxGeometry(ew + 0.07, 0.08, ed + 0.07),
-      lambert(0x5b6577)
+      new THREE.BoxGeometry(ew + 0.05, 0.06, ed + 0.05),
+      lambert(0x3d4553)
     );
     cap.position.set(px, 0.1 + kerb + pane + 0.04, pz);
     cap.castShadow = true;
@@ -851,8 +851,13 @@ export function buildOffice(floor, scene) {
         shaft.position.set(wx, LEVEL_H - 0.7, wz);
         well.add(shaft);
 
-        const loft = new THREE.PointLight(0xffe9c8, 48, 30, 1.5);
-        loft.position.set(wx, WALL_H + 0.4, wz);
+        const landing = (floor.extras || []).find((r) => r.department === "landing");
+        const loft = new THREE.PointLight(0xffe9c8, 48, 32, 1.5);
+        loft.position.set(
+          landing ? landing.x - cx + landing.w / 2 : wx,
+          WALL_H + 0.4,
+          landing ? landing.y - cz + landing.h / 2 : wz
+        );
         levels[1].add(loft);
       }
     }
@@ -1091,6 +1096,12 @@ export function buildOffice(floor, scene) {
   return {
     world, fixtures, avatars, ambient, levels, meetingTable: table,
     meetingApproach: meetingDoor ? [meetingDoor] : [],
+    wellRect: floor.atrium
+      ? {
+          x0: floor.atrium.x - cx, x1: floor.atrium.x - cx + floor.atrium.w,
+          z0: floor.atrium.y - cz, z1: floor.atrium.y - cz + floor.atrium.h,
+        }
+      : null,
   };
 }
 
