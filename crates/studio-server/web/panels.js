@@ -6,12 +6,18 @@ import { mount as mountAssets } from "/assets.js";
 import { mount as mountSettings } from "/settings.js";
 
 const PANELS = [
-  { id: "dispatch", label: "dispatch", mount: null },
-  { id: "run", label: "run", mount: mountRun },
-  { id: "games", label: "games", mount: mountGames },
-  { id: "git", label: "git", mount: mountGit },
-  { id: "assets", label: "assets", mount: mountAssets },
-  { id: "settings", label: "settings", mount: mountSettings },
+  { id: "dispatch", label: "dispatch", mount: null,
+    title: "Dispatch", blurb: "what the crew is asked to do, and what they have done" },
+  { id: "run", label: "run", mount: mountRun,
+    title: "Run", blurb: "the plan in flight, step by step" },
+  { id: "games", label: "games", mount: mountGames,
+    title: "Games", blurb: "the projects this studio has on its books" },
+  { id: "git", label: "git", mount: mountGit,
+    title: "History", blurb: "every commit the daemon wrote, and how to undo one" },
+  { id: "assets", label: "assets", mount: mountAssets,
+    title: "Assets", blurb: "art the studio generates for the game" },
+  { id: "settings", label: "settings", mount: mountSettings,
+    title: "Settings", blurb: "what the studio runs on and what it costs" },
 ];
 
 const mounted = new Set();
@@ -19,6 +25,18 @@ const mounted = new Set();
 function show(id) {
   const compose = document.getElementById("compose");
   if (compose) compose.hidden = id !== "dispatch";
+
+  const here = PANELS.find((p) => p.id === id) || PANELS[0];
+  const title = document.getElementById("panel-title");
+  const blurb = document.getElementById("panel-blurb");
+  if (title) title.textContent = here.title;
+  if (blurb) blurb.textContent = here.blurb;
+
+  for (const el of [document.getElementById("feed-head"), document.getElementById("feed")]) {
+    if (el) el.hidden = id !== "dispatch";
+  }
+  const body = document.getElementById("body");
+  if (body) body.scrollTop = 0;
 
   for (const p of PANELS) {
     if (p.id === "dispatch") continue;

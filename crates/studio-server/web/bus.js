@@ -21,9 +21,12 @@ export const DEFAULTS = {
   "chatter.volume": 0.12,
   "thoughts.enabled": true,
   "run.stepConfirm": false,
+  "gpu.acceleration": true,
+  "budget.askAbove": 400000,
 };
 
 const store = new Map(Object.entries(DEFAULTS));
+let pushTimer = null;
 
 try {
   const saved = JSON.parse(localStorage.getItem("studio.settings") || "{}");
@@ -64,7 +67,21 @@ export const settings = {
     store.set(key, value);
     persist();
     fanout(settingTaps, key, value);
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(() => {
+      pushTimer = null;
+      settings.save().then(() => toast("settings saved"));
+    }, 250);
     return value;
+  },
+  flush() {
+    if (!pushTimer) return this.save();
+    clearTimeout(pushTimer);
+    pushTimer = null;
+    return this.save().then((saved) => {
+      toast("settings saved");
+      return saved;
+    });
   },
   all() {
     const out = {};
@@ -195,9 +212,16 @@ export async function api(path, opts = {}) {
   return body;
 }
 
-export function toast(message) {
-  const el = document.getElementById("sent");
-  if (el) el.textContent = message;
+let toastTimer = null;
+
+export function toast(message, bad = false) {
+  const el = document.getElementById("toast");
+  if (!el) return message;
+  el.textContent = message;
+  el.classList.toggle("bad", Boolean(bad));
+  el.classList.add("on");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("on"), 2800);
   return message;
 }
 

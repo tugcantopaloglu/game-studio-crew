@@ -25,23 +25,13 @@ const CAPABILITIES = [
   ["session_control", "sessions"],
 ];
 
-let saveTimer = null;
-
 function store(key, value) {
   settings.set(key, value);
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    settings.save().then(() => toast("settings saved"));
-  }, 250);
 }
 
 function storeNow(key, value) {
   settings.set(key, value);
-  clearTimeout(saveTimer);
-  return settings.save().then((saved) => {
-    toast("settings saved");
-    return saved;
-  });
+  return settings.flush();
 }
 
 function read(key, fallback) {
@@ -756,6 +746,24 @@ function budgetSection(root) {
       "spend",
       "what one run may cost before it stops and waits for you; a stopped run can be picked up again from the run panel"
     )
+  );
+
+  root.append(
+    field(
+      "stop and ask me every",
+      choose(
+        [["400000", "400k tokens"], ["1000000", "1M tokens"], ["", "never, just run"]],
+        String(read("budget.askAbove", 400000)),
+        (v) => store("budget.askAbove", v === "" ? "" : Number(v))
+      )
+    )
+  );
+  root.append(
+    el("div", {
+      class: "hint",
+      text: "this is the pause a running build offers you, and it used to sit on the dispatch"
+        + " form where it read as a second, separate budget",
+    })
   );
 
   const money = el("input", {
