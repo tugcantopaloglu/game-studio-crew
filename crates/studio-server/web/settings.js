@@ -1,4 +1,5 @@
 import { settings, api, el, toast } from "/bus.js";
+import { folderPicker } from "/browse.js";
 
 const EFFORTS =["low", "medium", "high", "xhigh", "max"];
 const TIERS = [
@@ -270,7 +271,7 @@ function crewSection(root, roles, providers) {
 
   root.append(
     field(
-      "provider for the whole studio",
+      "studio provider",
       choose(providerOptions, read("provider", "claude"), (v) => {
         store("provider", v);
         redraw();
@@ -513,7 +514,13 @@ function paintModels() {
 }
 
 function limitsSection(root) {
-  root.append(check("keep an eye on the limit windows", "limits.enabled", true, () => redraw()));
+  root.append(check("limit windows", "limits.enabled", true, () => redraw()));
+  root.append(
+    el("div", {
+      class: "hint",
+      text: "the studio keeps an eye on how much of your plan's window is left",
+    })
+  );
   root.append(
     field(
       "check",
@@ -601,8 +608,7 @@ function musicSection(root) {
   const status = el("div", { class: "hint", text: "" });
   const list = el("select");
   const folderLine = el("div", { class: "k", text: "" });
-  const picker = el("div", { class: "card" });
-  picker.hidden = true;
+  const pickerHost = el("div");
 
   let tracks = [];
 
@@ -659,46 +665,8 @@ function musicSection(root) {
         status.textContent = `could not read the music folder: ${err.message}`;
       });
 
-  const browse = (path) =>
-    api(`/fs/browse?path=${encodeURIComponent(path || "")}`)
-      .then((data) => {
-        picker.replaceChildren();
-        picker.append(el("div", { class: "k", text: data.path }));
-
-        const jump = el("div", { class: "row" });
-        if (data.parent) {
-          jump.append(el("button", { text: "up", onclick: () => browse(data.parent) }));
-        }
-        jump.append(
-          el("button", {
-            text: "use this folder",
-            onclick: () => {
-              store("music.folder", data.path);
-              picker.hidden = true;
-              load();
-            },
-          })
-        );
-        picker.append(jump);
-
-        for (const drive of data.roots) {
-          picker.append(el("button", { text: drive, onclick: () => browse(drive) }));
-        }
-        for (const dir of data.dirs.slice(0, 200)) {
-          picker.append(
-            el("button", {
-              text: dir,
-              onclick: () => browse(data.path + data.separator + dir),
-            })
-          );
-        }
-      })
-      .catch((err) => {
-        picker.replaceChildren(el("div", { class: "bad", text: err.message }));
-      });
-
   root.append(
-    check("play music on the floor", "music.enabled", false, (on) => {
+    check("music on the floor", "music.enabled", false, (on) => {
       if (on) {
         const chosen = read("music.track", "") || tracks[0];
         if (chosen) pick(chosen, true);
@@ -744,12 +712,22 @@ function musicSection(root) {
     el("button", {
       text: "choose a folder",
       onclick: () => {
-        picker.hidden = !picker.hidden;
-        if (!picker.hidden) browse(read("music.folder", ""));
+        if (pickerHost.firstChild) return pickerHost.replaceChildren();
+        pickerHost.append(
+          folderPicker({
+            class: "card",
+            start: read("music.folder", ""),
+            onPick: (path) => {
+              store("music.folder", path);
+              pickerHost.replaceChildren();
+              load();
+            },
+          }).node
+        );
       },
     })
   );
-  root.append(picker);
+  root.append(pickerHost);
 
   load();
 }
@@ -809,7 +787,7 @@ function enginesSection(root) {
   paint();
 }
 
-function ceiling(root, label, key, fallback, step, hint) {
+function ceiling(root, label, key, fallback, step, offLabel, note) {
   const box = el("input", {
     type: "number",
     min: "0",
@@ -826,7 +804,8 @@ function ceiling(root, label, key, fallback, step, hint) {
   };
 
   root.append(field(label, box));
-  root.append(el("label", { class: "check" }, off, el("span", { text: hint })));
+  root.append(el("label", { class: "check" }, off, el("span", { text: offLabel })));
+  if (note) root.append(el("div", { class: "hint", text: note }));
 }
 
 function budgetSection(root) {
@@ -840,7 +819,7 @@ function budgetSection(root) {
 
   root.append(
     field(
-      "stop and ask me every",
+      "ask above",
       choose(
         [["400000", "400k tokens"], ["1000000", "1M tokens"], ["", "never, just run"]],
         String(read("budget.askAbove", 400000)),
@@ -857,10 +836,10 @@ function budgetSection(root) {
     })
   );
 
-  ceiling(root, "dollars per run", "budget.usd", 25, 1, "no dollar ceiling at all");
+  ceiling(root, "dollars per run", "budget.usd", 25, 1, "no dollar ceiling");
   ceiling(
     root, "billed tokens per run", "budget.tokens", 120000, 10000,
-    "use the plan's own declared budget, which is 120,000 tokens per step"
+    "use the plan's own budget", "which is 120,000 tokens per step"
   );
 }
 

@@ -1,4 +1,5 @@
 import { api, el, onEvent, onProject, project, setProject, toast } from "/bus.js";
+import { folderPicker } from "/browse.js";
 
 function ago(iso) {
   if (!iso) return "never";
@@ -113,61 +114,6 @@ function card(game, onRead) {
   return node;
 }
 
-function picker(onPick) {
-  const box = el("div", { class: "field" });
-  const here = el("div", { class: "k", text: "" });
-  const dirs = el("div", {
-    style: "display:grid;gap:2px;max-height:170px;overflow:auto",
-  });
-  const roots = el("select");
-  const up = el("button", { text: "up" });
-  const use = el("button", { text: "use this folder" });
-  let current = "";
-
-  async function go(path) {
-    let view;
-    try {
-      view = await api("/fs/browse?path=" + encodeURIComponent(path || ""));
-    } catch (err) {
-      here.textContent = err.message;
-      return;
-    }
-    current = view.path;
-    here.textContent = view.path;
-    roots.innerHTML = "";
-    for (const r of view.roots) {
-      roots.append(el("option", { value: r, text: r }));
-    }
-    roots.value = view.roots.find((r) => view.path.startsWith(r)) || view.roots[0] || "";
-    up.disabled = !view.parent;
-    up.onclick = () => go(view.parent);
-    dirs.innerHTML = "";
-    if (!view.dirs.length) {
-      dirs.append(el("div", { class: "hint", text: "no subfolders here" }));
-    }
-    for (const name of view.dirs) {
-      dirs.append(
-        el("button", {
-          text: name,
-          style: "text-align:left",
-          onclick: () => go(view.path + view.separator + name),
-        })
-      );
-    }
-  }
-
-  roots.onchange = () => go(roots.value);
-  use.onclick = () => onPick(current);
-
-  box.append(el("label", { text: "folder" }));
-  box.append(here);
-  box.append(el("div", { class: "row" }, roots, up));
-  box.append(dirs);
-  box.append(use);
-  go("");
-  return box;
-}
-
 export function mount(root) {
   root.innerHTML = "";
 
@@ -209,12 +155,10 @@ export function mount(root) {
   root.append(where);
   root.append(el("div", { class: "field" }, el("label", { text: "engine" }), engine));
   root.append(
-    el(
-      "label",
-      { class: "check" },
-      git,
-      el("span", { text: "start tracking it with git if it is not a repo yet" })
-    )
+    el("label", { class: "check" }, git, el("span", { text: "track it with git" }))
+  );
+  root.append(
+    el("div", { class: "hint", text: "if the folder is not a repo yet, the crew makes one" })
   );
   root.append(adopt);
 
@@ -224,15 +168,18 @@ export function mount(root) {
       pickerBox = null;
       return;
     }
-    pickerBox = picker((path) => {
-      chosenPath = path;
-      chosen.textContent = path;
-      if (!name.value.trim()) {
-        name.value = path.split(/[\\/]/).filter(Boolean).pop() || "";
-      }
-      pickerBox.remove();
-      pickerBox = null;
-    });
+    pickerBox = folderPicker({
+      label: "folder",
+      onPick: (path) => {
+        chosenPath = path;
+        chosen.textContent = path;
+        if (!name.value.trim()) {
+          name.value = path.split(/[\\/]/).filter(Boolean).pop() || "";
+        }
+        pickerBox.remove();
+        pickerBox = null;
+      },
+    }).node;
     where.after(pickerBox);
   };
 

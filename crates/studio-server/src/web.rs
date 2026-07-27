@@ -5,9 +5,10 @@ use axum::Router;
 
 use crate::AppState;
 
-pub const MODULES: [(&str, &str); 11] = [
+pub const MODULES: [(&str, &str); 12] = [
     ("bus.js", include_str!("../web/bus.js")),
     ("panels.js", include_str!("../web/panels.js")),
+    ("browse.js", include_str!("../web/browse.js")),
     ("settings.js", include_str!("../web/settings.js")),
     ("games.js", include_str!("../web/games.js")),
     ("gitpanel.js", include_str!("../web/gitpanel.js")),

@@ -1,4 +1,5 @@
 import { api, el, esc, onEvent, onProject, project, setProject, settings, toast } from "/bus.js";
+import { folderPicker } from "/browse.js";
 
 const ENGINES = [
   ["godot", "godot"],
@@ -10,10 +11,6 @@ const ENGINES = [
 ];
 
 const state = {
-  root: root0(),
-  parent: null,
-  dirs: [],
-  separator: "\\",
   plan: null,
   steps: [],
   approval: null,
@@ -35,11 +32,6 @@ function remember(path) {
     return path;
   }
   return path;
-}
-
-function join(dir, name) {
-  const sep = state.separator || "\\";
-  return dir.endsWith(sep) ? dir + name : dir + sep + name;
 }
 
 export function stepsFor(form) {
@@ -75,9 +67,15 @@ export function mount(root) {
   const git = el("input", { type: "checkbox", checked: true });
 
   const here = el("div", { class: "card" });
-  const list = el("select", { size: 6, style: "width:100%" });
-  const up = el("button", { text: "up one" });
   const create = el("button", { text: "create the project here" });
+  const picker = folderPicker({
+    start: root0(),
+    choose: true,
+    onChange: (at) => {
+      remember(at.path);
+      drawWhere();
+    },
+  });
 
   const picked = el("select");
   const brief = el("textarea", { placeholder: "what should the crew build?" });
@@ -86,53 +84,27 @@ export function mount(root) {
   confirm.onchange = () => settings.set("run.stepConfirm", confirm.checked);
   const go = el("button", { text: "plan it" });
 
-  async function browse(path) {
-    try {
-      const body = await api("/fs/browse?path=" + encodeURIComponent(path || ""));
-      state.root = body.path;
-      state.parent = body.parent;
-      state.dirs = body.dirs;
-      state.separator = body.separator;
-      remember(body.path);
-      drawWhere();
-    } catch (err) {
-      toast(err.message);
-    }
-  }
-
   function drawWhere() {
-    const kept = list.value;
-    list.innerHTML = "";
-    for (const d of state.dirs) list.append(el("option", { value: d, text: d }));
-    if (kept && state.dirs.includes(kept)) list.value = kept;
-
-    here.innerHTML = "";
-    here.append(
+    here.replaceChildren(
       el("b", { text: "the game will live in" }),
       el("div", { class: "k", text: destination() || "pick a folder" }),
       el("div", {
         class: "hint",
-        text: list.value
+        text: picker.chosen()
           ? "that folder already exists; the crew works on what is in it"
           : "double click a folder to go into it, or pick one to work on what is already there",
       }),
     );
-    up.disabled = !state.parent;
   }
 
   function destination() {
-    if (!state.root) return "";
-    if (list.value) return join(state.root, list.value);
+    if (!picker.path()) return "";
+    if (picker.chosen()) return picker.chosen();
     const wanted = name.value.trim();
-    return wanted ? join(state.root, slug(wanted)) : state.root;
+    return wanted ? picker.join(slug(wanted)) : picker.path();
   }
 
-  list.ondblclick = () => {
-    if (list.value) browse(join(state.root, list.value));
-  };
-  list.onchange = drawWhere;
   name.oninput = drawWhere;
-  up.onclick = () => browse(state.parent || "");
 
   create.onclick = async () => {
     const wanted = name.value.trim();
@@ -402,8 +374,8 @@ export function mount(root) {
     el("div", { class: "sec", text: "a new game" }),
     el("div", { class: "row" }, name, engine),
     here,
-    list,
-    el("div", { class: "row" }, up, el("label", { class: "check" }, git, "git")),
+    picker.node,
+    el("label", { class: "check" }, git, "git"),
     create,
   );
 
@@ -411,7 +383,11 @@ export function mount(root) {
     el("div", { class: "sec", text: "the run" }),
     picked,
     brief,
-    el("label", { class: "check" }, confirm, "hold at every step for my approval"),
+    el("label", { class: "check" }, confirm, "approve every step"),
+    el("div", {
+      class: "hint",
+      text: "the run holds after each step and waits for you before the next one",
+    }),
     go,
   );
 
@@ -427,7 +403,6 @@ export function mount(root) {
   drawPlan();
   drawSteer();
   drawProjects().then(drawUnfinished);
-  browse(state.root);
 
   onEvent((ev) => {
     if (ev.type === "plan_proposed") {
