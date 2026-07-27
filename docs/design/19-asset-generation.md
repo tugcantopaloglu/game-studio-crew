@@ -293,6 +293,32 @@ When the feature is ready, `announce` installs the `codex-assets` skill and `cre
 
 **The hint says what this studio can actually do, not what the feature is called.** With both halves available it offers drawing *and* the pipeline; with python missing it offers drawing's absence honestly by falling back to the models-only sentence. A crew told it can draw when it cannot would burn a task discovering that.
 
+### The crew drives this itself, through one command
+
+Everything above is reachable from the assets panel, which is a person clicking. That is the wrong shape for the crew: a worker cannot click, and a worker that has to assemble `codex exec --output-schema … | remove_chroma_key.py | model_export.mjs` out of prose will get a step wrong and quietly ship a placeholder instead.
+
+So the whole pipeline is one command, `studiod asset`:
+
+```bash
+studiod asset sprite    --name "Health Potion" --describe "a round glass flask of glowing red liquid"
+studiod asset character --name "Dune Runner"   --describe "a lean desert scavenger in a hooded cloak"
+studiod asset rig       --slug dune_runner
+studiod asset animate   --slug dune_runner --fbx animations/dance.fbx
+studiod asset list
+```
+
+It calls the same `generate`, `rig` and `animate` the routes call, so every guarantee in this document holds identically: the destination comes from the engine profile, nothing overwrites what is already there, a sprite whose background survived is refused, a failed rig keeps the model, and the manifest is updated. It prints where each file landed and exits non-zero with the reason when it refuses.
+
+**It deliberately does not call `guard_nested_session`.** That guard exists because a nested `claude` cannot inherit credentials and every worker spawn fails; this command spawns `codex` and `node`, whose sign-ins are their own, and it is *meant* to be run from inside a worker session. The three seats that can reach it — `artist`, `tech_artist` and `audio_designer` — are exactly the ones whose `ToolClass::ArtAudio` allowlist already carries `Bash`.
+
+**The command is named with its absolute path**, resolved through `current_exe()` at the moment the skill is installed and the brief is composed. A worker that has to guess where the binary lives, or hope it is on PATH, is a worker that will decide not to bother.
+
+`crew_hint` therefore carries the invocation itself rather than an announcement that a feature exists, and it says one more thing explicitly: **if the command refuses, build the asset by hand and say in the report that you did and why.** A placeholder nobody mentions is the failure this whole feature exists to prevent, and it is worse than a refusal somebody can act on.
+
+It also states that this comes **before** the img2threejs skill. Both are in a worker's context — [07](07-engine-layer.md) tells the art crew to sculpt from a reference image with img2threejs — and a worker reading two ways to make a model needs to be told which is the default. img2threejs is how a model is built by hand; `studiod asset` is the studio building it for you.
+
+What is still not enforced: nothing *checks* that a worker used it. A seat can still hand-place primitives, and verification will pass, because a hand-built factory is a legitimate thing. Closing that would mean failing a character task whose model has no rig, which would also fail every deliberate placeholder — a trade this document does not make yet.
+
 The skill body is composed from the same `AssetKind::shape()` strings and the same `plan_for` result the daemon uses, so the instructions a worker reads and the prompt the daemon sends cannot drift apart. It now teaches all three steps — draw, key out, build from the cut-out — and it opens by naming the confusion that produced v0.1: `image_generation` is a tool the model calls, so `--help` will never mention it, and `codex features list` is where to look. The art and audio seats already carry `Bash` and `Skill` in their tool allowlist ([04](04-agent-graph.md)), so a worker can drive codex itself; the skill tells it to ask for the answer and write the file itself, for the same sandbox reason the daemon does, and to refuse a sprite whose corners are still opaque rather than ship it.
 
 ## Four asset classes

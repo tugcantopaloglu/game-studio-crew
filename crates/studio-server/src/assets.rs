@@ -481,6 +481,10 @@ pub fn prompt_with_rig(
 pub const SKILL_NAME: &str = "codex-assets";
 
 pub fn skill_body(engine: &str) -> String {
+    skill_body_run_by(engine, "studiod")
+}
+
+pub fn skill_body_run_by(engine: &str, studiod: &str) -> String {
     let plan = plan_for(engine, "<slug>");
     let where_it_goes = match plan.as_ref().and_then(|p| p.export.as_ref()) {
         Some(_) => format!(
@@ -512,6 +516,34 @@ pub fn skill_body(engine: &str) -> String {
          draw the asset, remove the background so it is a clean cut-out, then hand that image \
          back to codex as the reference it builds the model from. Every engine gets the same \
          asset that way.\n\n\
+         ## Do it with one command\n\n\
+         **Whenever a task needs art you would otherwise hand-place out of primitives or leave \
+         as a placeholder, run this instead.** It does the whole pipeline, writes only where the \
+         engine expects, refuses to overwrite anything already there, and records what it made:\n\n\
+         ```bash\n\
+         {studiod} asset sprite  --name \"Health Potion\" --describe \"a round glass flask of \
+         glowing red liquid, cork stopper, leather cord\"\n\
+         {studiod} asset texture --name \"Bark\"          --describe \"rough grey-brown pine bark\"\n\
+         {studiod} asset character --name \"Dune Runner\" --describe \"a lean desert scavenger in \
+         a hooded cloak with goggles\"\n\
+         {studiod} asset prop    --name \"Wooden Crate\"  --describe \"a plain shipping crate with \
+         iron corner brackets\"\n\
+         ```\n\n\
+         Add `--project <path>` when the working directory is not the project. A character is \
+         drawn, cut out and then built from its own drawing, rigged and animated, in that one \
+         call; `--no-concept` and `--no-rig` turn those halves off, and `--replace` overwrites a \
+         file that is already there. Two more verbs work on assets that already exist:\n\n\
+         ```bash\n\
+         {studiod} asset rig     --slug dune_runner\n\
+         {studiod} asset animate --slug dune_runner --fbx animations/dance.fbx\n\
+         {studiod} asset list\n\
+         ```\n\n\
+         It prints where every file landed and exits non-zero with the reason when it refuses, \
+         so read what it says rather than guessing. **If it refuses, build the asset by hand and \
+         say in your report that you did and why** — a placeholder nobody mentions is worse than \
+         a refusal somebody can fix.\n\n\
+         The rest of this skill is what that command does, for when you need to drive a step \
+         yourself or understand a failure.\n\n\
          Use this only when the studio has it switched on. If `{PROGRAM}` is not on PATH, or \
          `{SETTING_ENABLED}` is false in `.studio/settings.json`, build the asset by hand \
          instead and say that is what you did.\n\n\
@@ -1127,7 +1159,7 @@ fn land(project: &Path, relative: &Path, from: &Path) -> Result<PathBuf, String>
 fn taken(relative: &Path) -> String {
     format!(
         "{} already exists, and a generated asset never replaces a file that is already there; \
-         tick replace in the assets panel if you did mean to overwrite it",
+         pass --replace, or tick replace in the assets panel, if you did mean to overwrite it",
         relative.display()
     )
 }
@@ -2715,7 +2747,10 @@ mod tests {
 
         let err = generate(&dir, &cap, &asked).unwrap_err();
         assert!(err.contains("already exists"), "{err}");
-        assert!(err.contains("tick replace"));
+        assert!(
+            err.contains("--replace") && err.contains("assets panel"),
+            "a worker at a terminal and a person at the panel need different words: {err}"
+        );
         assert_eq!(
             std::fs::read_to_string(&precious).unwrap(),
             by_hand,

@@ -38,7 +38,7 @@ pub fn ensure_img2threejs(project: &Path) -> Result<bool> {
 pub fn ensure_codex_assets(project: &Path, engine: &str) -> Result<bool> {
     let dir = skills_dir(project).join(studio_server::assets::SKILL_NAME);
     let doc = dir.join("SKILL.md");
-    let wanted = studio_server::assets::skill_body(engine);
+    let wanted = studio_server::assets::skill_body_run_by(engine, &crate::assets::launcher());
     if std::fs::read_to_string(&doc).ok().as_deref() == Some(wanted.as_str()) {
         return Ok(false);
     }

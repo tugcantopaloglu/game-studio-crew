@@ -592,12 +592,17 @@ fn main() -> Result<()> {
         "studio" => studio_mode(),
         "mcp-server" => mcp_server(),
         "index" => index_project(),
+        "asset" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            assets::cli(&args)
+        }
         _ => {
-            println!("usage: studiod <studio|floor|index|doctor|mcp-server|m1|m2|m3|m4>");
+            println!("usage: studiod <studio|floor|index|asset|doctor|mcp-server|m1|m2|m3|m4>");
             println!();
             println!("  studio      serve the interactive studio floor and run what it sends.");
             println!("  floor       serve the floor read-only against the existing event log.");
             println!("  index       scan a project into its code index and print what moved.");
+            println!("  asset       draw, build, rig or animate one asset in a project.");
             println!("  doctor      check what the studio needs and report what is installed.");
             println!("  mcp-server  serve the studio MCP tools over stdio, for a worker.");
             println!();
