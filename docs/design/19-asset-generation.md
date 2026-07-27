@@ -90,6 +90,7 @@ The verdict is cached against the candidate list itself, so `GET /assets` costs 
 |---|---|---|---|
 | `assets.enabled` | bool | **`true`** | whether the crew may spend Codex budget on assets |
 | `assets.concept` | bool | **`true`** | whether a model is drawn as concept art first and built from that |
+| `assets.rig` | bool | **`true`** | whether a character is built as a joint hierarchy with animation clips |
 | `assets.model` | free text | **`gpt-5.6-sol`** | the `-m` handed to codex |
 
 Flat keys in `.studio/settings.json`, read through `studio_settings::Settings`, written by the panel through the existing `POST /settings` merge. Nothing new persists anywhere else.
@@ -201,6 +202,53 @@ The failure policy differs between the two halves on purpose: if the **drawing**
 
 Successes are appended to `.studio/assets.json` in the project, keyed by slug so regenerating replaces a row instead of doubling it. That is the same place and shape as `.studio/game.json` ([games](../../crates/studio-server/src/games.rs)).
 
+## Rigging: the part that decides whether a generated character can ever move
+
+A model that cannot be posed is set dressing. Making these characters animatable turned out to be a question about the *file format*, not about the modelling, and the answer narrows the design almost completely.
+
+**The engines load a `.glb`, and glTF animates exactly three things on a node: its translation, its rotation and its scale.** That is `PATH_PROPERTIES` in the vendored `GLTFExporter`, and everything follows from it:
+
+- **Skinned skeletons are not the answer here.** A `SkinnedMesh` needs per-vertex bone weights, and weights are the one part of a rig that procedural code written from a description cannot plausibly get right — a bad weight map reads as melted geometry, and nothing in this studio could check it. There is no verifier for "the elbow deforms nicely".
+- **Rigid joint hierarchies are the answer.** Each joint is a bare `Object3D` at the place a limb bends, the meshes hang off it as children, and a quaternion track on the joint swings the whole limb. This is how stylised and low-poly games have always animated, it is exactly what the character contract already asked for ("positioned so an animator can rotate it about a sensible joint"), and it survives the glb round trip natively on every engine that reads glTF.
+
+So the rig is parenting plus keyframes, and both are things a factory can express and a bridge can check.
+
+### The trap that makes this worth verifying
+
+`new THREE.NumberKeyframeTrack('hips.rotation[x]', …)` is the natural thing to write, it is what three.js itself supports in a live scene, and **it cannot be exported**. `GLTFExporter.processAnimation` looks the property up in `PATH_PROPERTIES`, fails to find `rotation`, warns to a console nobody reads and returns `null` — dropping *the entire clip*, not just that track. The glb still writes. The mesh count is unchanged. The file looks fine and the character never moves.
+
+That is the single most likely way this feature fails, so `model_export.mjs` refuses it up front: before exporting, it walks every track, splits the node name from the property, and **exits non-zero if the node is not in the scene or the property is not one glTF can carry**, naming the offending tracks. Nothing is written. The brief carries the same rule in as many words, with `setFromEuler` as the way to get the quaternion you wanted.
+
+### The bridge reports the rig, and the studio judges it
+
+`model_export.mjs` now takes an optional second export, `clips(THREE, root)`, passes the result to the exporter, and then reads the animation names back **out of the glb it just wrote** rather than trusting what it was handed:
+
+```
+wrote assets/models/scout.glb (413516 bytes, 85 mesh(es), 2 clip(s))
+clips: idle=2.000,walk=1.000
+joints: hips,spine,head,upper_arm_l,upper_arm_r,thigh_l,thigh_r
+```
+
+The clip count comes from parsing the GLB's JSON chunk, so a clip that was silently dropped cannot be reported as present. `joints:` lists the nodes that clips actually move, which is the only definition of "joint" that means anything: an `Object3D` named `elbow_l` that no track touches is not part of a rig.
+
+Policy stays in Rust. `Proof::missing()` requires every joint in `RIG_JOINTS`, both clips in `RIG_CLIPS`, and a non-zero duration on each clip, and it says which one is absent rather than "the rig is invalid". The old one-line format still parses, so a project whose helpers predate this reports meshes and bytes exactly as before.
+
+### An unrigged character is kept, not thrown away
+
+This is the one place the degrade rule bends, deliberately. If the factory verifies as a model but misses the rig contract, **the model is kept** and the record says `rigged: false` with the specific miss. Discarding it would mean throwing away a concept image and a model the user has already paid for because the animation did not come out — and a static character is a genuinely useful thing that the crew can rig later. The reason names the rig route so the next step is obvious.
+
+### Rigging something that already exists
+
+`POST /assets/rig` takes a project and a slug, reads the factory that is already there, and hands codex the whole file with instructions to add the hierarchy and the clips **while keeping every mesh, material and colour exactly as they are**. It is the same spawn path and the same answer schema; what differs is that the brief contains the current source and the verifier compares the result against what was there.
+
+Three guards, because a rewrite of working code is more dangerous than a fresh build:
+
+1. The rewritten source must export a `clips` function, checked before anything is written — a rewrite that quietly dropped the animation would otherwise pass every other check.
+2. The rig contract must be met in the exported glb, not merely attempted.
+3. On any failure the previous file is **restored byte for byte**, and the reason says the model is back to what it was.
+
+It works on hand-built models too. Nothing in the rig pass requires the factory to have come from codex — only that it is a factory the export bridge can load, which is the same contract the crew's own art already follows.
+
 ## What the crew gets
 
 When the feature is ready, `announce` installs the `codex-assets` skill and `crew_hint` adds one paragraph naming it plus **the assets already generated and their paths**, so the second art task loads the scout rather than sculpting a new one. That list now names a drawn sprite by its image path as well as a model by its factory, because a row for a sprite has no factory at all and listing only factories would have hidden every drawn asset from the crew that generated it.
@@ -225,7 +273,8 @@ The difference between two kinds is entirely in what codex is asked for, and it 
 | Route | Does |
 |---|---|
 | `GET /assets[?project=<id>]` | capability, per-kind blockers and readiness, the four kinds and their prose, where each one's file would land, and the assets already generated |
-| `POST /assets/generate` | `{project, kind, name, description, reference?, overwrite?, concept?}`; `200` with `ok:true` and the record, or `200` with `ok:false` and a reason |
+| `POST /assets/generate` | `{project, kind, name, description, reference?, overwrite?, concept?, rig?}`; `200` with `ok:true` and the record, or `200` with `ok:false` and a reason |
+| `POST /assets/rig` | `{project, slug}`; gives an existing model a joint hierarchy and clips, restoring it untouched if the rig does not land |
 | `GET /assets/image?project=<id>&path=<relative>` | the bytes of a generated image, so the panel can show what was drawn |
 
 A kind the studio does not make is a `400` that lists the kinds it does.
@@ -258,6 +307,12 @@ A kind the studio does not make is a `400` that lists the kinds it does.
 | a sprite, texture and concept land in their own folders | **unit tested** against `image_path_for` |
 | the export bridge report is parsed for the mesh count | **unit tested** against a real report line |
 | a cut-out that kept its background is refused | **unit tested** against `judge`, all three failure modes |
+| a glb drops a whole clip when a track names `.rotation` | **read off the vendored exporter** (`PATH_PROPERTIES`, `processAnimation`) **and then reproduced**: the bridge refuses six such tracks and writes nothing |
+| clips and their joints survive into the glb | **observed**: a hand-written rig exported 2 clips over 6 joints, read back out of the glb's own JSON chunk |
+| an incomplete rig is named joint by joint | **unit tested** against `Proof::missing`, all four failure modes |
+| a clip that never changes a value is refused | **reproduced**: a hand-written frozen clip is rejected and no glb is written |
+| a rig pass reparents rather than rebuilds | **done for real**: 46 meshes in, 46 meshes out, 14 joints animated |
+| the clips actually move the body | **measured**: playing `walk`, the shin travels 0.212 and the foot 0.398 units against the hips |
 | the model default, the refusal diagnosis, path containment, no-clobber | **unit tested** |
 | the Windows Store python shortcut is not mistaken for python | **unit tested against the sentence a real run produced** |
 | a prop is generated end to end | **done for real, through `generate()` itself** |
@@ -338,6 +393,26 @@ The remover sampled the key as `#04f80a` rather than the `#00ff00` that was aske
 The concept came back as a full-body three-quarter figure — hood, goggles, face wrap, shoulder plate, satchel, wrapped forearms, strapped boots — and the factory that followed names all of it. **85 meshes against the 54 the description-only character run produced**: the model built from a picture of itself is markedly more detailed than the model built from a sentence, which is the entire argument for `assets.concept` defaulting to on.
 
 The manifest row carries both paths, both sizes and `transparent: true`, so the panel can show the art beside the model it produced.
+
+### The fifth real run: rigging a model that was already built
+
+`a_real_codex_rigs_a_model_that_was_already_built_without_restyling_it` builds a static character and then rigs it, so the rig pass is measured against a model it did not write.
+
+| | |
+|---|---|
+| asset | `character` named **Bell Keeper** — "a stout bronze automaton with a domed head, barrel chest and short jointed arms" |
+| built | 46 meshes, 7,586 bytes of source, no clips |
+| rigged to | 14 animated joints — hips, spine, chest, head, both upper arms, forearms, thighs, shins and feet |
+| clips | `idle` 2.0s over 4 tracks, `walk` 1.2s over 12 |
+| meshes after | **46**, exactly what it started with |
+
+The mesh count is the assertion that matters. A rig pass that "helpfully" rebuilds the model is a regeneration wearing a rig's clothes, and the test fails if the count moves by more than a quarter.
+
+**Sampling the clips afterwards is what proved the rig is real, and it caught a hole in the verifier.** Playing `walk` and measuring each joint against the hips: the shin travels 0.212 units and the foot 0.398 — a genuine leg swing — while `thigh_l` itself travels 0.000, which is correct and briefly looks alarming. A joint rotates *in place*; what moves is the chain hanging below it. Measuring the joint's own position tells you nothing, which is a trap worth naming for whoever verifies this next.
+
+The hole: nothing stopped a clip whose keyframes all hold the same value. It would export, count as a clip, satisfy every check, and play as a freeze. The bridge now refuses a clip where no track's values ever change, and says which clips held still.
+
+One contract miss the studio still does not catch: Bell Keeper's lowest point sits at **y = -0.080**, so it stands 8cm into the floor. That is the same gap the earlier character run showed at 6mm, and it is the bounding-box assertion this document has now twice said should be added.
 
 ### What these runs cost, and what they did not prove
 

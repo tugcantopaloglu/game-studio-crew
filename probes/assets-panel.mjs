@@ -104,7 +104,7 @@ let answer = null;
 
 function serve(url, init) {
   const path = String(url);
-  if (path.startsWith("/assets/generate")) {
+  if (path.startsWith("/assets/generate") || path.startsWith("/assets/rig")) {
     asked = JSON.parse(init.body);
     return answer;
   }
@@ -202,6 +202,75 @@ async function main() {
     "and the preview points at the serving route",
     images[0] && String(images[0].src).includes("/assets/image?project=proj_demo"),
     images[0] && images[0].src
+  );
+
+  check(
+    "a rigged model is summarised by its clips",
+    panel.rigSummary({ rigged: true, clips: ["idle", "walk"], joints: ["hips", "spine"] }) ===
+      "rigged: idle, walk over 2 joints",
+    panel.rigSummary({ rigged: true, clips: ["idle", "walk"], joints: ["hips", "spine"] })
+  );
+  check(
+    "a model with no clips is called static rather than rigged",
+    panel.rigSummary({ rigged: false, clips: [], joints: [] }) === "static, no clips"
+  );
+  check(
+    "a half-rigged model is neither",
+    panel.rigSummary({ rigged: false, clips: ["idle"], joints: ["hips"] }).startsWith("part-rigged"),
+    panel.rigSummary({ rigged: false, clips: ["idle"], joints: ["hips"] })
+  );
+
+  serve.view = overview({
+    assets: [
+      {
+        kind: "character",
+        name: "Dune Runner",
+        slug: "dune_runner",
+        factory: "src/models/dune_runner.js",
+        image: "assets/concept/dune_runner.png",
+        meshes: 85,
+        rigged: false,
+        clips: [],
+        joints: [],
+      },
+    ],
+  });
+  panel.mount(host);
+  await new Promise((r) => setTimeout(r, 30));
+  const rigButton = walk(host).find(
+    (n) => n.tagName === "BUTTON" && String(n.textContent) === "rig it"
+  );
+  check("an unrigged model offers to be rigged", Boolean(rigButton), textOf(host).slice(0, 200));
+  if (rigButton) {
+    answer = { ok: true, name: "Dune Runner", rigged: true, clips: ["idle", "walk"], meshes: 85 };
+    rigButton.dispatchEvent({ type: "click" });
+    await new Promise((r) => setTimeout(r, 40));
+    check(
+      "and asks the rig route for that slug",
+      asked && asked.slug === "dune_runner" && asked.project === "proj_demo",
+      JSON.stringify(asked)
+    );
+  }
+
+  serve.view = overview({
+    assets: [
+      {
+        kind: "character",
+        name: "Dune Runner",
+        slug: "dune_runner",
+        factory: "src/models/dune_runner.js",
+        meshes: 85,
+        rigged: true,
+        clips: ["idle", "walk"],
+        joints: ["hips", "spine", "head"],
+      },
+    ],
+  });
+  panel.mount(host);
+  await new Promise((r) => setTimeout(r, 30));
+  check(
+    "a rigged model is not offered the button again",
+    !walk(host).some((n) => n.tagName === "BUTTON" && String(n.textContent) === "rig it")
   );
 
   serve.view = overview({ enabled: false });

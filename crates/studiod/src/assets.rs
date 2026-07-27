@@ -52,7 +52,7 @@ pub fn crew_hint(studio_dir: &Path, project: &Path) -> String {
     let can = match (cap.draws(), cap.models()) {
         (true, true) => {
             "draw sprites and textures with the codex CLI's built-in image tool and turn them \
-             into procedural three.js models the engine can load"
+             into rigged, animated procedural three.js models the engine can load"
         }
         (true, false) => {
             "draw sprites and textures with the codex CLI's built-in image tool, background \

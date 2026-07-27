@@ -21,9 +21,21 @@ pub const SETTING_CONCEPT: &str = "assets.concept";
 pub const MANIFEST: &str = "assets.json";
 pub const GENERATION_CAP: Duration = Duration::from_secs(600);
 pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
+pub const SETTING_RIG: &str = "assets.rig";
 pub const SPRITE_DIR: &str = "sprites";
 pub const TEXTURE_DIR: &str = "textures";
 pub const CONCEPT_DIR: &str = "concept";
+
+pub const RIG_JOINTS: [&str; 7] = [
+    "hips",
+    "spine",
+    "head",
+    "upper_arm_l",
+    "upper_arm_r",
+    "thigh_l",
+    "thigh_r",
+];
+pub const RIG_CLIPS: [&str; 2] = ["idle", "walk"];
 
 pub fn model_in(settings: &Settings) -> String {
     settings
@@ -243,6 +255,10 @@ pub fn concept_in(settings: &Settings) -> bool {
     settings.bool(SETTING_CONCEPT, true)
 }
 
+pub fn rig_in(settings: &Settings) -> bool {
+    settings.bool(SETTING_RIG, true)
+}
+
 pub fn blockers(installed: bool, enabled: bool) -> Vec<String> {
     let mut out = Vec::new();
     if !enabled {
@@ -343,6 +359,39 @@ pub const ANSWER_SCHEMA: &str = r#"{
   }
 }"#;
 
+pub fn rig_contract() -> String {
+    format!(
+        "This model has to be **rigged and animated**, not just built, because the engines load \
+         it as a glb and a glb animates a named node's position, quaternion or scale and nothing \
+         else.\n\
+         - Build the body as a joint hierarchy. Every joint is a bare THREE.Object3D placed **at \
+         the joint**, and the meshes it moves are its children, offset from it. Rotating a joint \
+         must swing the limb about the place a limb actually bends, so a thigh's mesh hangs \
+         below the hip joint rather than being centred on it.\n\
+         - Name the joints exactly: {}. Add chest, neck, forearm_l, forearm_r, hand_l, hand_r, \
+         shin_l, shin_r, foot_l and foot_r as well when the character has them. Parent them the \
+         way a body is put together: hips holds spine and both thighs, spine holds chest, chest \
+         holds neck and both upper arms, each upper arm holds its forearm, each thigh holds its \
+         shin, each shin holds its foot.\n\
+         - Give every joint a name no other object in the tree uses, because a track finds its \
+         node by name.\n\
+         - Also export a second function, `export function clips(THREE, root)`, returning an \
+         array of THREE.AnimationClip. Provide at least {} — idle breathing and a walk cycle \
+         that swings the thighs and arms in opposition — and add run or any other clip the \
+         description calls for.\n\
+         - Every track must be a THREE.QuaternionKeyframeTrack on `<joint>.quaternion`, or a \
+         VectorKeyframeTrack on `<joint>.position` or `<joint>.scale`. **A track on `.rotation` \
+         cannot be exported and would silently drop the whole clip**; build quaternions with \
+         `new THREE.Quaternion().setFromEuler(new THREE.Euler(x, y, z))` instead.\n\
+         - Each clip's first and last keyframes must match so it loops, and its duration must be \
+         greater than zero.\n\
+         - The clips function allocates the tracks and returns; it does not animate anything \
+         itself and it does not import anything either.",
+        RIG_JOINTS.join(", "),
+        RIG_CLIPS.join(" and ")
+    )
+}
+
 pub fn prompt_for(
     kind: AssetKind,
     name: &str,
@@ -350,6 +399,22 @@ pub fn prompt_for(
     plan: &Plan,
     reference: Option<&str>,
 ) -> String {
+    prompt_with_rig(kind, name, description, plan, reference, false)
+}
+
+pub fn prompt_with_rig(
+    kind: AssetKind,
+    name: &str,
+    description: &str,
+    plan: &Plan,
+    reference: Option<&str>,
+    rigged: bool,
+) -> String {
+    let rig = if rigged {
+        format!("\n{}", rig_contract())
+    } else {
+        String::new()
+    };
     let slug = slugify(name);
     let looking = match reference {
         Some(_) => "An image of this asset is attached. Read it and match its silhouette, \
@@ -396,7 +461,8 @@ pub fn prompt_for(
          - {}\n\
          - Allocate nothing per frame: the factory builds and returns, it does not animate.\n\
          - Write no comments of any kind, not one line, not one trailing note. This studio's \
-         code has none.\n\n\
+         code has none.\n\
+         {}\n\n\
          Put the complete file contents in the source field and one sentence about what you \
          built in the notes field.",
         plan.engine,
@@ -407,7 +473,8 @@ pub fn prompt_for(
         looking,
         destination,
         slug,
-        kind.shape()
+        kind.shape(),
+        rig
     )
 }
 
@@ -480,6 +547,30 @@ pub fn skill_body(engine: &str) -> String {
          - no comments of any kind\n\n\
          A character: {}\n\n\
          A prop: {}\n\n\
+         ## Rigging it, which is what makes it animatable in every engine\n\n\
+         A character is not finished when it looks right. The engines load a `.glb`, and a glb \
+         animates a **named node's position, quaternion or scale** — nothing else. So the body is \
+         built as a joint hierarchy and the animation ships beside it in the same file:\n\n\
+         ```javascript\n\
+         export function clips(THREE, root) {{\n  \
+         return [new THREE.AnimationClip('idle', 2, [\n    \
+         new THREE.QuaternionKeyframeTrack('spine.quaternion', [0, 1, 2], values),\n  \
+         ])];\n\
+         }}\n\
+         ```\n\n\
+         {}\n\n\
+         `node tools/model_export.mjs <factory> <out.glb>` refuses a track it cannot export \
+         rather than writing a glb whose animation silently vanished, and it prints the clips and \
+         the joints they move so you can check the rig landed:\n\n\
+         ```\n\
+         wrote out.glb (413516 bytes, 85 mesh(es), 2 clip(s))\n\
+         clips: idle=2.000,walk=1.000\n\
+         joints: hips,spine,head,upper_arm_l,upper_arm_r,thigh_l,thigh_r\n\
+         ```\n\n\
+         A model that already exists can be rigged without being rebuilt: ask codex to rewrite \
+         the file with the hierarchy and the clips, tell it to keep every mesh, material and \
+         colour exactly as they are, and check the rest pose still looks the same before you \
+         keep it. The studio does the same thing through `POST /assets/rig`.\n\n\
          ## Where it goes\n\n\
          Sprites land in `assets/{SPRITE_DIR}/<slug>.png`, textures in \
          `assets/{TEXTURE_DIR}/<slug>.png`, and the concept art a model was built from in \
@@ -494,7 +585,8 @@ pub fn skill_body(engine: &str) -> String {
         crate::imagegen::GREEN_SUBJECT_KEY,
         crate::imagegen::CUTOUT_HELPER,
         AssetKind::Character.shape(),
-        AssetKind::Prop.shape()
+        AssetKind::Prop.shape(),
+        rig_contract()
     )
 }
 
@@ -583,6 +675,82 @@ pub fn parse_export_line(text: &str) -> Option<(u64, usize)> {
     None
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Proof {
+    pub bytes: u64,
+    pub meshes: usize,
+    pub clips: Vec<(String, f64)>,
+    pub joints: Vec<String>,
+}
+
+impl Proof {
+    pub fn clip_names(&self) -> Vec<String> {
+        self.clips.iter().map(|(name, _)| name.clone()).collect()
+    }
+
+    pub fn rigged(&self) -> bool {
+        self.missing().is_empty()
+    }
+
+    pub fn missing(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let absent: Vec<&str> = RIG_JOINTS
+            .into_iter()
+            .filter(|joint| !self.joints.iter().any(|had| had == joint))
+            .collect();
+        if !absent.is_empty() {
+            out.push(format!(
+                "no clip moves {}, so nothing can pose {}",
+                absent.join(", "),
+                if absent.len() == 1 { "it" } else { "them" }
+            ));
+        }
+        let unclipped: Vec<&str> = RIG_CLIPS
+            .into_iter()
+            .filter(|want| !self.clips.iter().any(|(name, _)| name == want))
+            .collect();
+        if !unclipped.is_empty() {
+            out.push(format!("the {} clip is missing", unclipped.join(" and the ")));
+        }
+        for (name, seconds) in &self.clips {
+            if *seconds <= 0.0 {
+                out.push(format!("the {name} clip lasts no time at all"));
+            }
+        }
+        out
+    }
+}
+
+pub fn parse_clip_line(text: &str) -> Vec<(String, f64)> {
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("clips: ") else {
+            continue;
+        };
+        return rest
+            .split(',')
+            .filter_map(|part| {
+                let (name, seconds) = part.trim().rsplit_once('=')?;
+                Some((name.trim().to_string(), seconds.trim().parse().ok()?))
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
+pub fn parse_joint_line(text: &str) -> Vec<String> {
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("joints: ") else {
+            continue;
+        };
+        return rest
+            .split(',')
+            .map(|part| part.trim().to_string())
+            .filter(|part| !part.is_empty())
+            .collect();
+    }
+    Vec::new()
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Generated {
     pub kind: String,
@@ -596,6 +764,9 @@ pub struct Generated {
     pub transparent: bool,
     pub meshes: usize,
     pub bytes: u64,
+    pub joints: Vec<String>,
+    pub clips: Vec<String>,
+    pub rigged: bool,
     pub notes: String,
     pub log: String,
 }
@@ -614,6 +785,9 @@ impl Generated {
             "transparent": self.transparent,
             "meshes": self.meshes,
             "bytes": self.bytes,
+            "joints": self.joints,
+            "clips": self.clips,
+            "rigged": self.rigged,
             "notes": self.notes,
             "log": self.log,
         })
@@ -629,6 +803,7 @@ pub struct Request {
     pub model: String,
     pub overwrite: bool,
     pub concept: bool,
+    pub rig: bool,
 }
 
 fn work_dir(project: &Path) -> PathBuf {
@@ -760,7 +935,7 @@ fn run_codex(
     }
 }
 
-pub fn verify(project: &Path, plan: &Plan) -> Result<(u64, usize), String> {
+pub fn verify(project: &Path, plan: &Plan) -> Result<Proof, String> {
     let node = on_path("node").ok_or_else(|| {
         "node is not on PATH, so the studio cannot check that the generated factory loads; \
          install node 18 or newer"
@@ -799,7 +974,12 @@ pub fn verify(project: &Path, plan: &Plan) -> Result<(u64, usize), String> {
             "the generated factory loaded but produced no meshes, so there is nothing to see"
                 .to_string(),
         ),
-        Some((bytes, meshes)) => Ok((bytes, meshes)),
+        Some((bytes, meshes)) => Ok(Proof {
+            bytes,
+            meshes,
+            clips: parse_clip_line(&said),
+            joints: parse_joint_line(&said),
+        }),
         None => Err(format!(
             "the model export bridge said something this build could not read: {}",
             said.trim().chars().take(300).collect::<String>()
@@ -1064,13 +1244,15 @@ fn model_asset(
         .map_err(|e| format!("could not write {}: {e}", schema.display()))?;
     let _ = std::fs::remove_file(&answer);
 
+    let wants_rig = req.rig && req.kind == AssetKind::Character;
     let reference = req.reference.clone().or(concept);
-    let prompt = prompt_for(
+    let prompt = prompt_with_rig(
         req.kind,
         &req.name,
         &req.description,
         &plan,
         reference.as_ref().map(|_| "attached"),
+        wants_rig,
     );
     let brief = work.join(format!("{slug}.brief.txt"));
     std::fs::write(&brief, &prompt)
@@ -1109,11 +1291,26 @@ fn model_asset(
     }
 
     match verify(project, &plan) {
-        Ok((bytes, meshes)) => {
+        Ok(proof) => {
             let told = match (&concept_at, drawn_notes.is_empty()) {
                 (Some(at), false) => format!("{drawn_notes} {notes} The concept art is at {at}."),
                 (Some(at), true) => format!("{notes} Built from the concept art already at {at}."),
                 (None, _) => notes,
+            };
+            let missing = proof.missing();
+            let told = match (wants_rig, missing.is_empty()) {
+                (true, true) => format!(
+                    "{told} It is rigged: {} clips ({}) over {} joints.",
+                    proof.clips.len(),
+                    proof.clip_names().join(", "),
+                    proof.joints.len()
+                ),
+                (true, false) => format!(
+                    "{told} It landed unrigged and is still a usable static model: {}. Ask the \
+                     assets panel to rig it to try again for animation alone.",
+                    missing.join("; ")
+                ),
+                (false, _) => told,
             };
             let record = Generated {
                 kind: req.kind.key().to_string(),
@@ -1125,8 +1322,11 @@ fn model_asset(
                 width: concept_png.map(|p| p.width).unwrap_or_default(),
                 height: concept_png.map(|p| p.height).unwrap_or_default(),
                 transparent: concept_png.map(|p| p.alpha).unwrap_or_default(),
-                meshes,
-                bytes,
+                meshes: proof.meshes,
+                bytes: proof.bytes,
+                joints: proof.joints.clone(),
+                clips: proof.clip_names(),
+                rigged: proof.rigged(),
                 notes: told,
                 log: log.to_string_lossy().into_owned(),
             };
@@ -1151,6 +1351,171 @@ fn model_asset(
             ))
         }
     }
+}
+
+pub fn rig_prompt_for(name: &str, slug: &str, plan: &Plan, source: &str) -> String {
+    format!(
+        "You are rigging one game asset that this studio has already built, for a {} project. It \
+         is a procedural three.js factory and it works; your job is to give it a skeleton and \
+         animation without changing what it looks like.\n\n\
+         The asset is called \"{name}\" and lives at {}, referred to in code as {slug}.\n\n\
+         {}\n\n\
+         Keep every mesh, every material and every colour exactly as they are. Do not restyle \
+         it, do not simplify it, do not rename the meshes it already has. What changes is the \
+         parenting: the meshes move under joints instead of hanging off the root, and their \
+         local offsets change so each joint sits where the body actually bends. The silhouette \
+         standing in its rest pose must be identical to the one you were given.\n\n\
+         Keep the rest of the contract intact: one default export taking THREE and returning a \
+         THREE.Group named {slug}, no imports of any kind, MeshStandardMaterial only, a name on \
+         every child, no comments anywhere.\n\n\
+         Here is the whole file as it stands:\n\n```javascript\n{source}\n```\n\n\
+         Put the complete rewritten file, factory and clips together, in the source field, and \
+         one sentence about the rig and the clips you gave it in the notes field.",
+        plan.engine,
+        plan.factory.display(),
+        rig_contract()
+    )
+}
+
+pub fn has_clip_export(source: &str) -> bool {
+    source.contains("export function clips") || source.contains("export const clips")
+}
+
+#[derive(Debug, Clone)]
+pub struct RigRequest {
+    pub slug: String,
+    pub model: String,
+}
+
+pub fn rig(project: &Path, cap: &Capability, req: &RigRequest) -> Result<Generated, String> {
+    let blocked = cap.blockers_for(AssetKind::Character);
+    if !blocked.is_empty() {
+        return Err(blocked.join(" "));
+    }
+    let slug = slugify(&req.slug);
+    if slug.is_empty() {
+        return Err("name the asset to rig".to_string());
+    }
+    let engine = cap.engine.as_deref().unwrap_or_default();
+    let plan = plan_for(engine, &slug)
+        .ok_or_else(|| format!("the {engine} engine has no place for a generated model"))?;
+    let factory = inside(project, &plan.factory)?;
+    let before = std::fs::read_to_string(&factory).map_err(|e| {
+        format!(
+            "there is no model at {} to rig ({e}); generate one first, or name the slug of one \
+             that is already there",
+            plan.factory.display()
+        )
+    })?;
+
+    let known = recorded(project);
+    let row = known
+        .iter()
+        .find(|r| r.get("slug").and_then(Value::as_str) == Some(slug.as_str()));
+    let name = row
+        .and_then(|r| r.get("name").and_then(Value::as_str))
+        .unwrap_or(&slug)
+        .to_string();
+
+    let work = work_dir(project);
+    std::fs::create_dir_all(&work)
+        .map_err(|e| format!("could not create {}: {e}", work.display()))?;
+    let schema = work.join(format!("{slug}.rig.schema.json"));
+    let answer = work.join(format!("{slug}.rig.answer.json"));
+    let brief = work.join(format!("{slug}.rig.brief.txt"));
+    let log = work.join(format!("{slug}.rig.codex.log"));
+    std::fs::write(&schema, ANSWER_SCHEMA)
+        .map_err(|e| format!("could not write {}: {e}", schema.display()))?;
+    std::fs::write(&brief, rig_prompt_for(&name, &slug, &plan, &before))
+        .map_err(|e| format!("could not write {}: {e}", brief.display()))?;
+    let _ = std::fs::remove_file(&answer);
+
+    let ask = Ask {
+        model: &req.model,
+        reference: None,
+    };
+    let said = run_codex(project, &ask, &brief, &schema, &answer, &log)?;
+    let raw = match std::fs::read_to_string(&answer) {
+        Ok(raw) => raw,
+        Err(e) => {
+            return Err(diagnose(&said, &req.model).unwrap_or_else(|| {
+                format!(
+                    "{PROGRAM} finished without leaving an answer at {} ({e}); its whole run is \
+                     recorded in {}",
+                    answer.display(),
+                    log.display()
+                )
+            }))
+        }
+    };
+    let (source, notes) = parse_answer(&raw)?;
+    looks_like_a_factory(&source)?;
+    if !has_clip_export(&source) {
+        return Err(format!(
+            "the rewritten {} exports no clips function, so it would still be a static model; \
+             the project is untouched",
+            plan.factory.display()
+        ));
+    }
+
+    std::fs::write(&factory, &source)
+        .map_err(|e| format!("could not write {}: {e}", factory.display()))?;
+    let landed = verify(project, &plan);
+    let missing = match &landed {
+        Ok(proof) => proof.missing(),
+        Err(_) => Vec::new(),
+    };
+    let refuse = match landed {
+        Err(why) => Some(why),
+        Ok(_) if !missing.is_empty() => Some(format!("the rig is incomplete: {}", missing.join("; "))),
+        Ok(_) => None,
+    };
+    if let Some(why) = refuse {
+        let _ = std::fs::write(&factory, &before);
+        return Err(format!(
+            "{why}. {} is back to the model it was and the attempt is recorded in {}",
+            plan.factory.display(),
+            log.display()
+        ));
+    }
+    let proof = verify(project, &plan)?;
+
+    let record = Generated {
+        kind: row
+            .and_then(|r| r.get("kind").and_then(Value::as_str))
+            .unwrap_or(AssetKind::Character.key())
+            .to_string(),
+        name,
+        slug,
+        factory: Some(slashed(&plan.factory)),
+        export: plan.export.as_deref().map(slashed),
+        image: row
+            .and_then(|r| r.get("image").and_then(Value::as_str))
+            .map(str::to_string),
+        width: row
+            .and_then(|r| r.get("width").and_then(Value::as_u64))
+            .unwrap_or_default() as u32,
+        height: row
+            .and_then(|r| r.get("height").and_then(Value::as_u64))
+            .unwrap_or_default() as u32,
+        transparent: row
+            .and_then(|r| r.get("transparent").and_then(Value::as_bool))
+            .unwrap_or_default(),
+        meshes: proof.meshes,
+        bytes: proof.bytes,
+        joints: proof.joints.clone(),
+        clips: proof.clip_names(),
+        rigged: proof.rigged(),
+        notes: format!(
+            "{notes} Rigged over {} joints with {} clips ({}).",
+            proof.joints.len(),
+            proof.clips.len(),
+            proof.clip_names().join(", ")
+        ),
+        log: log.to_string_lossy().into_owned(),
+    };
+    remember(project, &record);
+    Ok(record)
 }
 
 pub fn manifest_path(project: &Path) -> PathBuf {
@@ -1182,6 +1547,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/assets", get(overview))
         .route("/assets/generate", post(generate_asset))
+        .route("/assets/rig", post(rig_asset))
         .route("/assets/image", get(serve_image))
 }
 
@@ -1333,6 +1699,8 @@ pub struct GenerateRequest {
     pub overwrite: bool,
     #[serde(default)]
     pub concept: Option<bool>,
+    #[serde(default)]
+    pub rig: Option<bool>,
 }
 
 async fn generate_asset(State(state): State<AppState>, body: String) -> Response {
@@ -1379,6 +1747,7 @@ async fn generate_asset(State(state): State<AppState>, body: String) -> Response
         model,
         overwrite: req.overwrite,
         concept: req.concept.unwrap_or_else(|| concept_in(&stored)),
+        rig: req.rig.unwrap_or_else(|| rig_in(&stored)),
     };
     let done = tokio::task::spawn_blocking(move || generate(&root, &cap, &asked)).await;
 
@@ -1392,6 +1761,50 @@ async fn generate_asset(State(state): State<AppState>, body: String) -> Response
         Err(e) => axum::Json(serde_json::json!({
             "ok": false,
             "reason": format!("the asset generator stopped unexpectedly: {e}"),
+        }))
+        .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RigAsk {
+    pub project: String,
+    pub slug: String,
+}
+
+async fn rig_asset(State(state): State<AppState>, body: String) -> Response {
+    let req: RigAsk = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("a rig request needs project and slug: {e}"),
+            )
+                .into_response()
+        }
+    };
+    let Some(root) = crate::project_root(&state, &req.project) else {
+        return (StatusCode::NOT_FOUND, "no such project".to_string()).into_response();
+    };
+
+    let stored = Settings::load(&Settings::path_in(&state.studio_dir)).unwrap_or_default();
+    let cap = capability(&state.studio_dir, Some(&root));
+    let asked = RigRequest {
+        slug: req.slug.clone(),
+        model: model_in(&stored),
+    };
+    let done = tokio::task::spawn_blocking(move || rig(&root, &cap, &asked)).await;
+
+    match done {
+        Ok(Ok(record)) => {
+            let mut body = record.to_value();
+            body["ok"] = Value::Bool(true);
+            axum::Json(body).into_response()
+        }
+        Ok(Err(why)) => axum::Json(serde_json::json!({"ok": false, "reason": why})).into_response(),
+        Err(e) => axum::Json(serde_json::json!({
+            "ok": false,
+            "reason": format!("the rigger stopped unexpectedly: {e}"),
         }))
         .into_response(),
     }
@@ -1634,6 +2047,129 @@ mod tests {
     }
 
     #[test]
+    fn the_export_bridge_is_read_for_the_clips_and_the_joints_they_actually_move() {
+        let said = "wrote assets/models/scout.glb (413516 bytes, 85 mesh(es), 2 clip(s))\n\
+                    clips: idle=2.000,walk=1.000\n\
+                    joints: hips,spine,head,upper_arm_l,upper_arm_r,thigh_l,thigh_r";
+        assert_eq!(parse_export_line(said), Some((413516, 85)));
+        assert_eq!(
+            parse_clip_line(said),
+            vec![("idle".to_string(), 2.0), ("walk".to_string(), 1.0)]
+        );
+        assert_eq!(parse_joint_line(said).len(), 7);
+
+        let older = "wrote out.glb (2048 bytes, 7 mesh(es))";
+        assert_eq!(
+            parse_export_line(older),
+            Some((2048, 7)),
+            "a bridge that has not been updated yet still has to be readable"
+        );
+        assert!(parse_clip_line(older).is_empty());
+        assert!(parse_joint_line(older).is_empty());
+    }
+
+    #[test]
+    fn a_model_is_only_called_rigged_when_every_joint_and_clip_the_engine_needs_is_there() {
+        let whole = Proof {
+            bytes: 1,
+            meshes: 40,
+            clips: vec![("idle".into(), 2.0), ("walk".into(), 1.0)],
+            joints: RIG_JOINTS.map(str::to_string).to_vec(),
+        };
+        assert!(whole.rigged(), "{:?}", whole.missing());
+
+        let armless = Proof {
+            joints: vec!["hips".into(), "spine".into(), "head".into()],
+            ..whole.clone()
+        };
+        let why = armless.missing().join(" ");
+        assert!(why.contains("upper_arm_l"), "{why}");
+        assert!(
+            why.contains("no clip moves"),
+            "a joint nothing animates is not a joint, and the sentence has to say so: {why}"
+        );
+
+        let still = Proof {
+            clips: vec![("idle".into(), 0.0), ("walk".into(), 1.0)],
+            ..whole.clone()
+        };
+        assert!(still.missing().join(" ").contains("lasts no time at all"));
+
+        let silent = Proof {
+            clips: vec![("idle".into(), 2.0)],
+            ..whole
+        };
+        assert!(silent.missing().join(" ").contains("the walk clip is missing"));
+    }
+
+    #[test]
+    fn the_rig_contract_forbids_the_track_that_would_silently_drop_the_whole_clip() {
+        let said = rig_contract();
+        assert!(
+            said.contains("`.rotation`"),
+            "a glb cannot carry an euler track and this is the one thing a model will get wrong"
+        );
+        assert!(said.contains("QuaternionKeyframeTrack"));
+        assert!(said.contains("setFromEuler"));
+        for joint in RIG_JOINTS {
+            assert!(said.contains(joint), "{joint} is not named in the contract");
+        }
+        for clip in RIG_CLIPS {
+            assert!(said.contains(clip));
+        }
+        assert!(said.contains("export function clips(THREE, root)"));
+    }
+
+    #[test]
+    fn a_character_is_asked_for_a_rig_and_a_prop_is_left_static() {
+        let plan = plan_for("web", "scout").unwrap();
+        let rigged = prompt_with_rig(AssetKind::Character, "Scout", "a salvager", &plan, None, true);
+        assert!(rigged.contains("rigged and animated"));
+        assert!(rigged.contains("upper_arm_l"));
+
+        let plain = prompt_with_rig(AssetKind::Prop, "Crate", "a crate", &plan, None, false);
+        assert!(!plain.contains("rigged and animated"));
+        assert!(
+            plain.contains("Export a single default function"),
+            "the rest of the contract is untouched by rigging"
+        );
+    }
+
+    #[test]
+    fn rigging_hands_codex_the_file_it_already_built_and_forbids_restyling_it() {
+        let plan = plan_for("web", "scout").unwrap();
+        let source = "export default function scout(THREE) { return new THREE.Group(); }";
+        let said = rig_prompt_for("Scrapyard Scout", "scout", &plan, source);
+
+        assert!(said.contains(source), "the rig pass has to see what it is rigging");
+        assert!(said.contains("Scrapyard Scout"));
+        assert!(said.contains("Do not restyle it"));
+        assert!(said.contains("silhouette standing in its rest pose must be identical"));
+        assert!(said.contains("QuaternionKeyframeTrack"));
+
+        assert!(has_clip_export("export function clips(THREE, root) { return []; }"));
+        assert!(has_clip_export("export const clips = () => [];"));
+        assert!(!has_clip_export(source));
+    }
+
+    #[test]
+    fn rigging_a_model_that_is_not_there_says_so_before_codex_is_paid() {
+        let dir = std::env::temp_dir().join("studio-assets-rig-missing");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let cap = ready_cap(Some("web"));
+        let asked = RigRequest {
+            slug: "nobody".into(),
+            model: DEFAULT_MODEL.into(),
+        };
+        let err = rig(&dir, &cap, &asked).unwrap_err();
+        assert!(err.contains("there is no model at"), "{err}");
+        assert!(err.contains("generate one first"));
+        assert!(!dir.join(".studio-out").exists(), "and nothing is spent finding out");
+    }
+
+    #[test]
     fn a_reference_that_climbs_out_of_the_project_is_never_uploaded_to_codex() {
         let root = std::env::temp_dir().join("studio-assets-reference");
         let _ = std::fs::remove_dir_all(&root);
@@ -1822,6 +2358,7 @@ mod tests {
             model: DEFAULT_MODEL.into(),
             overwrite: false,
             concept: true,
+            rig: false,
         };
 
         let err = generate(&dir, &cap, &asked).unwrap_err();
@@ -2015,6 +2552,7 @@ mod tests {
             model: DEFAULT_MODEL.into(),
             overwrite: false,
             concept: true,
+            rig: false,
         };
 
         let err = generate(&dir, &cap, &asked).unwrap_err();
@@ -2038,6 +2576,7 @@ mod tests {
             model: DEFAULT_MODEL.into(),
             overwrite: false,
             concept: true,
+            rig: false,
         };
         assert!(generate(&dir, &cap, &asked).unwrap_err().contains("needs a description"));
 
@@ -2152,6 +2691,7 @@ mod tests {
             model: model_in(&stored),
             overwrite: false,
             concept: false,
+            rig: false,
         };
 
         let made = match generate(&project, &cap, &asked) {
@@ -2227,6 +2767,7 @@ mod tests {
             model: model_in(&stored),
             overwrite: false,
             concept: false,
+            rig: false,
         };
 
         let made = match generate(&project, &cap, &asked) {
@@ -2298,6 +2839,7 @@ mod tests {
             model: model_in(&stored),
             overwrite: false,
             concept: true,
+            rig: true,
         };
 
         let made = match generate(&project, &cap, &asked) {
@@ -2326,6 +2868,111 @@ mod tests {
         assert_eq!(rows.len(), 1, "one asset, one row, whichever steps it took");
         assert_eq!(rows[0]["kind"], "character");
         assert!(rows[0]["notes"].as_str().unwrap().contains("concept art"));
+
+        println!("rigged    {}", made.rigged);
+        println!("clips     {}", made.clips.join(", "));
+        println!("joints    {}", made.joints.join(", "));
+        assert!(
+            made.rigged,
+            "a character that cannot be posed is not finished: clips {:?}, joints {:?}",
+            made.clips, made.joints
+        );
+        assert!(made.clips.iter().any(|c| c == "idle"));
+        assert!(made.clips.iter().any(|c| c == "walk"));
+        for joint in RIG_JOINTS {
+            assert!(
+                made.joints.iter().any(|had| had == joint),
+                "{joint} is in no clip, so nothing can animate it"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn a_real_codex_rigs_a_model_that_was_already_built_without_restyling_it() {
+        if std::env::var("STUDIO_REAL_CODEX").is_err() {
+            println!("set STUDIO_REAL_CODEX=1 to spend two real Codex requests on a rig pass");
+            return;
+        }
+
+        let dir = std::env::temp_dir().join("studio-assets-real-rig");
+        let _ = std::fs::remove_dir_all(&dir);
+        let studio = dir.join(".studio");
+        let project = dir.join("game");
+        std::fs::create_dir_all(&studio).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("index.html"), "<html></html>").unwrap();
+
+        let profiles = studio_engine::EngineProfile::builtin();
+        let web = profiles.iter().find(|p| p.id == "web").unwrap();
+        studio_engine::install_helpers(web, &project).unwrap();
+
+        let mut stored = Settings::new();
+        stored.set(
+            SETTING_MODEL,
+            std::env::var("STUDIO_REAL_CODEX_MODEL")
+                .unwrap_or_else(|_| DEFAULT_MODEL.into())
+                .into(),
+        );
+        stored.save(&Settings::path_in(&studio)).unwrap();
+
+        let cap = capability(&studio, Some(&project));
+        assert!(cap.models(), "codex cannot build models here: {:?}", cap.models);
+
+        let unrigged = Request {
+            kind: AssetKind::Character,
+            name: "Bell Keeper".into(),
+            description: "a stout bronze automaton with a domed head, barrel chest and short \
+                          jointed arms"
+                .into(),
+            reference: None,
+            model: model_in(&stored),
+            overwrite: false,
+            concept: false,
+            rig: false,
+        };
+        let plain = match generate(&project, &cap, &unrigged) {
+            Ok(made) => made,
+            Err(why) => panic!("the plain build failed: {why}"),
+        };
+        assert!(!plain.rigged, "this half of the test needs a model with no rig");
+        let before = std::fs::read_to_string(project.join(plain.factory.clone().unwrap())).unwrap();
+        println!("static    {} meshes, {} bytes", plain.meshes, before.len());
+
+        let rigged = match rig(
+            &project,
+            &cap,
+            &RigRequest {
+                slug: "bell_keeper".into(),
+                model: model_in(&stored),
+            },
+        ) {
+            Ok(made) => made,
+            Err(why) => panic!("the rig pass failed: {why}"),
+        };
+
+        println!("clips     {}", rigged.clips.join(", "));
+        println!("joints    {}", rigged.joints.join(", "));
+        println!("meshes    {} was {}", rigged.meshes, plain.meshes);
+
+        assert!(rigged.rigged, "the rig pass has to produce a rig");
+        assert!(rigged.clips.iter().any(|c| c == "idle"));
+        assert!(rigged.clips.iter().any(|c| c == "walk"));
+        assert_eq!(rigged.name, "Bell Keeper", "the rig pass keeps the asset's name");
+
+        let after = std::fs::read_to_string(project.join(rigged.factory.clone().unwrap())).unwrap();
+        assert!(has_clip_export(&after));
+        assert_ne!(after, before, "the file has to have actually changed");
+        assert!(
+            rigged.meshes * 4 >= plain.meshes * 3,
+            "rigging is a reparenting job, not a rebuild: {} meshes became {}",
+            plain.meshes,
+            rigged.meshes
+        );
+
+        let rows = recorded(&project);
+        assert_eq!(rows.len(), 1, "rigging updates the row rather than adding one");
+        assert_eq!(rows[0]["rigged"], true);
     }
 
     #[test]

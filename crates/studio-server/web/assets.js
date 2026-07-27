@@ -304,12 +304,53 @@ function resultCard(result, projectId) {
         text: result.meshes + " mesh(es), " + result.bytes + " bytes when exported",
       })
     );
+    card.append(rigLine(result));
   }
   if (result.notes) card.append(el("div", { class: "hint", text: result.notes }));
   return card;
 }
 
-function madeList(rows, projectId) {
+export function rigSummary(row) {
+  const clips = row.clips || [];
+  const joints = row.joints || [];
+  if (row.rigged) {
+    return "rigged: " + clips.join(", ") + " over " + joints.length + " joints";
+  }
+  if (clips.length) {
+    return "part-rigged: " + clips.join(", ") + " over " + joints.length + " joints";
+  }
+  return "static, no clips";
+}
+
+function rigLine(row) {
+  return el("div", {
+    class: row.rigged ? "ok" : "warn",
+    style: "font-size:11px",
+    text: rigSummary(row),
+  });
+}
+
+async function rigExisting(view, row, button) {
+  if (busy) return;
+  busy = true;
+  button.disabled = true;
+  button.textContent = "rigging...";
+  toast("rigging " + row.name + "; this takes a minute or two");
+  try {
+    lastResult = await api("/assets/rig", {
+      body: { project: view.projectId, slug: row.slug },
+    });
+    toast(lastResult.ok ? "rigged " + lastResult.name : "codex could not rig it");
+  } catch (err) {
+    lastResult = { ok: false, reason: err.message };
+    toast("rigging failed");
+  }
+  busy = false;
+  redraw();
+}
+
+function madeList(rows, view) {
+  const projectId = view.projectId;
   if (!rows || !rows.length) {
     return el("div", { class: "hint", text: "no assets generated in this project yet" });
   }
@@ -332,6 +373,13 @@ function madeList(rows, projectId) {
     }
     if (row.factory) {
       card.append(el("div", { class: "hint", style: "word-break:break-all", text: row.factory }));
+      card.append(rigLine(row));
+      if (!row.rigged) {
+        const button = el("button", { text: "rig it" });
+        button.onclick = () => rigExisting(view, row, button);
+        button.disabled = busy || !view.can_model;
+        card.append(button);
+      }
     }
     if (row.meshes) card.append(el("div", { class: "hint", text: row.meshes + " mesh(es)" }));
     box.append(card);
@@ -545,7 +593,7 @@ function draw(view) {
     const result = resultCard(lastResult, view.projectId);
     if (result) host.append(result);
     host.append(...section("already generated"));
-    host.append(madeList(view.assets, view.projectId));
+    host.append(madeList(view.assets, view));
   }
 }
 

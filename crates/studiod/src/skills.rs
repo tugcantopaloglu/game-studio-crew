@@ -88,6 +88,12 @@ mod tests {
         assert!(body.contains("remove_chroma_key.py"));
         assert!(body.contains("assets/sprites/<slug>.png"));
         assert!(body.contains("src/models/<slug>.js"));
+        assert!(body.contains("QuaternionKeyframeTrack"));
+        assert!(
+            body.contains("`.rotation`"),
+            "a worker that writes an euler track loses the whole clip and is never told why"
+        );
+        assert!(body.contains("POST /assets/rig"));
     }
 
     #[test]
