@@ -540,7 +540,13 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
             serde_json::json!({"scope": scope.key(), "engine": driver.profile.id}),
         );
 
-        let result = driver.verify(scope, &self.paths);
+        let mut result = driver.verify(scope, &self.paths);
+
+        let unrigged = crate::assets::rig_failures(&self.em.state.studio_dir, &self.paths.project);
+        if !unrigged.is_empty() {
+            result.verdict = Verdict::Fail;
+            result.failures.extend(unrigged);
+        }
 
         let _ = self.em.emit(
             "daemon",

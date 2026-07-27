@@ -317,7 +317,38 @@ It calls the same `generate`, `rig` and `animate` the routes call, so every guar
 
 It also states that this comes **before** the img2threejs skill. Both are in a worker's context — [07](07-engine-layer.md) tells the art crew to sculpt from a reference image with img2threejs — and a worker reading two ways to make a model needs to be told which is the default. img2threejs is how a model is built by hand; `studiod asset` is the studio building it for you.
 
-What is still not enforced: nothing *checks* that a worker used it. A seat can still hand-place primitives, and verification will pass, because a hand-built factory is a legitimate thing. Closing that would mean failing a character task whose model has no rig, which would also fail every deliberate placeholder — a trade this document does not make yet.
+### And in a 3D game, a character that cannot be posed fails the gate
+
+Guidance is not enforcement, so on any engine that has a three.js model path the verify gate audits what the task touched and **fails on a character with no rig**. The failures join `VerifyResult.failures`, which means they go through the existing repair loop: the worker is told what is wrong and gets to fix it, rather than the run stopping.
+
+Four conditions narrow it to the case that was actually asked for, and each one exists to stop a false failure:
+
+1. **The engine must have a model path.** `plan_for` decides this, so a `python` project — or anything 2D — is never audited. There is nowhere to put a rig, so failing for the absence of one would be nonsense.
+2. **`assets.rig` must be on.** The same key that makes the generator build rigs makes the gate insist on them; switching it off switches off both, and `assets.enabled` switches off everything.
+3. **Only what this task touched.** `git status --porcelain` names the working-tree changes, and since the daemon commits per task, that is exactly this task's work. A static character somebody else left in the tree is not this worker's problem. Without git the audit falls back to every factory, which is the strict reading and is survivable because the fix is one command.
+4. **It must read as a character.** Names are extracted from the source's string literals and weighed: at least one of head/torso/chest/pelvis, at least two of arm/leg/thigh/shin/hand/foot, four distinct body words in total. An armchair with an `arm_rest` does not qualify. An explicit `kind` in the manifest always wins over the heuristic, so a statue recorded as a `prop` is never asked to walk.
+
+A model that names a body but exports no `clips` function fails immediately and for free. One that does export clips is put through the export bridge, and `Proof::missing()` decides — so a rig that names its joints but animates none of them is caught too.
+
+The failure carries the fix rather than a complaint:
+
+> src/models/hero.js reads as a character but nothing can pose it: it exports no clips function at all
+>
+> a character in a 3d game that cannot be posed is set dressing. Run `studiod asset rig --project … --slug hero` to have the studio rig it, or give it the joint hierarchy and clips by hand as the codex-assets skill describes. **If this model is not a character, say so in your report and name it as a prop.**
+
+That last sentence is the escape hatch, and it is deliberate: a heuristic that can be wrong must never be the only way out. A worker who disagrees says so, and a human reads it.
+
+#### It was measured against the models this studio really made
+
+Not only the synthetic fixtures:
+
+| Model | What it is | Gate |
+|---|---|---|
+| `bell_keeper.js` | rigged by the rig pass | passes |
+| `wooden_crate.js` | a prop, no rig, no clips | passes — never asked to walk |
+| `dune_runner.js` | a character generated **before** rigging existed | **caught** |
+
+The third row is the point. It was not planted: `dune_runner` came out of the concept-to-model pipeline in an earlier version and genuinely has no `clips` export, and the first real run of the gate found it. The expectation written into the test was wrong; the gate was right.
 
 The skill body is composed from the same `AssetKind::shape()` strings and the same `plan_for` result the daemon uses, so the instructions a worker reads and the prompt the daemon sends cannot drift apart. It now teaches all three steps — draw, key out, build from the cut-out — and it opens by naming the confusion that produced v0.1: `image_generation` is a tool the model calls, so `--help` will never mention it, and `codex features list` is where to look. The art and audio seats already carry `Bash` and `Skill` in their tool allowlist ([04](04-agent-graph.md)), so a worker can drive codex itself; the skill tells it to ask for the answer and write the file itself, for the same sandbox reason the daemon does, and to refuse a sprite whose corners are still opaque rather than ship it.
 
@@ -380,6 +411,8 @@ A kind the studio does not make is a `400` that lists the kinds it does.
 | the clips actually move the body | **measured**: playing `walk`, the shin travels 0.212 and the foot 0.398 units against the hips |
 | mixamo will not accept one of these models | **read off Adobe's own documentation**: FBX/OBJ/ZIP only, one clean mesh, no existing rig |
 | a mixamo clip drives a generated rig | **done for real** with `Samba Dancing.fbx`, 17 joints, worst joint-angle disagreement 2.18° across 18 seconds |
+| the rig gate tells a body from a box | **unit tested**, and **run against three real generated models**: it caught the one static character and left the prop and the rigged model alone |
+| the gate never fires where a rig cannot go | **unit tested** against a python project and against `assets.rig = false` |
 | the naive retarget formula breaks on these rigs | **reproduced**: without the bone-aim correction the elbow twists instead of bending, and the probe fails |
 | a binary FBX can be read in node | **done for real**: 3.6 MB deflate-compressed file parsed through the vendored `FBXLoader` |
 | the model default, the refusal diagnosis, path containment, no-clobber | **unit tested** |

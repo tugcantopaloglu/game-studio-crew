@@ -1564,6 +1564,166 @@ pub fn rig(project: &Path, cap: &Capability, req: &RigRequest) -> Result<Generat
     Ok(record)
 }
 
+pub const BODY_CORE: [&str; 4] = ["head", "torso", "chest", "pelvis"];
+pub const BODY_LIMB: [&str; 6] = ["arm", "leg", "thigh", "shin", "hand", "foot"];
+pub const BODY_JOINT: [&str; 6] = ["hips", "neck", "shoulder", "forearm", "elbow", "knee"];
+
+pub fn quoted(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut held = String::new();
+    let mut inside: Option<char> = None;
+    let mut escaped = false;
+    for ch in source.chars() {
+        match inside {
+            Some(quote) => {
+                if escaped {
+                    escaped = false;
+                    held.push(ch);
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == quote {
+                    inside = None;
+                    out.push(std::mem::take(&mut held).to_lowercase());
+                } else {
+                    held.push(ch);
+                }
+            }
+            None => {
+                if matches!(ch, '"' | '\'' | '`') {
+                    inside = Some(ch);
+                    held.clear();
+                }
+            }
+        }
+    }
+    out
+}
+
+pub fn reads_like_a_character(source: &str) -> bool {
+    let named = quoted(source);
+    let says = |word: &str| named.iter().any(|name| name.contains(word));
+    let core = BODY_CORE.into_iter().filter(|w| says(w)).count();
+    let limb = BODY_LIMB.into_iter().filter(|w| says(w)).count();
+    let joint = BODY_JOINT.into_iter().filter(|w| says(w)).count();
+    core >= 1 && limb >= 2 && core + limb + joint >= 4
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Unrigged {
+    pub factory: String,
+    pub slug: String,
+    pub missing: Vec<String>,
+}
+
+impl Unrigged {
+    pub fn why(&self) -> String {
+        format!(
+            "{} reads as a character but nothing can pose it: {}",
+            self.factory,
+            self.missing.join("; ")
+        )
+    }
+}
+
+fn models_dir_for(engine: &str) -> Option<(PathBuf, String)> {
+    let plan = plan_for(engine, "probe")?;
+    let dir = plan.factory.parent()?.to_path_buf();
+    let ext = plan.factory.extension()?.to_string_lossy().into_owned();
+    Some((dir, ext))
+}
+
+pub fn audit_rigs(project: &Path, engine: &str, changed: Option<&[String]>) -> Vec<Unrigged> {
+    let Some((dir, ext)) = models_dir_for(engine) else {
+        return Vec::new();
+    };
+    let known = recorded(project);
+    let mut looked: Vec<PathBuf> = Vec::new();
+
+    match changed {
+        Some(paths) => {
+            for at in paths {
+                let relative = Path::new(at.trim());
+                if relative.parent() != Some(dir.as_path()) {
+                    continue;
+                }
+                if relative.extension().map(|e| e.to_string_lossy().into_owned()) != Some(ext.clone())
+                {
+                    continue;
+                }
+                looked.push(relative.to_path_buf());
+            }
+        }
+        None => {
+            let Ok(entries) = std::fs::read_dir(project.join(&dir)) else {
+                return Vec::new();
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map(|e| e.to_string_lossy().into_owned()) == Some(ext.clone()) {
+                    if let Some(name) = path.file_name() {
+                        looked.push(dir.join(name));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for relative in looked {
+        let Ok(full) = inside(project, &relative) else {
+            continue;
+        };
+        let Ok(source) = std::fs::read_to_string(&full) else {
+            continue;
+        };
+        let slug = relative
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let says = known
+            .iter()
+            .find(|row| row.get("slug").and_then(Value::as_str) == Some(slug.as_str()))
+            .and_then(|row| row.get("kind").and_then(Value::as_str));
+        if says == Some(AssetKind::Prop.key()) {
+            continue;
+        }
+        if says != Some(AssetKind::Character.key()) && !reads_like_a_character(&source) {
+            continue;
+        }
+
+        if !has_clip_export(&source) {
+            out.push(Unrigged {
+                factory: slashed(&relative),
+                slug,
+                missing: vec!["it exports no clips function at all".to_string()],
+            });
+            continue;
+        }
+        let Some(plan) = plan_for(engine, &slug) else {
+            continue;
+        };
+        match verify(project, &plan) {
+            Ok(proof) => {
+                let missing = proof.missing();
+                if !missing.is_empty() {
+                    out.push(Unrigged {
+                        factory: slashed(&relative),
+                        slug,
+                        missing,
+                    });
+                }
+            }
+            Err(why) => out.push(Unrigged {
+                factory: slashed(&relative),
+                slug,
+                missing: vec![why],
+            }),
+        }
+    }
+    out
+}
+
 pub const ANIMATION_EXTENSIONS: [&str; 1] = ["fbx"];
 pub const ANIMATION_DIR: &str = "animations";
 
@@ -2408,6 +2568,128 @@ mod tests {
         assert!(has_clip_export("export function clips(THREE, root) { return []; }"));
         assert!(has_clip_export("export const clips = () => [];"));
         assert!(!has_clip_export(source));
+    }
+
+    const A_CHARACTER: &str = r#"
+        export default function hero(THREE) {
+          const g = new THREE.Group();
+          g.name = 'hero';
+          const head = new THREE.Mesh(); head.name = 'head';
+          const torso = new THREE.Mesh(); torso.name = 'torso';
+          const arm = new THREE.Mesh(); arm.name = 'upper_arm_l';
+          const leg = new THREE.Mesh(); leg.name = 'thigh_r';
+          return g;
+        }
+    "#;
+
+    const A_PROP: &str = r#"
+        export default function crate(THREE) {
+          const g = new THREE.Group();
+          g.name = 'crate';
+          const lid = new THREE.Mesh(); lid.name = 'lid';
+          const plank = new THREE.Mesh(); plank.name = 'plank_front';
+          const bracket = new THREE.Mesh(); bracket.name = 'corner_bracket';
+          return g;
+        }
+    "#;
+
+    #[test]
+    fn a_body_is_told_apart_from_a_box_by_the_parts_it_names() {
+        assert!(reads_like_a_character(A_CHARACTER));
+        assert!(!reads_like_a_character(A_PROP));
+
+        assert!(
+            !reads_like_a_character(
+                "export default function chair(T){const a=new T.Mesh();a.name='arm_rest';}"
+            ),
+            "an armchair names one limb word and is not a character"
+        );
+        assert!(
+            !reads_like_a_character("export default function tree(T){}"),
+            "a factory that names nothing is not a character"
+        );
+
+        assert_eq!(
+            quoted(r#"a.name = 'head'; b.name = "thigh_l"; const c = `foot_r`;"#),
+            vec!["head", "thigh_l", "foot_r"]
+        );
+    }
+
+    fn plant(project: &Path, slug: &str, source: &str) {
+        let at = project.join("src").join("models");
+        std::fs::create_dir_all(&at).unwrap();
+        std::fs::write(at.join(format!("{slug}.js")), source).unwrap();
+    }
+
+    #[test]
+    fn a_character_with_no_clips_is_caught_and_a_prop_beside_it_is_left_alone() {
+        let dir = std::env::temp_dir().join("studio-assets-audit");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        plant(&dir, "hero", A_CHARACTER);
+        plant(&dir, "crate", A_PROP);
+
+        let found = audit_rigs(&dir, "web", None);
+        assert_eq!(found.len(), 1, "only the body should be caught: {found:?}");
+        assert_eq!(found[0].slug, "hero");
+        assert_eq!(found[0].factory, "src/models/hero.js");
+        assert!(found[0].missing[0].contains("exports no clips function"));
+        assert!(found[0].why().contains("reads as a character"));
+    }
+
+    #[test]
+    fn a_model_the_manifest_calls_a_prop_is_never_asked_to_walk() {
+        let dir = std::env::temp_dir().join("studio-assets-audit-prop");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        plant(&dir, "golem", A_CHARACTER);
+
+        assert_eq!(audit_rigs(&dir, "web", None).len(), 1);
+
+        remember(
+            &dir,
+            &Generated {
+                kind: AssetKind::Prop.key().to_string(),
+                slug: "golem".into(),
+                name: "Golem Statue".into(),
+                factory: Some("src/models/golem.js".into()),
+                ..Generated::default()
+            },
+        );
+        assert!(
+            audit_rigs(&dir, "web", None).is_empty(),
+            "a statue of a person is a prop when the studio was told so"
+        );
+    }
+
+    #[test]
+    fn the_audit_only_looks_at_what_this_task_touched() {
+        let dir = std::env::temp_dir().join("studio-assets-audit-changed");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        plant(&dir, "hero", A_CHARACTER);
+        plant(&dir, "villain", A_CHARACTER);
+
+        let touched = vec!["src/models/villain.js".to_string()];
+        let found = audit_rigs(&dir, "web", Some(&touched));
+        assert_eq!(found.len(), 1, "an untouched model is somebody else's problem");
+        assert_eq!(found[0].slug, "villain");
+
+        let elsewhere = vec!["src/main.js".to_string(), "README.md".to_string()];
+        assert!(audit_rigs(&dir, "web", Some(&elsewhere)).is_empty());
+    }
+
+    #[test]
+    fn an_engine_with_no_model_path_is_never_audited_at_all() {
+        let dir = std::env::temp_dir().join("studio-assets-audit-2d");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        plant(&dir, "hero", A_CHARACTER);
+
+        assert!(
+            audit_rigs(&dir, "python", None).is_empty(),
+            "a project with no three.js model path cannot be asked for a rig"
+        );
     }
 
     #[test]

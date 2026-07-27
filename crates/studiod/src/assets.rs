@@ -212,6 +212,46 @@ pub fn announce(studio_dir: &Path, project: &Path) {
     }
 }
 
+pub fn rig_failures(studio_dir: &Path, project: &Path) -> Vec<studio_verify::Failure> {
+    let stored = Settings::load(&Settings::path_in(studio_dir)).unwrap_or_default();
+    if !studio_server::assets::enabled_in(&stored) || !studio_server::assets::rig_in(&stored) {
+        return Vec::new();
+    }
+    let Some(engine) = studio_server::assets::engine_of(project) else {
+        return Vec::new();
+    };
+    if studio_server::assets::plan_for(&engine, "probe").is_none() {
+        return Vec::new();
+    }
+
+    let changed = studio_core::git::is_repo(project)
+        .then(|| studio_core::git::changes(project).ok())
+        .flatten()
+        .map(|rows| rows.into_iter().map(|c| c.path).collect::<Vec<_>>());
+
+    let run = launcher();
+    studio_server::assets::audit_rigs(project, &engine, changed.as_deref())
+        .into_iter()
+        .map(|found| studio_verify::Failure {
+            id: format!("unrigged:{}", found.slug),
+            kind: studio_verify::FailureKind::Export,
+            symbol: Some(found.slug.clone()),
+            file: Some(found.factory.clone()),
+            line: None,
+            message: found.why(),
+            detail: Some(format!(
+                "a character in a 3d game that cannot be posed is set dressing. Run `{run} asset \
+                 rig --project {} --slug {}` to have the studio rig it, or give it the joint \
+                 hierarchy and clips by hand as the {} skill describes. If this model is not a \
+                 character, say so in your report and name it as a prop.",
+                project.display(),
+                found.slug,
+                studio_server::assets::SKILL_NAME
+            )),
+        })
+        .collect()
+}
+
 pub fn crew_hint(studio_dir: &Path, project: &Path) -> String {
     let cap = capability(studio_dir, Some(project));
     if !cap.ready() {
@@ -393,6 +433,141 @@ mod tests {
         assert!(missing.to_string().contains("there is no project at"));
 
         assert!(cli(&["list".into(), "--project".into(), at]).is_ok());
+    }
+
+    #[test]
+    fn a_static_character_fails_the_gate_with_the_command_that_fixes_it() {
+        let (studio, project) = scratch("gate");
+        let models = project.join("src").join("models");
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(
+            models.join("hero.js"),
+            "export default function hero(T){const g=new T.Group();g.name='hero';\
+             const h=new T.Mesh();h.name='head';const t=new T.Mesh();t.name='torso';\
+             const a=new T.Mesh();a.name='upper_arm_l';const l=new T.Mesh();l.name='thigh_r';\
+             return g;}",
+        )
+        .unwrap();
+
+        let said = rig_failures(&studio, &project);
+        assert_eq!(said.len(), 1, "one static character, one failure: {said:?}");
+        assert_eq!(said[0].kind, studio_verify::FailureKind::Export);
+        assert_eq!(said[0].file.as_deref(), Some("src/models/hero.js"));
+        assert!(said[0].message.contains("reads as a character"));
+
+        let detail = said[0].detail.clone().unwrap_or_default();
+        assert!(detail.contains("asset rig"), "the fix has to be one command: {detail}");
+        assert!(detail.contains("--slug hero"));
+        assert!(
+            detail.contains("not a character"),
+            "a mislabelled prop needs a way out that is not rigging it: {detail}"
+        );
+    }
+
+    #[test]
+    fn the_gate_is_silent_when_the_studio_was_told_not_to_rig() {
+        let (studio, project) = scratch("gate-off");
+        let models = project.join("src").join("models");
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(
+            models.join("hero.js"),
+            "export default function hero(T){const h=new T.Mesh();h.name='head';\
+             const t=new T.Mesh();t.name='torso';const a=new T.Mesh();a.name='arm_l';\
+             const l=new T.Mesh();l.name='leg_r';}",
+        )
+        .unwrap();
+        assert_eq!(rig_failures(&studio, &project).len(), 1);
+
+        let mut stored = Settings::new();
+        stored.set(studio_server::assets::SETTING_RIG, false.into());
+        stored.save(&Settings::path_in(&studio)).unwrap();
+        assert!(
+            rig_failures(&studio, &project).is_empty(),
+            "assets.rig governs the gate as well as the generator"
+        );
+
+        let mut off = Settings::new();
+        off.set(studio_server::assets::SETTING_ENABLED, false.into());
+        off.save(&Settings::path_in(&studio)).unwrap();
+        assert!(rig_failures(&studio, &project).is_empty());
+    }
+
+    #[test]
+    fn a_project_with_no_three_js_model_path_is_never_gated() {
+        let base = std::env::temp_dir().join("studiod-assets-gate-2d");
+        let _ = std::fs::remove_dir_all(&base);
+        let studio = base.join(".studio");
+        let project = base.join("game");
+        std::fs::create_dir_all(&studio).unwrap();
+        std::fs::create_dir_all(project.join("src").join("models")).unwrap();
+        std::fs::write(project.join("main.py"), "print('hi')\n").unwrap();
+        std::fs::write(
+            project.join("src").join("models").join("hero.js"),
+            "const h={};h.name='head';const t={};t.name='torso';\
+             const a={};a.name='arm_l';const l={};l.name='leg_r';",
+        )
+        .unwrap();
+
+        assert!(
+            rig_failures(&studio, &project).is_empty(),
+            "a 2d or python game has nowhere to put a rig, so it must never be failed for one"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn the_gate_agrees_with_models_this_studio_really_generated() {
+        let Ok(list) = std::env::var("STUDIO_REAL_FACTORIES") else {
+            println!(
+                "set STUDIO_REAL_FACTORIES to <path>=<expect> pairs, comma separated, where \
+                 expect is rigged or static"
+            );
+            return;
+        };
+
+        let base = std::env::temp_dir().join("studiod-gate-real");
+        let _ = std::fs::remove_dir_all(&base);
+        let studio = base.join(".studio");
+        std::fs::create_dir_all(&studio).unwrap();
+
+        for (at, expect) in list.split(',').filter_map(|pair| pair.split_once('=')) {
+            let project = base.join(format!("game-{}", expect));
+            let models = project.join("src").join("models");
+            std::fs::create_dir_all(&models).unwrap();
+            std::fs::write(project.join("index.html"), "<html></html>").unwrap();
+
+            let profiles = studio_engine::EngineProfile::builtin();
+            let web = profiles.iter().find(|p| p.id == "web").unwrap();
+            studio_engine::install_helpers(web, &project).unwrap();
+
+            let name = Path::new(at).file_name().unwrap();
+            std::fs::copy(at, models.join(name)).unwrap();
+
+            let said = rig_failures(&studio, &project);
+            println!(
+                "{:8} {:24} {}",
+                expect,
+                name.to_string_lossy(),
+                if said.is_empty() {
+                    "passes the gate".to_string()
+                } else {
+                    said[0].message.clone()
+                }
+            );
+            match expect {
+                "rigged" => assert!(
+                    said.is_empty(),
+                    "a model this studio rigged must not be failed by its own gate: {said:?}"
+                ),
+                "static" => assert_eq!(said.len(), 1, "a static character has to be caught"),
+                "prop" => assert!(
+                    said.is_empty(),
+                    "a prop is not a character and must never be asked to walk: {said:?}"
+                ),
+                other => panic!("unknown expectation {other}"),
+            }
+            let _ = std::fs::remove_dir_all(&project);
+        }
     }
 
     #[test]
