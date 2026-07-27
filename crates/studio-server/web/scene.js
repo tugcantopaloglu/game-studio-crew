@@ -690,10 +690,27 @@ function buildExtraRoom(parent, room, floor, cx, cz, hole = null) {
   }
 }
 
+function loftExtent(floor, cx, cz) {
+  const on = [
+    ...(floor.rooms || []).filter((r) => (r.level || 0) === 1),
+    ...(floor.extras || []).filter((r) => (r.level || 0) === 1),
+  ];
+  if (!on.length) return null;
+  const pad = 2;
+  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  for (const r of on) {
+    x0 = Math.min(x0, r.x - pad); x1 = Math.max(x1, r.x + r.w + pad);
+    z0 = Math.min(z0, r.y - pad); z1 = Math.max(z1, r.y + r.h + pad);
+  }
+  return { x0: x0 - cx, x1: x1 - cx, z0: z0 - cz, z1: z1 - cz };
+}
+
 function buildUpperDeck(parent, floor, cx, cz) {
-  const mat = lambert(0x2a303c);
+  const mat = lambert(0x333b4a);
+  const span = loftExtent(floor, cx, cz);
   const w = floor.width + 4, h = floor.height + 4;
-  const x0 = -w / 2, x1 = w / 2, z0 = -h / 2, z1 = h / 2;
+  const x0 = span ? span.x0 : -w / 2, x1 = span ? span.x1 : w / 2;
+  const z0 = span ? span.z0 : -h / 2, z1 = span ? span.z1 : h / 2;
   const a = floor.atrium;
   const ax0 = a ? a.x - cx : 0, ax1 = a ? ax0 + a.w : 0;
   const az0 = a ? a.y - cz : 0, az1 = a ? az0 + a.h : 0;
@@ -827,14 +844,16 @@ export function buildOffice(floor, scene) {
     buildUpperDeck(levels[1], floor, cx, cz);
     if (floor.atrium) {
       buildAtriumRail(levels[1], floor.atrium, cx, cz);
+      const wx = floor.atrium.x - cx + floor.atrium.w / 2;
+      const wz = floor.atrium.y - cz + floor.atrium.h / 2;
       if (tier.roomLights) {
         const shaft = new THREE.PointLight(0xffe4bd, 42, 22, 1.5);
-        shaft.position.set(
-          floor.atrium.x - cx + floor.atrium.w / 2,
-          LEVEL_H - 0.7,
-          floor.atrium.y - cz + floor.atrium.h / 2
-        );
+        shaft.position.set(wx, LEVEL_H - 0.7, wz);
         well.add(shaft);
+
+        const loft = new THREE.PointLight(0xffe9c8, 48, 30, 1.5);
+        loft.position.set(wx, WALL_H + 0.4, wz);
+        levels[1].add(loft);
       }
     }
   }
