@@ -2,7 +2,10 @@ use rusqlite::Connection;
 
 pub const SCHEMA_VERSION: i64 = 3;
 
+pub const BUSY_TIMEOUT_MS: u32 = 5_000;
+
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS as u64))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;

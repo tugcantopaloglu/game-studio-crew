@@ -164,9 +164,15 @@ pub fn parse_nunit3(body: &str) -> ParsedReport {
     let mut in_message = false;
     let mut in_stack = false;
     let mut buf = Vec::new();
+    let mut depth: i64 = 0;
+    let mut undecided = 0usize;
 
     loop {
-        match reader.read_event_into(&mut buf) {
+        let event = reader.read_event_into(&mut buf);
+        if let Ok(Event::Start(_)) = event {
+            depth += 1;
+        }
+        match event {
             Err(e) => return ParsedReport::inconclusive(format!("malformed nunit3 xml: {e}")),
             Ok(Event::Eof) => break,
 
@@ -174,7 +180,11 @@ pub fn parse_nunit3(body: &str) -> ParsedReport {
                 b"test-run" => saw_run = true,
                 b"test-case" => {
                     cases += 1;
-                    if attr(e, "result").as_deref() == Some("Failed") {
+                    let result = attr(e, "result");
+                    if result.as_deref() == Some("Inconclusive") {
+                        undecided += 1;
+                    }
+                    if result.as_deref() == Some("Failed") {
                         let full = attr(e, "fullname").or_else(|| attr(e, "name")).unwrap_or_default();
                         current = Some(Failure {
                             id: full.clone(),
@@ -203,22 +213,30 @@ pub fn parse_nunit3(body: &str) -> ParsedReport {
                 }
             }
 
-            Ok(Event::End(ref e)) => match e.name().as_ref() {
-                b"message" => in_message = false,
-                b"stack-trace" => in_stack = false,
-                b"test-case" => {
-                    if let Some(f) = current.take() {
-                        failures.push(f);
+            Ok(Event::End(ref e)) => {
+                depth -= 1;
+                match e.name().as_ref() {
+                    b"message" => in_message = false,
+                    b"stack-trace" => in_stack = false,
+                    b"test-case" => {
+                        if let Some(f) = current.take() {
+                            failures.push(f);
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
 
             _ => {}
         }
         buf.clear();
     }
 
+    if depth != 0 {
+        return ParsedReport::inconclusive(
+            "nunit3 xml ended with unclosed elements; the report is truncated",
+        );
+    }
     if !saw_run {
         return ParsedReport::inconclusive("no test-run element; the editor produced no results");
     }
@@ -226,6 +244,11 @@ pub fn parse_nunit3(body: &str) -> ParsedReport {
         return ParsedReport::inconclusive(
             "the nunit3 report contains no test cases; the suite did not run",
         );
+    }
+    if failures.is_empty() && undecided > 0 {
+        return ParsedReport::inconclusive(format!(
+            "{undecided} test(s) came back Inconclusive; nunit did not decide, so neither can the gate"
+        ));
     }
     if failures.is_empty() {
         ParsedReport::pass()
@@ -316,7 +339,13 @@ pub fn parse_ue_automation(body: &str) -> ParsedReport {
         }
     }
 
-    if !recognised_state && !tests.is_empty() {
+    if tests.is_empty() {
+        return ParsedReport::inconclusive(
+            "automation json carried no tests; an empty suite is not evidence that anything passed",
+        );
+    }
+
+    if !recognised_state {
         return ParsedReport::inconclusive(
             "automation json listed tests but no recognisable state field; refusing to guess a pass",
         );
@@ -394,6 +423,15 @@ pub fn parse_unity_buildreport(body: &str) -> ParsedReport {
 }
 
 pub fn scan_log(exit_code: Option<i32>, log: &str, kind: FailureKind) -> ParsedReport {
+    scan_log_expecting(exit_code, log, kind, false)
+}
+
+pub fn scan_log_expecting(
+    exit_code: Option<i32>,
+    log: &str,
+    kind: FailureKind,
+    helper_speaks: bool,
+) -> ParsedReport {
     if let Some(reason) = crate::looks_like_infrastructure(log) {
         return ParsedReport::inconclusive(reason);
     }
@@ -455,6 +493,13 @@ pub fn scan_log(exit_code: Option<i32>, log: &str, kind: FailureKind) -> ParsedR
 
     if saw_helper_summary && failures.is_empty() && exit_code == Some(0) {
         return ParsedReport::pass();
+    }
+
+    if helper_speaks && !saw_helper_summary && failures.is_empty() {
+        return ParsedReport::inconclusive(
+            "the studio's own check never printed its summary line, so the run proved nothing; \
+             an exit code alone is not evidence that the project is sound",
+        );
     }
 
     match (exit_code, failures.is_empty()) {
@@ -542,6 +587,39 @@ mod tests {
             let r = parse_report(format, "");
             assert_eq!(r.verdict, Verdict::Inconclusive, "format {format}");
         }
+    }
+
+    #[test]
+    fn an_automation_report_listing_no_tests_at_all_is_not_a_pass() {
+        let r = parse_ue_automation(r#"{"tests":[]}"#);
+        assert_eq!(
+            r.verdict,
+            Verdict::Inconclusive,
+            "an empty suite is absence of evidence, and junit and nunit both already refuse it"
+        );
+    }
+
+    #[test]
+    fn an_nunit_report_cut_off_mid_document_is_not_a_pass() {
+        let whole = r#"<test-run><test-suite><test-case name="a" result="Passed" /></test-suite></test-run>"#;
+        assert_eq!(parse_nunit3(whole).verdict, Verdict::Pass);
+
+        let torn = r#"<test-run><test-suite><test-case name="a" result="Passed" />"#;
+        assert_eq!(
+            parse_nunit3(torn).verdict,
+            Verdict::Inconclusive,
+            "a report truncated before its failing cases must not read as a green run"
+        );
+    }
+
+    #[test]
+    fn a_suite_nunit_could_not_decide_is_not_reported_as_green() {
+        let body = r#"<test-run><test-suite><test-case name="a" result="Inconclusive" /></test-suite></test-run>"#;
+        assert_eq!(
+            parse_nunit3(body).verdict,
+            Verdict::Inconclusive,
+            "nunit's Inconclusive means it did not decide; the gate cannot decide either"
+        );
     }
 
     #[test]
@@ -742,15 +820,56 @@ mod helper_tests {
 
     #[test]
     fn a_helper_run_that_never_printed_its_summary_is_not_a_pass() {
-        let r = scan_log(Some(0), "Godot Engine v4.7.1\n", FailureKind::Compile);
+        let r = scan_log_expecting(
+            Some(0),
+            "Godot Engine v4.7.1\n",
+            FailureKind::Compile,
+            true,
+        );
         assert_eq!(
             r.verdict,
-            Verdict::Pass,
-            "a plain exit-zero with no helper output still falls back to the generic rule"
+            Verdict::Inconclusive,
+            "the helper is the only thing that actually checked anything; if it did not speak, \
+             exiting zero proves nothing and a rewritten helper could pass every gate"
         );
+    }
+
+    #[test]
+    fn a_command_that_never_had_a_helper_still_falls_back_to_the_exit_code() {
+        let r = scan_log(Some(0), "Godot Engine v4.7.1\n", FailureKind::Compile);
+        assert_eq!(r.verdict, Verdict::Pass);
 
         let killed = scan_log(None, "STUDIO_CI_FAIL: res://a.gd: boom\n", FailureKind::Compile);
         assert_eq!(killed.verdict, Verdict::Inconclusive);
+    }
+
+    #[test]
+    fn a_silenced_helper_that_only_exits_zero_does_not_pass_the_gate() {
+        let r = scan_log_expecting(Some(0), "", FailureKind::Compile, true);
+        assert_eq!(
+            r.verdict,
+            Verdict::Inconclusive,
+            "the party being judged can write the helper; silence plus exit zero must not be a pass"
+        );
+    }
+
+    #[test]
+    fn a_compile_error_in_a_file_named_after_licensing_is_repairable_not_infrastructure() {
+        let log = "res://systems/licensing.gd:12 - Parse Error: unexpected token\n";
+        let r = scan_log(Some(1), log, FailureKind::Compile);
+        assert_eq!(
+            r.verdict,
+            Verdict::Fail,
+            "an unanchored substring match turns a repairable compile error into a terminal \
+             infrastructure halt with no queue to receive it"
+        );
+        assert_eq!(r.failures.len(), 1);
+    }
+
+    #[test]
+    fn a_real_licence_problem_is_still_routed_away_from_the_crew() {
+        let r = scan_log(Some(1), "Error: Licensing subsystem failed to start", FailureKind::Test);
+        assert_eq!(r.verdict, Verdict::Inconclusive);
     }
 
     #[test]

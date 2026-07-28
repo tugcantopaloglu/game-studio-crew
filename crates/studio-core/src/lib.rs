@@ -186,6 +186,7 @@ impl Worker {
         let mut stalled = false;
         let mut stopped = false;
         let mut last_line = Instant::now();
+        let mut tools_open: usize = 0;
 
         loop {
             if limits.stopping() {
@@ -197,7 +198,7 @@ impl Worker {
                 timed_out = true;
                 break;
             }
-            if last_line.elapsed() >= limits.stall_timeout {
+            if tools_open == 0 && last_line.elapsed() >= limits.stall_timeout {
                 stalled = true;
                 break;
             }
@@ -206,6 +207,13 @@ impl Worker {
                 Ok(line) => {
                     last_line = Instant::now();
                     if let Some(ev) = stream::parse_line(&line) {
+                        match ev {
+                            stream::CliEvent::ToolCall { .. } => tools_open += 1,
+                            stream::CliEvent::ToolResult { .. } => {
+                                tools_open = tools_open.saturating_sub(1)
+                            }
+                            _ => {}
+                        }
                         state.apply(&ev);
                         on_event(&ev);
                     }
@@ -244,18 +252,16 @@ impl Worker {
                 .collect(),
         };
 
-        let outcome = if stopped {
+        let outcome = if state.saw_result && !state.is_error && !stopped {
+            Outcome::Completed
+        } else if stopped {
             Outcome::Killed
         } else if timed_out {
             Outcome::TimedOut
         } else if stalled {
             Outcome::Stalled
-        } else if !state.saw_result {
-            Outcome::Crashed
-        } else if state.is_error {
-            Outcome::Crashed
         } else {
-            Outcome::Completed
+            Outcome::Crashed
         };
 
         Ok(WorkerReport {
@@ -382,6 +388,54 @@ mod tests {
             matches!(report.outcome, Outcome::Stalled | Outcome::Crashed),
             "a silent worker must not hold its slot forever, got {:?}",
             report.outcome
+        );
+    }
+
+    #[test]
+    fn a_worker_that_answered_is_not_called_stalled_because_a_child_holds_the_pipe() {
+        let script = r#"
+            const line = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+            line({type:"system",subtype:"init",session_id:"s"});
+            line({type:"result",subtype:"success",is_error:false,total_cost_usd:0.5,usage:{input_tokens:10,output_tokens:20,cache_read_input_tokens:0,cache_creation_input_tokens:0}});
+            setTimeout(() => {}, 60000);
+        "#;
+        let limits = WorkerLimits {
+            stall_timeout: Duration::from_millis(200),
+            wall_clock: Duration::from_secs(30),
+            stop_asked: None,
+        };
+        let w = Worker::spawn("node", &node_emitting(script), "").unwrap();
+        let report = w.drive(&limits, |_| {}).unwrap();
+        assert_eq!(
+            report.outcome,
+            Outcome::Completed,
+            "the terminal result settles the outcome; a held-open stdout pipe is not a stall"
+        );
+        assert!(report.state.saw_result);
+    }
+
+    #[test]
+    fn a_long_tool_call_does_not_trip_the_stall_watchdog() {
+        let script = r#"
+            const line = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+            line({type:"system",subtype:"init",session_id:"s"});
+            line({type:"stream_event",event:{type:"content_block_start",content_block:{type:"tool_use",name:"Bash",input:{}}}});
+            setTimeout(() => {
+              line({type:"user",message:{content:[{type:"tool_result",tool_use_id:"t1",content:"done"}]}});
+              line({type:"result",subtype:"success",is_error:false,total_cost_usd:0,usage:{}});
+            }, 600);
+        "#;
+        let limits = WorkerLimits {
+            stall_timeout: Duration::from_millis(200),
+            wall_clock: Duration::from_secs(30),
+            stop_asked: None,
+        };
+        let w = Worker::spawn("node", &node_emitting(script), "").unwrap();
+        let report = w.drive(&limits, |_| {}).unwrap();
+        assert_eq!(
+            report.outcome,
+            Outcome::Completed,
+            "the engine commands the daemon itself briefs take longer than the stall budget"
         );
     }
 

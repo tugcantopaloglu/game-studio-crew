@@ -219,6 +219,9 @@ pub fn find_binary(profile: &EngineProfile) -> Option<BinaryFound> {
         if let Some(path) = usable(&from_env) {
             return Some(BinaryFound { path, how: "from the environment" });
         }
+        if let Some(path) = inside_an_engine_root(&PathBuf::from(&from_env), profile) {
+            return Some(BinaryFound { path, how: "under the engine root in the environment" });
+        }
     }
     for name in &profile.tooling.binary_names {
         if let Some(path) = which(name) {
@@ -279,6 +282,28 @@ fn as_this_os_writes_it(path: &str) -> String {
     } else {
         path.to_string()
     }
+}
+
+fn inside_an_engine_root(root: &Path, profile: &EngineProfile) -> Option<PathBuf> {
+    if !root.is_dir() {
+        return None;
+    }
+    let platform = if cfg!(windows) {
+        "Win64"
+    } else if cfg!(target_os = "macos") {
+        "Mac"
+    } else {
+        "Linux"
+    };
+    let binaries = root.join("Engine").join("Binaries").join(platform);
+    for name in &profile.tooling.binary_names {
+        for candidate in [binaries.join(name), binaries.join(format!("{name}.exe"))] {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 fn usable(named: &str) -> Option<PathBuf> {
@@ -923,74 +948,76 @@ fn write_if_changed(path: &Path, content: &str) -> Result<bool> {
     Ok(needs_write)
 }
 
-pub fn install_helpers(profile: &EngineProfile, project: &Path) -> Result<Vec<PathBuf>> {
-    let mut installed = Vec::new();
+pub fn shipped_helpers(profile: &EngineProfile, project: &Path) -> Vec<(PathBuf, &'static str)> {
+    let mut shipped: Vec<(PathBuf, &'static str)> = Vec::new();
+    let tools = project.join("tools");
+
     if profile.id == "godot" {
-        let dir = project.join("addons").join("studio");
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join("studio_ci.gd");
-        write_if_changed(&path, GODOT_CI_HELPER)?;
-        installed.push(path);
+        shipped.push((
+            project.join("addons").join("studio").join("studio_ci.gd"),
+            GODOT_CI_HELPER,
+        ));
     }
     if profile.id == "web" {
-        let dir = project.join("tools");
-        std::fs::create_dir_all(&dir)?;
         for (name, content) in [
             ("studio_ci.mjs", WEB_CI_HELPER),
             ("serve.mjs", WEB_SERVE_HELPER),
             ("runtime_probe.mjs", WEB_RUNTIME_PROBE),
             ("screenshot.mjs", WEB_SCREENSHOT_HELPER),
         ] {
-            let path = dir.join(name);
-            write_if_changed(&path, content)?;
-            installed.push(path);
+            shipped.push((tools.join(name), content));
         }
-        let vendor = project.join("vendor");
-        std::fs::create_dir_all(&vendor)?;
-        let sfx = vendor.join("sfx.js");
-        write_if_changed(&sfx, WEB_SFX_LIB)?;
-        installed.push(sfx);
+        shipped.push((project.join("vendor").join("sfx.js"), WEB_SFX_LIB));
     }
     if profile.id == "python" {
-        let dir = project.join("tools");
-        std::fs::create_dir_all(&dir)?;
-        let probe = dir.join("runtime_probe.py");
-        write_if_changed(&probe, PYTHON_RUNTIME_PROBE)?;
-        installed.push(probe);
+        shipped.push((tools.join("runtime_probe.py"), PYTHON_RUNTIME_PROBE));
     }
     if matches!(profile.id.as_str(), "godot" | "unity" | "ue5" | "web") {
-        let vendor = project.join("tools").join("vendor");
-        std::fs::create_dir_all(&vendor)?;
-        let export = project.join("tools").join("model_export.mjs");
-        write_if_changed(&export, MODEL_EXPORT_HELPER)?;
-        installed.push(export);
-        let three = vendor.join("three.module.js");
-        write_if_changed(&three, WEB_VENDOR_THREE)?;
-        installed.push(three);
-        let exporter = vendor.join("GLTFExporter.js");
-        write_if_changed(&exporter, GLTF_EXPORTER_HELPER)?;
-        installed.push(exporter);
-
+        let vendor = tools.join("vendor");
+        shipped.push((tools.join("model_export.mjs"), MODEL_EXPORT_HELPER));
+        shipped.push((vendor.join("three.module.js"), WEB_VENDOR_THREE));
+        shipped.push((vendor.join("GLTFExporter.js"), GLTF_EXPORTER_HELPER));
         for (name, content) in [
             ("FBXLoader.js", FBX_LOADER_HELPER),
             ("fflate.module.js", FFLATE_HELPER),
             ("NURBSCurve.js", NURBS_CURVE_HELPER),
             ("NURBSUtils.js", NURBS_UTILS_HELPER),
         ] {
-            let path = vendor.join(name);
-            write_if_changed(&path, content)?;
-            installed.push(path);
+            shipped.push((vendor.join(name), content));
         }
         for (name, content) in [
             ("retarget.mjs", RETARGET_HELPER),
             ("mixamo_import.mjs", MIXAMO_IMPORT_HELPER),
         ] {
-            let path = project.join("tools").join(name);
-            write_if_changed(&path, content)?;
-            installed.push(path);
+            shipped.push((tools.join(name), content));
         }
     }
+    shipped
+}
+
+pub fn install_helpers(profile: &EngineProfile, project: &Path) -> Result<Vec<PathBuf>> {
+    let mut installed = Vec::new();
+    for (path, content) in shipped_helpers(profile, project) {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        write_if_changed(&path, content)?;
+        installed.push(path);
+    }
     Ok(installed)
+}
+
+pub fn restore_helpers(profile: &EngineProfile, project: &Path) -> Result<Vec<PathBuf>> {
+    let mut rewritten = Vec::new();
+    for (path, content) in shipped_helpers(profile, project) {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        if write_if_changed(&path, content)? {
+            rewritten.push(path);
+        }
+    }
+    Ok(rewritten)
 }
 
 #[cfg(test)]
@@ -1032,6 +1059,31 @@ mod bootstrap_tests {
         std::fs::write(&path, "extends SceneTree\nfunc _init(): quit(0)\n").unwrap();
         install_helpers(&godot, dir.path()).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), GODOT_CI_HELPER);
+    }
+
+    #[test]
+    fn restoring_names_the_helper_that_had_been_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let godot = EngineProfile::parse(GODOT_PROFILE).unwrap();
+        install_helpers(&godot, dir.path()).unwrap();
+
+        assert!(
+            restore_helpers(&godot, dir.path()).unwrap().is_empty(),
+            "an untouched project must not look tampered with"
+        );
+
+        let helper = dir.path().join("addons/studio/studio_ci.gd");
+        std::fs::write(&helper, "extends SceneTree\nfunc _init(): quit(0)\n").unwrap();
+
+        let rewritten = restore_helpers(&godot, dir.path()).unwrap();
+        assert_eq!(
+            rewritten.len(),
+            1,
+            "the gate runs a script the work under test can write; a silent restore lets a \
+             forged pass through unnoticed"
+        );
+        assert!(rewritten[0].ends_with("studio_ci.gd"));
+        assert_eq!(std::fs::read_to_string(&helper).unwrap(), GODOT_CI_HELPER);
     }
 
     #[test]

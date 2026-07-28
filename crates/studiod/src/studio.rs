@@ -5,7 +5,7 @@ use studio_agents::{nearest_common_ancestor, role};
 use studio_events::{EventType, Scene};
 use studio_server::{
     AppState, BuildRequest, MeetingRequest, PlanVerdict, ResumeRequest, StudioCommand,
-    TaskRequest, WorkflowRequest,
+    TaskRequest, Waited, WorkflowRequest,
 };
 use studio_store::Store;
 
@@ -59,6 +59,9 @@ impl ProjectIndex {
 }
 
 pub fn run_command(em: &Emitter, cmd: StudioCommand, seq: &mut usize) -> Result<()> {
+    em.state.take_interrupts();
+    em.state.nothing_is_being_stopped();
+
     match cmd {
         StudioCommand::Task(t) => run_task(em, t, seq),
         StudioCommand::Meeting(m) => run_meeting(em, m, seq),
@@ -252,38 +255,41 @@ fn propose(
     }
 
     let rx = em.state.await_plan(&plan_id);
-    em.emit(
-        "daemon",
-        EventType::PlanProposed,
-        Scene::daemon(),
-        plan_data(&plan_id, &plan, true),
-    )?;
+    let proposal = plan_data(&plan_id, &plan, true);
+    em.emit("daemon", EventType::PlanProposed, Scene::daemon(), proposal.clone())?;
     println!("  plan {plan_id} is on the floor; nothing runs until you start it");
 
-    match rx.recv() {
-        Ok(PlanVerdict::Start { steps }) if steps.is_empty() => Ok(Some(plan)),
-        Ok(PlanVerdict::Start { steps }) => {
+    let announce = || {
+        let _ = em.emit("daemon", EventType::PlanProposed, Scene::daemon(), proposal.clone());
+    };
+
+    let dropped = |reason: &str| -> Result<Option<studio_workflow::Plan>> {
+        println!("  plan {plan_id} dropped before any worker was paid for");
+        em.emit(
+            "daemon",
+            EventType::RunInterrupted,
+            Scene::daemon(),
+            serde_json::json!({
+                "reason": reason,
+                "note": null,
+                "step": null,
+            }),
+        )?;
+        Ok(None)
+    };
+
+    match em.state.wait_for(&rx, announce) {
+        Waited::Answered(PlanVerdict::Start { steps }) if steps.is_empty() => Ok(Some(plan)),
+        Waited::Answered(PlanVerdict::Start { steps }) => {
             let revised = plan
                 .revise(&steps)
                 .map_err(|e| anyhow::anyhow!("the plan you edited will not run: {e}"))?;
             println!("  starting the plan you edited: {} step(s)", revised.tasks.len());
             Ok(Some(revised))
         }
-        Ok(PlanVerdict::Cancel) => {
-            println!("  plan {plan_id} dropped before any worker was paid for");
-            em.emit(
-                "daemon",
-                EventType::RunInterrupted,
-                Scene::daemon(),
-                serde_json::json!({
-                    "reason": "plan dropped",
-                    "note": null,
-                    "step": null,
-                }),
-            )?;
-            Ok(None)
-        }
-        Err(_) => anyhow::bail!("the floor went away while the plan waited to start"),
+        Waited::Answered(PlanVerdict::Cancel) => dropped("plan dropped"),
+        Waited::Stopped => dropped("you stopped the studio while the plan waited to start"),
+        Waited::Gone => anyhow::bail!("the floor went away while the plan waited to start"),
     }
 }
 
@@ -321,6 +327,37 @@ fn engine_for(project: Option<&std::path::Path>) -> Option<studio_engine::Engine
     }
 }
 
+fn last_wave_node(wf: &studio_workflow::Workflow) -> Option<String> {
+    let mut depth: std::collections::BTreeMap<&str, usize> =
+        wf.nodes.iter().map(|n| (n.id.as_str(), 0)).collect();
+
+    for _ in 0..wf.nodes.len() {
+        let mut moved = false;
+        for e in &wf.edges {
+            let from = depth.get(e.from.as_str()).copied().unwrap_or(0);
+            if let Some(to) = depth.get_mut(e.to.as_str()) {
+                if *to < from + 1 {
+                    *to = from + 1;
+                    moved = true;
+                }
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+
+    let feeds_someone: std::collections::BTreeSet<&str> =
+        wf.edges.iter().map(|e| e.from.as_str()).collect();
+
+    wf.nodes
+        .iter()
+        .map(|n| n.id.as_str())
+        .filter(|id| !feeds_someone.contains(id))
+        .max_by_key(|id| depth.get(id).copied().unwrap_or(0))
+        .map(str::to_string)
+}
+
 fn verify_gate(
     profile: &studio_engine::EngineProfile,
     wf: &studio_workflow::Workflow,
@@ -330,19 +367,7 @@ fn verify_gate(
         return None;
     }
 
-    let feeds_someone: std::collections::BTreeSet<&str> =
-        wf.edges.iter().map(|e| e.from.as_str()).collect();
-    let mut leaves = wf
-        .nodes
-        .iter()
-        .map(|n| n.id.as_str())
-        .filter(|id| !feeds_someone.contains(id));
-
-    let after = match (leaves.next(), leaves.next()) {
-        (Some(only), None) => only.to_string(),
-        (Some(_), Some(_)) => wf.nodes.last()?.id.clone(),
-        _ => return None,
-    };
+    let after = last_wave_node(wf)?;
 
     Some(studio_workflow::Gate {
         after,
@@ -379,7 +404,9 @@ fn run_task(em: &Emitter, req: TaskRequest, seq: &mut usize) -> Result<()> {
         _ => req.brief.clone(),
     };
 
-    crate::m4::run_worker_metered(em, r, &brief, *seq, hands_on).map(|_| ())
+    crate::m4::run_worker_metered(em, r, &brief, *seq, hands_on, None)
+        .map(|_| ())
+        .map_err(|e| e.error)
 }
 
 struct Position {
@@ -405,8 +432,12 @@ impl MeetingSpend {
     }
 
     fn record(&mut self, m: &crate::m4::Metered) {
-        self.billed += m.billed_tokens;
-        self.usd += m.cost_usd;
+        self.charge(m.billed_tokens, m.cost_usd);
+    }
+
+    fn charge(&mut self, billed_tokens: u64, cost_usd: f64) {
+        self.billed += billed_tokens;
+        self.usd += cost_usd;
     }
 
     fn approved(&mut self, em: &Emitter, meeting_id: &str, speaker: &str) -> Result<(), String> {
@@ -693,9 +724,10 @@ fn run_meeting(em: &Emitter, req: MeetingRequest, seq: &mut usize) -> Result<()>
         )?;
 
         let brief = position_brief(&req, &floor);
-        let m = match crate::m4::run_worker_metered_uncommitted(em, r, &brief, *seq, false) {
+        let m = match crate::m4::run_worker_metered_uncommitted(em, r, &brief, *seq, false, None) {
             Ok(m) => m,
             Err(e) => {
+                spend.charge(e.spend.billed_tokens, e.spend.cost_usd);
                 println!("  {} did not speak: {e}", r.id);
                 continue;
             }
@@ -1399,10 +1431,64 @@ mod meeting_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::chair_for;
+    use super::{chair_for, last_wave_node};
 
     fn v(ids: &[&str]) -> Vec<String> {
         ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn wf_of(nodes: &[&str], edges: &[(&str, &str)]) -> studio_workflow::Workflow {
+        studio_workflow::Workflow {
+            schema_version: 1,
+            id: "t".into(),
+            title: "T".into(),
+            nodes: nodes
+                .iter()
+                .map(|id| studio_workflow::Node {
+                    id: (*id).into(),
+                    role: "gameplay_engineer".into(),
+                    inputs: Vec::new(),
+                    budget_tokens: 1,
+                    optional: false,
+                })
+                .collect(),
+            edges: edges
+                .iter()
+                .map(|(from, to)| studio_workflow::Edge {
+                    from: (*from).into(),
+                    to: (*to).into(),
+                    carries: "task_return".into(),
+                })
+                .collect(),
+            gates: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_gate_lands_on_the_node_that_finishes_last_not_the_one_declared_last() {
+        let wf = wf_of(
+            &["t1", "t2", "t3", "t8"],
+            &[("t1", "t2"), ("t2", "t3"), ("t1", "t8")],
+        );
+        assert_eq!(
+            last_wave_node(&wf).as_deref(),
+            Some("t3"),
+            "t8 is declared last but runs in wave 2 of 3; verifying there compiles a half-written \
+             project and burns repair workers on code later waves were going to write"
+        );
+    }
+
+    #[test]
+    fn a_single_leaf_still_takes_the_gate() {
+        let wf = wf_of(&["t1", "t2"], &[("t1", "t2")]);
+        assert_eq!(last_wave_node(&wf).as_deref(), Some("t2"));
+    }
+
+    #[test]
+    fn a_flat_plan_with_no_edges_gates_after_a_node_in_its_only_wave() {
+        let wf = wf_of(&["t1", "t2", "t3"], &[]);
+        let picked = last_wave_node(&wf).expect("a flat plan still has a final wave");
+        assert!(["t1", "t2", "t3"].contains(&picked.as_str()));
     }
 
     #[test]

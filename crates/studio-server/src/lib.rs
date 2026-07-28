@@ -128,6 +128,15 @@ pub type PlanGates = Arc<std::sync::Mutex<HashMap<String, std::sync::mpsc::Sende
 pub type StepGates = Arc<std::sync::Mutex<HashMap<String, std::sync::mpsc::Sender<StepVerdict>>>>;
 pub type Interrupts = Arc<std::sync::Mutex<Vec<Interrupt>>>;
 
+const REMIND_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Debug, PartialEq)]
+pub enum Waited<T> {
+    Answered(T),
+    Stopped,
+    Gone,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<Store>,
@@ -234,6 +243,27 @@ impl AppState {
         self.stopping.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
+    pub fn wait_for<T>(&self, rx: &std::sync::mpsc::Receiver<T>, mut remind: impl FnMut()) -> Waited<T> {
+        let tick = std::time::Duration::from_millis(250);
+        let mut waited = std::time::Duration::ZERO;
+        loop {
+            match rx.recv_timeout(tick) {
+                Ok(answer) => return Waited::Answered(answer),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Waited::Gone,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if self.stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Waited::Stopped;
+                    }
+                    waited += tick;
+                    if waited >= REMIND_EVERY {
+                        waited = std::time::Duration::ZERO;
+                        remind();
+                    }
+                }
+            }
+        }
+    }
+
     pub fn take_interrupts(&self) -> Vec<Interrupt> {
         match self.interrupts.lock() {
             Ok(mut queued) => std::mem::take(&mut *queued),
@@ -293,6 +323,15 @@ fn origin_is_local(origin: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1")
 }
 
+fn host_is_local(host: &str) -> bool {
+    let host = host.trim();
+    let bare = match host.rsplit_once(':') {
+        Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => host,
+    };
+    matches!(bare, "localhost" | "127.0.0.1" | "[::1]" | "::1")
+}
+
 fn changes_something(method: &axum::http::Method) -> bool {
     !matches!(
         *method,
@@ -304,6 +343,12 @@ async fn guard_origin(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<Response, StatusCode> {
+    if let Some(host) = req.headers().get(header::HOST) {
+        if !host.to_str().map(host_is_local).unwrap_or(false) {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+
     match req.headers().get(header::ORIGIN) {
         Some(origin) => {
             if !origin.to_str().map(origin_is_local).unwrap_or(false) {
@@ -1431,6 +1476,22 @@ mod tests {
     #[tokio::test]
     async fn a_plain_client_with_no_browser_headers_is_still_served() {
         assert_ne!(post_with_origin(None).await, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn only_local_hosts_are_served() {
+        assert!(host_is_local("127.0.0.1:7878"));
+        assert!(host_is_local("localhost:7878"));
+        assert!(host_is_local("localhost"));
+        assert!(host_is_local("[::1]:7878"));
+
+        assert!(
+            !host_is_local("studio.evil.test:7878"),
+            "a rebound name resolving to 127.0.0.1 still carries its own Host, and the Origin \
+             check cannot see it because browsers omit Origin on same-origin GETs"
+        );
+        assert!(!host_is_local("127.0.0.1.evil.test"));
+        assert!(!host_is_local("evil.test"));
     }
 
     #[test]

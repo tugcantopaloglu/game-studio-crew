@@ -49,7 +49,11 @@ pub trait ParallelWorkflowHost: Sync {
     fn nothing_further_can_run(&self, _failure: &str) -> Option<String> {
         None
     }
+    fn cold_prefix_of(&self, _node: &Node) -> Option<String> {
+        None
+    }
     fn wave_done(&self, _completed: &[&Node]) {}
+    fn wave_committed(&self, _completed: &[&Node]) {}
     fn before_wave(&self, _ready: &[&Node]) -> WaveVerdict {
         WaveVerdict::Continue
     }
@@ -185,6 +189,29 @@ fn enter_without_unwinding<H: ParallelWorkflowHost>(
     }
 }
 
+fn split_cold_prefixes<H: ParallelWorkflowHost>(
+    host: &H,
+    wave: &[(&Node, Vec<String>)],
+) -> (Vec<usize>, Vec<usize>) {
+    let mut leading: BTreeSet<String> = BTreeSet::new();
+    let mut leaders = Vec::new();
+    let mut followers = Vec::new();
+
+    for (at, (node, _)) in wave.iter().enumerate() {
+        let trails = match host.cold_prefix_of(node) {
+            Some(prefix) => !leading.insert(prefix),
+            None => false,
+        };
+        if trails {
+            followers.push(at);
+        } else {
+            leaders.push(at);
+        }
+    }
+
+    (leaders, followers)
+}
+
 pub fn execute_parallel<H: ParallelWorkflowHost>(
     wf: &Workflow,
     host: &H,
@@ -271,34 +298,39 @@ pub fn execute_parallel<H: ParallelWorkflowHost>(
 
         let mut outcomes: Vec<(&Node, NodeOutcome)> = Vec::new();
         let mut halted: Option<(String, String)> = None;
-        for chunk in wave.chunks(width) {
-            let batch = std::thread::scope(|scope| {
-                let handles: Vec<_> = chunk
-                    .iter()
-                    .map(|(node, inputs)| {
-                        (*node, scope.spawn(move || enter_without_unwinding(host, node, inputs)))
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|(node, h)| {
-                        let outcome = h.join().unwrap_or_else(|panic| NodeOutcome::Failed {
-                            reason: what_it_said(panic),
-                        });
-                        (node, outcome)
-                    })
-                    .collect::<Vec<_>>()
-            });
-            outcomes.extend(batch);
+        let (leaders, followers) = split_cold_prefixes(host, &wave);
 
-            halted = outcomes.iter().find_map(|(node, outcome)| match outcome {
-                NodeOutcome::Failed { reason } => host
-                    .nothing_further_can_run(reason)
-                    .map(|why| (node.id.clone(), why)),
-                _ => None,
-            });
-            if halted.is_some() {
-                break;
+        'phases: for phase in [leaders, followers] {
+            for chunk in phase.chunks(width) {
+                let batch = std::thread::scope(|scope| {
+                    let handles: Vec<_> = chunk
+                        .iter()
+                        .map(|at| {
+                            let (node, inputs) = &wave[*at];
+                            (*node, scope.spawn(move || enter_without_unwinding(host, node, inputs)))
+                        })
+                        .collect();
+                    handles
+                        .into_iter()
+                        .map(|(node, h)| {
+                            let outcome = h.join().unwrap_or_else(|panic| NodeOutcome::Failed {
+                                reason: what_it_said(panic),
+                            });
+                            (node, outcome)
+                        })
+                        .collect::<Vec<_>>()
+                });
+                outcomes.extend(batch);
+
+                halted = outcomes.iter().find_map(|(node, outcome)| match outcome {
+                    NodeOutcome::Failed { reason } => host
+                        .nothing_further_can_run(reason)
+                        .map(|why| (node.id.clone(), why)),
+                    _ => None,
+                });
+                if halted.is_some() {
+                    break 'phases;
+                }
             }
         }
 
@@ -350,7 +382,7 @@ pub fn execute_parallel<H: ParallelWorkflowHost>(
         }
 
         match host.after_wave(&completed) {
-            WaveVerdict::Continue => {}
+            WaveVerdict::Continue => host.wave_committed(&completed),
             WaveVerdict::Stop { reason } => {
                 stop = Some(RunOutcome::Interrupted {
                     node: completed[0].id.clone(),
@@ -731,6 +763,7 @@ mod tests {
             briefs: Mutex<Vec<String>>,
             out_of_allowance_at: Option<String>,
             panic_at: Option<String>,
+            committed: Mutex<Vec<String>>,
         }
 
         impl ParallelWorkflowHost for ParHost {
@@ -790,6 +823,13 @@ mod tests {
                 WaveVerdict::Redo
             }
 
+            fn wave_committed(&self, completed: &[&Node]) {
+                self.committed
+                    .lock()
+                    .unwrap()
+                    .extend(completed.iter().map(|n| n.id.clone()));
+            }
+
             fn gate(&self, _gate: &Gate, _node: &Node) -> GateOutcome {
                 GateOutcome::Pass
             }
@@ -840,6 +880,78 @@ mod tests {
                 ],
                 gates: Vec::new(),
             }
+        }
+
+        #[derive(Default)]
+        struct CacheHost {
+            cold: Mutex<BTreeSet<String>>,
+            live: AtomicUsize,
+            cold_together: AtomicUsize,
+        }
+
+        impl ParallelWorkflowHost for CacheHost {
+            fn admit(&self, _node: &Node) -> Admission {
+                Admission::Admit
+            }
+
+            fn cold_prefix_of(&self, node: &Node) -> Option<String> {
+                if self.cold.lock().unwrap().contains(&node.role) {
+                    Some(node.role.clone())
+                } else {
+                    None
+                }
+            }
+
+            fn enter(&self, node: &Node, _inputs: &[String]) -> NodeOutcome {
+                let cold = self.cold.lock().unwrap().contains(&node.role);
+                if cold {
+                    let now = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+                    self.cold_together.fetch_max(now, Ordering::SeqCst);
+                }
+                std::thread::sleep(Duration::from_millis(25));
+                if cold {
+                    self.cold.lock().unwrap().remove(&node.role);
+                    self.live.fetch_sub(1, Ordering::SeqCst);
+                }
+                NodeOutcome::Completed { capsule: format!("cap_{}", node.id) }
+            }
+
+            fn gate(&self, _gate: &Gate, _node: &Node) -> GateOutcome {
+                GateOutcome::Pass
+            }
+
+            fn repair(&self, _node: &Node, _gate: &Gate, _round: u32) -> GateOutcome {
+                GateOutcome::Pass
+            }
+        }
+
+        #[test]
+        fn one_worker_warms_a_cold_prefix_before_its_siblings_pay_for_it_again() {
+            let wf = diamond();
+            let h = CacheHost::default();
+            h.cold.lock().unwrap().insert("gameplay_engineer".to_string());
+
+            let r = execute_parallel(&wf, &h, &BTreeSet::new(), 4).unwrap();
+
+            assert_eq!(r.outcome, Some(RunOutcome::Completed));
+            assert_eq!(
+                h.cold_together.load(Ordering::SeqCst),
+                1,
+                "parallel cold spawns of one prefix each pay the cache write premium; doc 02 \
+                 says one worker goes first and the rest follow warm"
+            );
+        }
+
+        #[test]
+        fn a_warm_prefix_does_not_serialize_the_wave() {
+            let wf = diamond();
+            let h = ParHost::default();
+            let r = execute_parallel(&wf, &h, &BTreeSet::new(), 4).unwrap();
+            assert_eq!(r.outcome, Some(RunOutcome::Completed));
+            assert!(
+                h.peak.load(Ordering::SeqCst) >= 2,
+                "staggering must only hold back duplicate cold prefixes, never warm ones"
+            );
         }
 
         #[test]
@@ -1126,6 +1238,20 @@ mod tests {
                 let at = entered.iter().position(|id| id == later).unwrap();
                 assert!(at > second_t1, "{later} ran before the redo of t1 finished");
             }
+        }
+
+        #[test]
+        fn a_wave_the_human_sent_back_is_not_recorded_as_done() {
+            let wf = diamond();
+            let h = ParHost { redo_after: Some("t1".into()), ..Default::default() };
+            execute_parallel(&wf, &h, &BTreeSet::new(), 4).unwrap();
+
+            let committed = h.committed.lock().unwrap();
+            assert_eq!(
+                committed.iter().filter(|id| *id == "t1").count(),
+                1,
+                "progress recorded before the verdict resumes a rejected step as finished work"
+            );
         }
 
         #[test]

@@ -238,8 +238,8 @@ impl Enforcer {
         let after = (b.spent + need) as f64 / b.limit.max(1) as f64;
         if after >= WARN_AT {
             let step = match self.applied {
-                None => Step::EffortDownshift,
-                Some(s) => s.next().unwrap_or(Step::HardStop),
+                None => step_for_pressure(after),
+                Some(held) => held.max(step_for_pressure(after)),
             };
             self.applied = Some(step);
             return Admission::Degrade {
@@ -253,6 +253,19 @@ impl Enforcer {
         }
 
         Admission::Admit
+    }
+}
+
+pub fn step_for_pressure(after: f64) -> Step {
+    let into_the_margin = (after - WARN_AT) / (1.0 - WARN_AT);
+    if into_the_margin >= 0.75 {
+        Step::ForceSummarize
+    } else if into_the_margin >= 0.5 {
+        Step::TrimL3
+    } else if into_the_margin >= 0.25 {
+        Step::SummarizerDownshift
+    } else {
+        Step::EffortDownshift
     }
 }
 
@@ -389,19 +402,64 @@ mod tests {
     }
 
     #[test]
-    fn approaching_the_limit_degrades_one_step_at_a_time() {
-        let mut e = Enforcer::new(20_000, 1_000_000);
-        e.record(14_000);
+    fn the_rung_follows_the_pressure_rather_than_the_number_of_spawns() {
+        let mut e = Enforcer::new(100_000, 1_000_000);
+        e.record(75_000);
 
-        match e.admit(proj(2000, 500, 500, true)) {
+        match e.admit(proj(1000, 500, 500, true)) {
             Admission::Degrade { step, .. } => assert_eq!(step, Step::EffortDownshift),
-            other => panic!("expected a first degrade, got {other:?}"),
+            other => panic!("expected the first rung, got {other:?}"),
         }
-        match e.admit(proj(2000, 500, 500, true)) {
-            Admission::Degrade { step, .. } => assert_eq!(step, Step::SummarizerDownshift),
-            other => panic!("expected the second step, got {other:?}"),
+
+        for _ in 0..20 {
+            match e.admit(proj(1000, 500, 500, true)) {
+                Admission::Degrade { step, .. } => assert_eq!(
+                    step,
+                    Step::EffortDownshift,
+                    "the ladder must not walk itself to a hard stop just because many \
+                     nodes were admitted at the same pressure"
+                ),
+                other => panic!("expected a degrade, got {other:?}"),
+            }
         }
         assert_eq!(e.state(), BudgetState::Degrading);
+    }
+
+    #[test]
+    fn a_tighter_budget_climbs_to_a_deeper_rung() {
+        let mut e = Enforcer::new(100_000, 1_000_000);
+        e.record(96_000);
+        match e.admit(proj(1000, 500, 500, true)) {
+            Admission::Degrade { step, .. } => assert_eq!(step, Step::ForceSummarize),
+            other => panic!("expected the deepest saving rung, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pressure_alone_never_hard_stops_a_run_that_can_still_afford_the_spawn() {
+        let mut e = Enforcer::new(100_000, 1_000_000);
+        e.record(80_000);
+        for _ in 0..50 {
+            assert!(
+                !matches!(e.admit(proj(1000, 500, 500, true)), Admission::Refuse { .. }),
+                "a hard stop must mean the budget is out, not that it degraded five times"
+            );
+        }
+        assert_ne!(e.applied, Some(Step::HardStop));
+    }
+
+    #[test]
+    fn a_rung_once_reached_is_never_walked_back() {
+        let mut e = Enforcer::new(100_000, 1_000_000);
+        e.record(96_000);
+        assert!(matches!(e.admit(proj(1000, 500, 500, true)), Admission::Degrade { .. }));
+        let deep = e.applied;
+        e.task.limit = 1_000_000;
+        e.sprint.limit = 1_000_000;
+        if let Admission::Degrade { step, .. } = e.admit(proj(1000, 500, 500, true)) {
+            assert_eq!(Some(step), deep);
+        }
+        assert_eq!(e.applied, deep);
     }
 
     #[test]

@@ -376,10 +376,16 @@ impl Store {
         let pooled = self.readers.lock().ok().and_then(|mut p| p.pop());
         let conn = match pooled {
             Some(conn) => conn,
-            None => Connection::open_with_flags(
-                &self.path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-            )?,
+            None => {
+                let conn = Connection::open_with_flags(
+                    &self.path,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+                )?;
+                conn.busy_timeout(std::time::Duration::from_millis(
+                    schema::BUSY_TIMEOUT_MS as u64,
+                ))?;
+                conn
+            }
         };
         Ok(Reader { conn: Some(conn), pool: &self.readers })
     }

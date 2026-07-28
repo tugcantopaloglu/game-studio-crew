@@ -61,7 +61,26 @@ pub fn write(studio_dir: &Path, held: &Unfinished) -> std::io::Result<()> {
     std::fs::create_dir_all(studio_dir)?;
     let text = serde_json::to_string_pretty(held)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path_for(studio_dir, &held.project), text)
+
+    let final_path = path_for(studio_dir, &held.project);
+    let staged = final_path.with_extension("json.part");
+
+    std::fs::write(&staged, &text)?;
+    if serde_json::from_str::<Unfinished>(&std::fs::read_to_string(&staged)?).is_err() {
+        let _ = std::fs::remove_file(&staged);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the staged resume record did not read back as a run",
+        ));
+    }
+
+    match std::fs::rename(&staged, &final_path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&staged);
+            Err(e)
+        }
+    }
 }
 
 pub fn clear(studio_dir: &Path, project: &str) {

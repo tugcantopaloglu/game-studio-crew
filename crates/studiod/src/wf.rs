@@ -7,6 +7,7 @@ use studio_agents::role;
 use studio_budget::{Enforcer, Projection};
 use studio_engine::{EngineProfile, VerifyScope};
 use studio_events::{EventType, Scene};
+use studio_server::Waited;
 use studio_verify::{EngineDriver, ProfileDriver, ProjectPaths, Verdict};
 use studio_workflow::{
     execute_parallel, Admission, Gate, GateKind, GateOutcome, Node, NodeOutcome,
@@ -36,7 +37,7 @@ pub struct Host<'a> {
     pub auto_approve: bool,
     pub plan: Option<studio_workflow::Plan>,
     pub last_verify: Mutex<Option<studio_verify::VerifyResult>>,
-    pub warmed: Mutex<BTreeSet<String>>,
+    pub warmed: Mutex<std::collections::BTreeMap<String, std::time::Instant>>,
     pub ask_above: Option<u64>,
     pub next_ask_at: Mutex<u64>,
     pub spent_usd: Mutex<f64>,
@@ -50,6 +51,7 @@ pub struct Host<'a> {
 }
 
 pub const DEFAULT_RUN_CEILING_USD: f64 = 25.0;
+const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 pub fn ceiling_for(studio_dir: &std::path::Path, workflow: &Workflow) -> (u64, f64) {
     let stored = studio_settings::Settings::load(&studio_settings::Settings::path_in(studio_dir))
@@ -191,6 +193,52 @@ impl<'a> Host<'a> {
         tier_summary(&lines)
     }
 
+    fn rearmed_helpers(&self, profile: &EngineProfile) -> Option<String> {
+        let rewritten = studio_engine::restore_helpers(profile, &self.paths.project).ok()?;
+        let forged = rewritten
+            .into_iter()
+            .find(|p| studio_verify::driver::invokes_studio_helper(&p.to_string_lossy()))?;
+        Some(
+            forged
+                .strip_prefix(&self.paths.project)
+                .unwrap_or(&forged)
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
+    fn applied_step(&self) -> Option<studio_budget::Step> {
+        self.budget.lock().unwrap_or_else(|held| held.into_inner()).applied
+    }
+
+    fn prefix_of(&self, node: &Node) -> Option<(String, u64)> {
+        let r = role(&node.role)?;
+        crate::m4::prefix_identity(self.em, r, acts(r), self.applied_step())
+    }
+
+    fn prefix_is_warm(&self, prefix_hash: &str) -> bool {
+        self.warmed
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .get(prefix_hash)
+            .is_some_and(|written| written.elapsed() < CACHE_TTL)
+    }
+
+    fn mark_warm(&self, prefix_hash: String) {
+        self.warmed
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .insert(prefix_hash, std::time::Instant::now());
+    }
+
+    fn charge(&self, billed_tokens: u64, cost_usd: f64) {
+        if billed_tokens == 0 && cost_usd == 0.0 {
+            return;
+        }
+        self.budget.lock().unwrap_or_else(|held| held.into_inner()).record(billed_tokens);
+        *self.spent_usd.lock().unwrap_or_else(|held| held.into_inner()) += cost_usd;
+    }
+
     fn spend_approved(&self, node: &Node) -> Result<(), String> {
         let step = match self.ask_above {
             Some(step) if step > 0 => step,
@@ -209,33 +257,46 @@ impl<'a> Host<'a> {
         );
 
         let rx = self.em.state.await_approval(&approval_id);
-        let _ = self.em.emit(
-            "daemon",
-            EventType::BudgetApprovalNeeded,
-            Scene::daemon(),
-            serde_json::json!({
-                "approval_id": approval_id,
-                "spent": spent,
-                "threshold": *self.next_ask_at.lock().unwrap_or_else(|held| held.into_inner()),
-                "node": node.id,
-                "usd": usd,
-            }),
-        );
+        let ask = serde_json::json!({
+            "approval_id": approval_id,
+            "spent": spent,
+            "threshold": *self.next_ask_at.lock().unwrap_or_else(|held| held.into_inner()),
+            "node": node.id,
+            "usd": usd,
+        });
+        let announce = || {
+            let _ = self.em.emit(
+                "daemon",
+                EventType::BudgetApprovalNeeded,
+                Scene::daemon(),
+                ask.clone(),
+            );
+        };
+        announce();
 
-        match rx.recv() {
-            Ok(true) => {
+        match self.em.state.wait_for(&rx, announce) {
+            Waited::Answered(true) => {
                 let next = spent + step;
                 *self.next_ask_at.lock().unwrap_or_else(|held| held.into_inner()) = next;
                 println!("  spend approved; next check at {next} tokens");
                 Ok(())
             }
-            Ok(false) => Err(format!("you stopped the run at {spent} billed tokens")),
-            Err(_) => Err("the floor went away while the run waited for approval".into()),
+            Waited::Answered(false) => Err(format!("you stopped the run at {spent} billed tokens")),
+            Waited::Stopped => Err(format!("you stopped the run at {spent} billed tokens")),
+            Waited::Gone => Err("the floor went away while the run waited for approval".into()),
         }
     }
 }
 
 impl<'a> ParallelWorkflowHost for Host<'a> {
+    fn cold_prefix_of(&self, node: &Node) -> Option<String> {
+        let (hash, _) = self.prefix_of(node)?;
+        if self.prefix_is_warm(&hash) {
+            return None;
+        }
+        Some(hash)
+    }
+
     fn admit(&self, node: &Node) -> Admission {
         if let Err(reason) = self.spend_approved(node) {
             return Admission::Refuse { reason };
@@ -263,10 +324,11 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
             return Admission::Refuse { reason };
         }
 
-        let prefix_tokens = match role(&node.role) {
-            Some(r) => crate::m4::prefix_tokens_for(r, false),
-            None => 8_000,
-        };
+        let prefix = self.prefix_of(node);
+        let prefix_tokens = prefix.as_ref().map(|(_, tokens)| *tokens).unwrap_or(8_000);
+        let prefix_is_warm = prefix
+            .as_ref()
+            .is_some_and(|(hash, _)| self.prefix_is_warm(hash));
         let brief_tokens = studio_context::estimate_tokens(&self.brief) as u64
             + self
                 .plan
@@ -278,7 +340,7 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
             prefix_tokens,
             brief_tokens,
             output_reserve: 2_000,
-            prefix_is_warm: self.warmed.lock().unwrap_or_else(|held| held.into_inner()).contains(&node.role),
+            prefix_is_warm,
         };
         match self.budget.lock().unwrap_or_else(|held| held.into_inner()).admit(projection) {
             studio_budget::Admission::Admit => Admission::Admit,
@@ -327,14 +389,19 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
             &self.acting_hint(r),
         );
 
-        match crate::m4::run_worker_metered_uncommitted(self.em, r, &brief, seq, acts(r)) {
+        let degrade = self.applied_step();
+        match crate::m4::run_worker_metered_uncommitted(self.em, r, &brief, seq, acts(r), degrade) {
             Ok(m) => {
-                self.budget.lock().unwrap_or_else(|held| held.into_inner()).record(m.billed_tokens);
-                *self.spent_usd.lock().unwrap_or_else(|held| held.into_inner()) += m.cost_usd;
-                self.warmed.lock().unwrap_or_else(|held| held.into_inner()).insert(node.role.clone());
+                self.charge(m.billed_tokens, m.cost_usd);
+                if let Some((hash, _)) = self.prefix_of(node) {
+                    self.mark_warm(hash);
+                }
                 NodeOutcome::Completed { capsule: format!("cap_{}", node.id) }
             }
-            Err(e) => NodeOutcome::Failed { reason: e.to_string() },
+            Err(e) => {
+                self.charge(e.spend.billed_tokens, e.spend.cost_usd);
+                NodeOutcome::Failed { reason: e.to_string() }
+            }
         }
     }
 
@@ -422,27 +489,31 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
             vec!["approve", "improve", "redo"]
         };
 
-        let _ = self.em.emit(
-            "daemon",
-            EventType::StepApprovalNeeded,
-            Scene::daemon(),
-            serde_json::json!({
-                "approval_id": approval_id,
-                "step": step,
-                "title": self.step_title(completed),
-                "summary": self.step_summary(completed),
-                "modes": modes,
-                "redos_used": used,
-                "redos_left": left,
-            }),
-        );
+        let ask = serde_json::json!({
+            "approval_id": approval_id,
+            "step": step,
+            "title": self.step_title(completed),
+            "summary": self.step_summary(completed),
+            "modes": modes,
+            "redos_used": used,
+            "redos_left": left,
+        });
+        let announce = || {
+            let _ = self.em.emit(
+                "daemon",
+                EventType::StepApprovalNeeded,
+                Scene::daemon(),
+                ask.clone(),
+            );
+        };
+        announce();
         println!("  step {step} is done and waiting for you on the floor");
         if used > 0 {
             println!("  step {step} has been sent back {used} time(s); {left} left before the run stops");
         }
 
-        match rx.recv() {
-            Ok(verdict) if verdict.approve => {
+        match self.em.state.wait_for(&rx, announce) {
+            Waited::Answered(verdict) if verdict.approve => {
                 self.tiers_done.fetch_add(1, Ordering::SeqCst);
                 self.redos_at_step.store(0, Ordering::SeqCst);
                 if let Some(note) = verdict.note.filter(|n| !n.trim().is_empty()) {
@@ -453,7 +524,7 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
                 }
                 WaveVerdict::Continue
             }
-            Ok(_) if left == 0 => {
+            Waited::Answered(_) if left == 0 => {
                 println!(
                     "  step {step} has already been run {} times and is still not right; stopping",
                     used + 1
@@ -465,7 +536,7 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
                     ),
                 }
             }
-            Ok(verdict) => {
+            Waited::Answered(verdict) => {
                 let note = verdict
                     .note
                     .filter(|n| !n.trim().is_empty())
@@ -475,7 +546,10 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
                 self.notes.lock().unwrap_or_else(|held| held.into_inner()).push(note);
                 WaveVerdict::Redo
             }
-            Err(_) => WaveVerdict::Stop {
+            Waited::Stopped => WaveVerdict::Stop {
+                reason: format!("you stopped the run while step {step} waited for you"),
+            },
+            Waited::Gone => WaveVerdict::Stop {
                 reason: "the floor went away while the run waited on a step".to_string(),
             },
         }
@@ -498,6 +572,9 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
             })
             .collect();
         crate::m4::commit_wave(self.em, &entries);
+    }
+
+    fn wave_committed(&self, completed: &[&Node]) {
         self.record_progress(completed);
     }
 
@@ -532,6 +609,43 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
                 }
             }
         };
+
+        if let Some(rewritten) = self.rearmed_helpers(&driver.profile) {
+            let failure = studio_verify::Failure {
+                id: "studio_ci".into(),
+                kind: studio_verify::FailureKind::Compile,
+                symbol: None,
+                file: Some(rewritten.clone()),
+                line: None,
+                message: format!(
+                    "{rewritten} is the studio's own check and it had been changed. It has been \
+                     restored from the shipped copy. Leave it alone and fix the project instead."
+                ),
+                detail: None,
+            };
+            let _ = self.em.emit(
+                "daemon",
+                EventType::GateEvaluated,
+                Scene::daemon(),
+                serde_json::json!({
+                    "gate": node.id,
+                    "kind": "verify",
+                    "passed": false,
+                    "reason": "the check the gate runs had been rewritten",
+                }),
+            );
+            *self.last_verify.lock().unwrap_or_else(|held| held.into_inner()) =
+                Some(studio_verify::VerifyResult {
+                    verdict: Verdict::Fail,
+                    failures: vec![failure],
+                    scope,
+                    engine: driver.profile.id.clone(),
+                    duration_ms: 0,
+                    raw_report_path: None,
+                    inconclusive_reason: None,
+                });
+            return GateOutcome::Fail { failures: 1 };
+        }
 
         let _ = self.em.emit(
             "daemon",
@@ -620,15 +734,13 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
             failures.brief_for_worker()
         );
 
-        match crate::m4::run_worker_metered(self.em, r, &brief, seq, true) {
-            Ok(m) => {
-                self.budget.lock().unwrap_or_else(|held| held.into_inner()).record(m.billed_tokens);
-                *self.spent_usd.lock().unwrap_or_else(|held| held.into_inner()) += m.cost_usd;
-            }
+        match crate::m4::run_worker_metered(self.em, r, &brief, seq, true, self.applied_step()) {
+            Ok(m) => self.charge(m.billed_tokens, m.cost_usd),
             Err(e) => {
+                self.charge(e.spend.billed_tokens, e.spend.cost_usd);
                 return GateOutcome::Inconclusive {
                     reason: format!("the repair worker could not run: {e}"),
-                }
+                };
             }
         }
 
@@ -798,7 +910,7 @@ pub fn run_planned(
         auto_approve: true,
         plan: plan.clone(),
         last_verify: Mutex::new(None),
-        warmed: Mutex::new(BTreeSet::new()),
+        warmed: Mutex::new(std::collections::BTreeMap::new()),
         ask_above,
         next_ask_at: Mutex::new(ask_above.unwrap_or(u64::MAX)),
         spent_usd: Mutex::new(0.0),

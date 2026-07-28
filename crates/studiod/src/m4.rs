@@ -106,7 +106,9 @@ pub fn run_worker_capturing(
     index: usize,
     json_schema: Option<String>,
 ) -> Result<String> {
-    run_worker_inner(em, role, brief, index, json_schema, false, true).map(|m| m.text)
+    run_worker_inner(em, role, brief, index, json_schema, false, true, None)
+        .map(|m| m.text)
+        .map_err(|e| e.error)
 }
 
 pub fn run_worker_metered(
@@ -115,8 +117,9 @@ pub fn run_worker_metered(
     brief: &str,
     index: usize,
     acting: bool,
-) -> Result<Metered> {
-    run_worker_inner(em, role, brief, index, None, acting, true)
+    degrade: Option<studio_budget::Step>,
+) -> std::result::Result<Metered, WorkerFailed> {
+    run_worker_inner(em, role, brief, index, None, acting, true, degrade)
 }
 
 pub fn run_worker_metered_uncommitted(
@@ -125,8 +128,9 @@ pub fn run_worker_metered_uncommitted(
     brief: &str,
     index: usize,
     acting: bool,
-) -> Result<Metered> {
-    run_worker_inner(em, role, brief, index, None, acting, false)
+    degrade: Option<studio_budget::Step>,
+) -> std::result::Result<Metered, WorkerFailed> {
+    run_worker_inner(em, role, brief, index, None, acting, false, degrade)
 }
 
 pub fn run_worker_metered_json(
@@ -136,7 +140,8 @@ pub fn run_worker_metered_json(
     index: usize,
     json_schema: String,
 ) -> Result<Metered> {
-    run_worker_inner(em, role, brief, index, Some(json_schema), false, false)
+    run_worker_inner(em, role, brief, index, Some(json_schema), false, false, None)
+        .map_err(|e| e.error)
 }
 
 pub fn commit_wave(em: &Emitter, entries: &[(&str, String)]) {
@@ -185,6 +190,32 @@ pub struct Metered {
     pub text: String,
     pub billed_tokens: u64,
     pub cost_usd: f64,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Spend {
+    pub billed_tokens: u64,
+    pub cost_usd: f64,
+}
+
+#[derive(Debug)]
+pub struct WorkerFailed {
+    pub spend: Spend,
+    pub error: anyhow::Error,
+}
+
+impl std::fmt::Display for WorkerFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for WorkerFailed {}
+
+impl From<anyhow::Error> for WorkerFailed {
+    fn from(error: anyhow::Error) -> Self {
+        Self { spend: Spend::default(), error }
+    }
 }
 
 pub fn uncacheable(usage: studio_events::Usage) -> bool {
@@ -341,11 +372,34 @@ pub fn seat_for(role: &Role, studio_dir: &Path) -> Seat {
     seat_from(&settings, role)
 }
 
-pub fn prefix_tokens_for(role: &Role, acting: bool) -> u64 {
+pub fn prefix_identity(
+    em: &Emitter,
+    role: &Role,
+    acting: bool,
+    degrade: Option<studio_budget::Step>,
+) -> Option<(String, u64)> {
+    let mut seat = seat_for(role, &em.state.studio_dir);
+    if let Some(step) = degrade {
+        seat = degraded(seat, step, false);
+    }
     let charter = charter_for(role, acting);
-    freeze(&charter, &role.tools(), role.model)
-        .map(|p| p.estimated_tokens as u64)
-        .unwrap_or(8_000)
+    freeze(&charter, &role.tools(), seat.model)
+        .ok()
+        .map(|p| (p.prefix_hash, p.estimated_tokens as u64))
+}
+
+fn degraded(mut seat: Seat, step: studio_budget::Step, is_summarizer: bool) -> Seat {
+    if !studio_budget::ladder_saves_money(step) {
+        return seat;
+    }
+
+    let model = studio_budget::model_for_step(step, seat.model, is_summarizer);
+    if model != seat.model {
+        seat.model = model;
+        seat.model_alias = model.cli_alias().to_string();
+    }
+    seat.effort = seat.effort.downshift(Effort::Low);
+    seat
 }
 
 struct Desk<'a> {
@@ -385,6 +439,7 @@ impl Drop for Desk<'_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_worker_inner(
     em: &Emitter,
     role: &Role,
@@ -393,9 +448,30 @@ fn run_worker_inner(
     json_schema: Option<String>,
     acting: bool,
     commit: bool,
+    degrade: Option<studio_budget::Step>,
+) -> std::result::Result<Metered, WorkerFailed> {
+    let mut spend = Spend::default();
+    run_worker_body(em, role, brief, index, json_schema, acting, commit, degrade, &mut spend)
+        .map_err(|error| WorkerFailed { spend, error })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_worker_body(
+    em: &Emitter,
+    role: &Role,
+    brief: &str,
+    index: usize,
+    json_schema: Option<String>,
+    acting: bool,
+    commit: bool,
+    degrade: Option<studio_budget::Step>,
+    spend: &mut Spend,
 ) -> Result<Metered> {
     let actor = format!("{}#{}", role.id, index);
-    let seat = seat_for(role, &em.state.studio_dir);
+    let mut seat = seat_for(role, &em.state.studio_dir);
+    if let Some(step) = degrade {
+        seat = degraded(seat, step, json_schema.is_some());
+    }
     if let Some(named) = &seat.unusable_model {
         anyhow::bail!(
             "{} is set to the claude model {named}, which the studio cannot express. \
@@ -535,6 +611,20 @@ fn run_worker_inner(
     }
 
     let usage = report.state.usage.unwrap_or_default();
+    let priced = studio_budget::Usage {
+        input: usage.input,
+        output: usage.output,
+        cache_read: usage.cache_read,
+        cache_creation: usage.cache_creation,
+    };
+    let cost_usd = if report.state.cost_usd > 0.0 {
+        report.state.cost_usd
+    } else {
+        studio_budget::usd_mirror(seat.model, priced)
+    };
+    spend.billed_tokens = studio_budget::billable_tokens(priced);
+    spend.cost_usd = cost_usd;
+
     em.store.record_usage(
         LedgerEntry {
             task: task_id.clone(),
@@ -542,7 +632,7 @@ fn run_worker_inner(
             prefix_hash: prefix.prefix_hash.clone(),
             estimate: false,
             usage,
-            cost_usd: report.state.cost_usd,
+            cost_usd,
             model: prefix.model.cli_alias().into(),
         },
         crate::now(),
@@ -558,7 +648,7 @@ fn run_worker_inner(
             "output": usage.output,
             "cache_read": usage.cache_read,
             "cache_creation": usage.cache_creation,
-            "cost_usd": report.state.cost_usd,
+            "cost_usd": cost_usd,
         }),
     )?;
 
@@ -599,24 +689,12 @@ fn run_worker_inner(
         )?;
     }
 
-    em.emit(
-        &actor,
-        EventType::CapsuleSubmitted,
-        scene.clone(),
-        serde_json::json!({
-            "kind": "task_return",
-            "summary": report.state.text.trim(),
-            "rendered_tokens": usage.output,
-            "truncated": false,
-        }),
-    )?;
-
     desk.settle();
     em.store.update_task_state(&task_id, WorkerState::Reaped, Some(report.outcome), crate::now())?;
     em.emit(
         &actor,
         EventType::WorkerExited,
-        scene,
+        scene.clone(),
         serde_json::json!({
             "outcome": format!("{:?}", report.outcome).to_lowercase(),
             "exit_code": report.exit_code,
@@ -628,7 +706,7 @@ fn run_worker_inner(
         role.id,
         report.outcome,
         usage.input + usage.output,
-        report.state.cost_usd
+        cost_usd
     );
 
     if report.outcome != Outcome::Completed {
@@ -645,6 +723,18 @@ fn run_worker_inner(
         anyhow::bail!("{} on {} failed: {}", role.id, seat.describe(), first_line(&report.state));
     }
 
+    em.emit(
+        &actor,
+        EventType::CapsuleSubmitted,
+        scene,
+        serde_json::json!({
+            "kind": "task_return",
+            "summary": report.state.text.trim(),
+            "rendered_tokens": usage.output,
+            "truncated": false,
+        }),
+    )?;
+
     if commit {
         commit_worker_output(em, role, brief, &actor)?;
     }
@@ -653,13 +743,7 @@ fn run_worker_inner(
         Some(m) if !m.trim().is_empty() => m.clone(),
         _ => report.state.text.clone(),
     };
-    let billed = studio_budget::billable_tokens(studio_budget::Usage {
-        input: usage.input,
-        output: usage.output,
-        cache_read: usage.cache_read,
-        cache_creation: usage.cache_creation,
-    });
-    Ok(Metered { text, billed_tokens: billed, cost_usd: report.state.cost_usd })
+    Ok(Metered { text, billed_tokens: spend.billed_tokens, cost_usd })
 }
 
 #[cfg(test)]
@@ -703,6 +787,43 @@ mod seat_tests {
         let s = settings(&[("models.role.qa_engineer", "haiku")]);
         assert_eq!(seat_from(&s, role_named("qa_engineer")).model, Model::Haiku);
         assert_eq!(seat_from(&s, role_named("artist")).model, Model::Opus);
+    }
+
+    #[test]
+    fn the_first_rung_actually_lowers_the_effort_the_worker_is_spawned_with() {
+        let role = role_named("gameplay_engineer");
+        let seat = seat_from(&Settings::new(), role);
+        let leaned = degraded(seat.clone(), studio_budget::Step::EffortDownshift, false);
+
+        assert!(
+            leaned.effort < seat.effort || seat.effort == Effort::Low,
+            "a recorded degradation that spawns the same worker saves nothing"
+        );
+        assert_eq!(leaned.model, seat.model, "the first rung is not supposed to move the model");
+    }
+
+    #[test]
+    fn a_hard_stop_is_not_a_discount_and_must_not_quietly_reshape_the_seat() {
+        let role = role_named("gameplay_engineer");
+        let seat = seat_from(&Settings::new(), role);
+        let stopped = degraded(seat.clone(), studio_budget::Step::HardStop, false);
+        assert_eq!(stopped.effort, seat.effort);
+        assert_eq!(stopped.model, seat.model);
+    }
+
+    #[test]
+    fn downshifting_the_effort_leaves_the_cache_key_alone() {
+        let role = role_named("gameplay_engineer");
+        let seat = seat_from(&Settings::new(), role);
+        let leaned = degraded(seat.clone(), studio_budget::Step::EffortDownshift, false);
+
+        let charter = charter_for(role, true);
+        let before = freeze(&charter, &role.tools(), seat.model).unwrap();
+        let after = freeze(&charter, &role.tools(), leaned.model).unwrap();
+        assert_eq!(
+            before.prefix_hash, after.prefix_hash,
+            "effort is not part of the frozen prefix, so leaning on it must not cold-start the cache"
+        );
     }
 
     #[test]

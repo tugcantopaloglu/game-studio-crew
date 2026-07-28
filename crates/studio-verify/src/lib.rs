@@ -92,25 +92,68 @@ impl VerifyResult {
     }
 }
 
-pub const INFRA_SIGNATURES: [&str; 10] = [
-    "license",
-    "licensing",
+pub const INFRA_SIGNATURES: [&str; 7] = [
     "failed to acquire",
     "another instance",
     "editor is already running",
     "out of memory",
     "no such device",
     "could not create window",
-    "vulkan",
     "no gpu",
 ];
 
+pub const INFRA_HINTS: [&str; 3] = ["license", "licensing", "vulkan"];
+
+const INFRA_TROUBLE: [&str; 8] = [
+    "failed",
+    "cannot",
+    "could not",
+    "unable to",
+    "not available",
+    "not found",
+    "missing",
+    "expired",
+];
+
+const SOURCE_SUFFIXES: [&str; 12] = [
+    ".gd", ".cs", ".cpp", ".hpp", ".h", ".js", ".mjs", ".py", ".tscn", ".tres", ".uasset", ".shader",
+];
+
+fn names_a_file(token: &str) -> bool {
+    token.contains('/')
+        || token.contains('\\')
+        || SOURCE_SUFFIXES.iter().any(|suffix| token.contains(suffix))
+}
+
+fn mentioned_outside_a_path(line: &str, needle: &str) -> bool {
+    line.split_whitespace().any(|token| {
+        let token = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '/' && c != '\\');
+        let token = token.to_lowercase();
+        !names_a_file(&token) && token.contains(needle)
+    })
+}
+
 pub fn looks_like_infrastructure(log: &str) -> Option<String> {
-    let lower = log.to_lowercase();
-    INFRA_SIGNATURES
-        .iter()
-        .find(|sig| lower.contains(*sig))
-        .map(|sig| format!("log matched infrastructure signature '{sig}'"))
+    for line in log.lines() {
+        let lower = line.trim().to_lowercase();
+        if lower.is_empty() {
+            continue;
+        }
+
+        if let Some(sig) = INFRA_SIGNATURES.iter().find(|sig| lower.contains(*sig)) {
+            return Some(format!("log matched infrastructure signature '{sig}'"));
+        }
+
+        let hinted = INFRA_HINTS
+            .iter()
+            .find(|sig| mentioned_outside_a_path(&lower, sig));
+        if let Some(sig) = hinted {
+            if INFRA_TROUBLE.iter().any(|word| lower.contains(word)) {
+                return Some(format!("log matched infrastructure signature '{sig}'"));
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

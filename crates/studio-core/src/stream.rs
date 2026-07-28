@@ -10,6 +10,7 @@ pub enum CliEvent {
     },
     UsageDelta {
         usage: Usage,
+        starts_message: bool,
     },
     ToolCall {
         tool: String,
@@ -141,12 +142,12 @@ pub fn parse_line(line: &str) -> Option<CliEvent> {
                 "message_start" => ev
                     .get("message")
                     .and_then(|m| m.get("usage"))
-                    .map(|u| CliEvent::UsageDelta { usage: usage_from(u) })
+                    .map(|u| CliEvent::UsageDelta { usage: usage_from(u), starts_message: true })
                     .or(Some(CliEvent::Other { kind: "message_start".into() })),
 
                 "message_delta" => ev
                     .get("usage")
-                    .map(|u| CliEvent::UsageDelta { usage: usage_from(u) })
+                    .map(|u| CliEvent::UsageDelta { usage: usage_from(u), starts_message: false })
                     .or(Some(CliEvent::Other { kind: "message_delta".into() })),
 
                 "content_block_start" => {
@@ -228,7 +229,8 @@ pub fn parse_line(line: &str) -> Option<CliEvent> {
 pub struct StreamState {
     pub result_message: Option<String>,
     pub session_id: Option<String>,
-    pub latest_usage: Option<Usage>,
+    pub settled_usage: Option<Usage>,
+    pub current_usage: Option<Usage>,
     pub final_usage: Option<Usage>,
     pub cost_usd: f64,
     pub saw_result: bool,
@@ -246,8 +248,20 @@ impl StreamState {
                 }
                 self.mcp_servers = mcp_servers.clone();
             }
-            CliEvent::UsageDelta { usage } => {
-                self.latest_usage = Some(*usage);
+            CliEvent::UsageDelta { usage, starts_message } => {
+                if *starts_message {
+                    self.settle_current_message();
+                    self.current_usage = Some(*usage);
+                } else {
+                    let mut open = self.current_usage.unwrap_or_default();
+                    open.output = usage.output;
+                    if usage.total_input() > 0 {
+                        open.input = usage.input;
+                        open.cache_read = usage.cache_read;
+                        open.cache_creation = usage.cache_creation;
+                    }
+                    self.current_usage = Some(open);
+                }
             }
             CliEvent::Text { text } => self.text.push_str(text),
             CliEvent::Result { session_id, is_error, usage, cost_usd, message } => {
@@ -264,8 +278,34 @@ impl StreamState {
         }
     }
 
+    fn settle_current_message(&mut self) {
+        let Some(done) = self.current_usage.take() else { return };
+        let mut total = self.settled_usage.unwrap_or_default();
+        total.input += done.input;
+        total.output += done.output;
+        total.cache_read += done.cache_read;
+        total.cache_creation += done.cache_creation;
+        self.settled_usage = Some(total);
+    }
+
+    pub fn interim_usage(&self) -> Option<Usage> {
+        match (self.settled_usage, self.current_usage) {
+            (None, None) => None,
+            (settled, open) => {
+                let a = settled.unwrap_or_default();
+                let b = open.unwrap_or_default();
+                Some(Usage {
+                    input: a.input + b.input,
+                    output: a.output + b.output,
+                    cache_read: a.cache_read + b.cache_read,
+                    cache_creation: a.cache_creation + b.cache_creation,
+                })
+            }
+        }
+    }
+
     pub fn authoritative_usage(&self) -> Option<Usage> {
-        self.final_usage.or(self.latest_usage)
+        self.final_usage.or_else(|| self.interim_usage())
     }
 }
 
@@ -319,6 +359,47 @@ mod tests {
         assert_eq!(usage, st.final_usage.unwrap());
         assert!(usage.total_input() > 0);
         assert!(st.cost_usd > 0.0);
+    }
+
+    #[test]
+    fn every_turn_of_a_killed_worker_is_still_counted() {
+        let turn = |input: u64, output: u64| {
+            format!(
+                r#"{{"type":"stream_event","event":{{"type":"message_start","message":{{"usage":{{"input_tokens":{input},"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}}}}}}
+{{"type":"stream_event","event":{{"type":"message_delta","usage":{{"output_tokens":{output}}}}}}}"#
+            )
+        };
+        let stream = format!("{}\n{}", turn(100, 50), turn(200, 80));
+
+        let mut st = StreamState::default();
+        for ev in parse_all(&stream) {
+            st.apply(&ev);
+        }
+
+        let usage = st.authoritative_usage().expect("a killed worker still spent tokens");
+        assert_eq!(
+            usage.input, 300,
+            "overwriting instead of accumulating hides every turn but the last, and a killed \
+             worker is exactly the case the budget most needs to see"
+        );
+        assert_eq!(usage.output, 130);
+        assert!(!st.saw_result);
+    }
+
+    #[test]
+    fn a_message_delta_revises_its_own_turn_rather_than_adding_a_new_one() {
+        let stream = r#"{"type":"stream_event","event":{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}}
+{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":40}}}
+{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":90}}}"#;
+
+        let mut st = StreamState::default();
+        for ev in parse_all(stream) {
+            st.apply(&ev);
+        }
+
+        let usage = st.authoritative_usage().unwrap();
+        assert_eq!(usage.input, 10);
+        assert_eq!(usage.output, 90, "message_delta carries the running total for its own message");
     }
 
     #[test]
@@ -479,7 +560,7 @@ pub fn map_cli_event(ev: &CliEvent) -> Option<(studio_events::EventType, serde_j
             serde_json::json!({"tool": tool, "ok": ok, "bytes": bytes}),
         )),
 
-        CliEvent::UsageDelta { usage } => Some((
+        CliEvent::UsageDelta { usage, .. } => Some((
             E::TokenUsage,
             serde_json::json!({
                 "estimate": true,
@@ -521,6 +602,7 @@ mod bridge_tests {
     fn an_interim_usage_delta_is_marked_as_an_estimate() {
         let ev = CliEvent::UsageDelta {
             usage: studio_events::Usage { input: 2, output: 50, cache_read: 8867, cache_creation: 0 },
+            starts_message: true,
         };
         let (ty, data) = map_cli_event(&ev).unwrap();
         assert_eq!(ty, E::TokenUsage);
