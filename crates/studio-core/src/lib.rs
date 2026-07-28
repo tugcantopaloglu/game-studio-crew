@@ -288,6 +288,8 @@ mod tests {
         vec!["-e".to_string(), script.to_string()]
     }
 
+    const STALL_PAST_STARTUP: Duration = Duration::from_secs(2);
+
     #[test]
     fn drives_a_stream_to_a_clean_completion() {
         let script = r#"
@@ -400,8 +402,8 @@ mod tests {
             setTimeout(() => {}, 60000);
         "#;
         let limits = WorkerLimits {
-            stall_timeout: Duration::from_millis(200),
-            wall_clock: Duration::from_secs(30),
+            stall_timeout: STALL_PAST_STARTUP,
+            wall_clock: Duration::from_secs(60),
             stop_asked: None,
         };
         let w = Worker::spawn("node", &node_emitting(script), "").unwrap();
@@ -423,11 +425,11 @@ mod tests {
             setTimeout(() => {
               line({type:"user",message:{content:[{type:"tool_result",tool_use_id:"t1",content:"done"}]}});
               line({type:"result",subtype:"success",is_error:false,total_cost_usd:0,usage:{}});
-            }, 600);
+            }, 4000);
         "#;
         let limits = WorkerLimits {
-            stall_timeout: Duration::from_millis(200),
-            wall_clock: Duration::from_secs(30),
+            stall_timeout: STALL_PAST_STARTUP,
+            wall_clock: Duration::from_secs(60),
             stop_asked: None,
         };
         let w = Worker::spawn("node", &node_emitting(script), "").unwrap();
