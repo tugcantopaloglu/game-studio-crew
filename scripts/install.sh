@@ -5,7 +5,7 @@
 #
 # Environment:
 #   PREFIX=/usr/local    where to install on Linux (default: ~/.local)
-#   VERSION=v1.0.0       which release to fetch (default: latest)
+#   VERSION=v1.0.1       which release to fetch (default: latest)
 
 set -eu
 
