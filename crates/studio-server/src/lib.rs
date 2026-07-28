@@ -1370,7 +1370,10 @@ mod tests {
 
     async fn cache_header_for(uri: &str) -> String {
         use tower::ServiceExt;
-        let dir = std::env::temp_dir().join("studio-cache-header");
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let at = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir()
+            .join(format!("studio-cache-header-{}-{at}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let store = Arc::new(Store::open(dir.join("s.db")).unwrap());
         let req = axum::http::Request::builder()

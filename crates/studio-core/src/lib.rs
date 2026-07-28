@@ -53,6 +53,7 @@ pub struct StreamStateSnapshot {
 }
 
 pub const CANCEL_POLL: Duration = Duration::from_millis(250);
+pub const STARTUP_GRACE: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct WorkerLimits {
@@ -187,6 +188,7 @@ impl Worker {
         let mut stopped = false;
         let mut last_line = Instant::now();
         let mut tools_open: usize = 0;
+        let mut spoke_once = false;
 
         loop {
             if limits.stopping() {
@@ -198,7 +200,12 @@ impl Worker {
                 timed_out = true;
                 break;
             }
-            if tools_open == 0 && last_line.elapsed() >= limits.stall_timeout {
+            let quiet_budget = if spoke_once {
+                limits.stall_timeout
+            } else {
+                limits.stall_timeout.max(STARTUP_GRACE)
+            };
+            if tools_open == 0 && last_line.elapsed() >= quiet_budget {
                 stalled = true;
                 break;
             }
@@ -206,6 +213,7 @@ impl Worker {
             match rx.recv_timeout(CANCEL_POLL.min(remaining_wall)) {
                 Ok(line) => {
                     last_line = Instant::now();
+                    spoke_once = true;
                     if let Some(ev) = stream::parse_line(&line) {
                         match ev {
                             stream::CliEvent::ToolCall { .. } => tools_open += 1,
