@@ -581,6 +581,7 @@ fn report_check(tag: &str, what: &str, ok: bool, failures: &mut Vec<String>) {
 
 fn main() -> Result<()> {
     crash::install();
+    studio_core::install_shutdown_handler();
     let cmd = std::env::args().nth(1).unwrap_or_else(|| "help".into());
     match cmd.as_str() {
         "doctor" => doctor::report(),

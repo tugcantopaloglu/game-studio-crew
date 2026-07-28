@@ -11,6 +11,8 @@ on a studio floor you can watch in 3D while it happens.
 
 Rust daemon · Unity · Unreal Engine 5 · Godot 4 · No API keys
 
+**Windows · macOS · Linux**
+
 </div>
 
 ---
@@ -72,15 +74,36 @@ Every role has a **frozen charter** — a byte-identical system prompt that neve
 
 ## Quick start
 
-### The desktop app (Windows)
+Runs on **Windows, macOS and Linux**. Grab a build from [Releases](../../releases), or build from source.
+
+### Windows
+
+Unzip and run `game-studio.exe`. For a Start Menu entry and a proper uninstaller:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File installer\build.ps1
 ```
 
-One command compiles the daemon, the native shell and a per-user installer. The installer needs **no admin rights**, adds a Start Menu entry, and touches neither `PATH` nor any service. On uninstall it asks before removing the studio's own data — your project folders live where you put them and are never touched.
+That compiles the daemon, the native shell and a per-user installer in one command. The installer needs **no admin rights** and touches neither `PATH` nor any service. On uninstall it asks before removing the studio's own data — your project folders live where you put them and are never touched.
 
-The window is a thin native frame around the same floor the daemon serves on `127.0.0.1:7878`. It starts the daemon for you, waits for the port rather than guessing, and takes the daemon and every worker down with it when you close it. If a daemon is already running it attaches to that one instead of starting a second.
+### macOS
+
+```bash
+tar xzf game-studio-crew-1.0.0-macos-aarch64.tar.gz
+mv "Game Studio Crew.app" /Applications/
+```
+
+The build is unsigned, so the first launch needs right-click → **Open**.
+
+### Linux
+
+```bash
+tar xzf game-studio-crew-1.0.0-linux-x86_64.tar.gz
+cd game-studio-crew-1.0.0-linux-x86_64
+./install.sh          # installs to ~/.local by default, no root
+```
+
+The desktop shell needs `libwebkit2gtk-4.1`; the daemon alone has no such dependency.
 
 ### From source
 
@@ -88,7 +111,15 @@ The window is a thin native frame around the same floor the daemon serves on `12
 cargo build --release
 ./target/release/studiod doctor     # what's installed, and what can actually run the crew
 ./target/release/studiod studio     # serve the floor at http://127.0.0.1:7878
+
+cd desktop && cargo build --release # the native window, optional
 ```
+
+On Linux, install the webview headers first: `libwebkit2gtk-4.1-dev libgtk-3-dev`.
+
+### The desktop window
+
+The window is a thin native frame around the same floor the daemon serves on `127.0.0.1:7878`. It starts the daemon for you, waits for the port rather than guessing, and takes the daemon and every worker down with it when you close it — on every platform. If a daemon is already running it attaches to that one instead of starting a second.
 
 ### What you need
 
@@ -318,8 +349,10 @@ studiod m4   the studio floor driven by a real five-worker cast
 
 ```
 crates/           the Rust workspace — daemon, engine, store, floor
-desktop/          the native Windows shell
-installer/        the per-user installer build
+desktop/          the native shell (Windows, macOS, Linux)
+installer/        the Windows per-user installer build
+packaging/        macOS .app and Linux tarball packaging
+.github/          CI and the three-platform release pipeline
 docs/design/      19 design documents + 5 ADRs
 docs/review/      architecture review findings
 agent-images/     the crew reference sheet
@@ -337,6 +370,7 @@ Being honest about the edges:
 - **Godot is the only engine probed end to end.** Unity and Unreal profiles are written and their command placeholders now resolve, but neither has been run against a real editor.
 - **The capsule channel is not yet attached to production workers.** The MCP server, the schema and the trust boundary are all built and tested; wiring them into every spawn is the next piece of work.
 - **The control plane has no auth token.** It binds to localhost and rejects cross-origin and rebound-host requests, but any local process can still reach it.
+- **macOS and Linux builds are unsigned**, and the Linux desktop shell needs `libwebkit2gtk-4.1`.
 
 The full findings, including what was fixed and what is deliberately still open, are in [`docs/review/`](docs/review/).
 

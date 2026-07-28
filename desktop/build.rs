@@ -1,4 +1,8 @@
 fn main() {
+    if !cfg!(target_os = "windows") {
+        return;
+    }
+
     println!("cargo:rerun-if-changed=app.rc");
     println!("cargo:rerun-if-changed=assets/icon.ico");
     if let Err(failure) = embed_resource::compile("app.rc", embed_resource::NONE).manifest_optional()

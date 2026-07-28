@@ -1,5 +1,5 @@
 #define AppName "Game Studio Crew"
-#define AppVersion "0.1.0"
+#define AppVersion "1.0.0"
 #define AppPublisher "tugcantopaloglu"
 #define AppUrl "https://github.com/tugcantopaloglu/game-studio-crew"
 #define ShellExe "game-studio.exe"

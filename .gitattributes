@@ -1,2 +1,15 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Anything a shell or CI runner executes must keep LF, or bash sees \r
+*.sh        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.mjs       text eol=lf
+*.gd        text eol=lf
+install.sh  text eol=lf
+
+*.png binary
+*.ico binary
+*.bmp binary
+*.b64 binary

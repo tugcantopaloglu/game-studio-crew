@@ -40,7 +40,9 @@ impl ProcessGroup {
         }
         #[cfg(not(windows))]
         {
-            self.pgid = Some(child.id() as i32);
+            let pgid = child.id() as i32;
+            self.pgid = Some(pgid);
+            reaper::watch(pgid);
             Ok(())
         }
     }
@@ -53,12 +55,75 @@ impl ProcessGroup {
         #[cfg(not(windows))]
         {
             if let Some(pgid) = self.pgid.take() {
+                reaper::forget(pgid);
                 unsafe {
                     libc_kill(-pgid, 9);
                 }
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(not(windows))]
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.pgid.take() {
+            reaper::forget(pgid);
+        }
+    }
+}
+
+pub fn install_shutdown_handler() {
+    #[cfg(not(windows))]
+    reaper::install();
+}
+
+#[cfg(not(windows))]
+mod reaper {
+    use std::sync::Mutex;
+
+    static LIVE: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+    pub fn watch(pgid: i32) {
+        if let Ok(mut live) = LIVE.lock() {
+            live.push(pgid);
+        }
+    }
+
+    pub fn forget(pgid: i32) {
+        if let Ok(mut live) = LIVE.lock() {
+            live.retain(|held| *held != pgid);
+        }
+    }
+
+    fn kill_every_worker() {
+        let held = match LIVE.lock() {
+            Ok(mut live) => std::mem::take(&mut *live),
+            Err(_) => return,
+        };
+        for pgid in held {
+            unsafe {
+                super::libc_kill(-pgid, 9);
+            }
+        }
+    }
+
+    pub fn install() {
+        use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+
+        let Ok(mut signals) = signal_hook::iterator::Signals::new([
+            SIGINT, SIGTERM, SIGHUP, SIGQUIT,
+        ]) else {
+            return;
+        };
+
+        std::thread::spawn(move || {
+            if let Some(signal) = signals.forever().next() {
+                kill_every_worker();
+                std::process::exit(128 + signal);
+            }
+        });
     }
 }
 
