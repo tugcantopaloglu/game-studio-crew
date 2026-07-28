@@ -254,8 +254,17 @@ fn studio_home() -> Result<PathBuf, Failure> {
     Ok(base)
 }
 
+const SESSION_MARKERS: [&str; 2] = ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION"];
+
+fn out_of_any_session(cmd: &mut Command) {
+    for marker in SESSION_MARKERS {
+        cmd.env_remove(marker);
+    }
+}
+
 fn start_requirements_check(exe: &Path, home: &Path, group: &mut ProcessGroup) -> Option<Child> {
     let mut cmd = Command::new(exe);
+    out_of_any_session(&mut cmd);
     cmd.arg("doctor")
         .current_dir(home)
         .stdin(Stdio::null())
@@ -300,6 +309,7 @@ fn spawn(exe: &Path, home: &Path, mut group: ProcessGroup) -> Result<Daemon, Fai
     })?;
 
     let mut cmd = Command::new(exe);
+    out_of_any_session(&mut cmd);
     cmd.arg("studio")
         .current_dir(home)
         .stdin(Stdio::null())

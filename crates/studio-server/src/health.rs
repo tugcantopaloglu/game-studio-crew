@@ -24,6 +24,15 @@ pub enum Kind {
 }
 
 impl Kind {
+    pub fn key(&self) -> &'static str {
+        match self {
+            Kind::CodingCli => "cli",
+            Kind::Toolchain => "toolchain",
+            Kind::Engine => "engine",
+            Kind::Asset => "art",
+        }
+    }
+
     pub fn heading(&self) -> &'static str {
         match self {
             Kind::CodingCli => "coding CLIs (at least one is required)",
@@ -316,10 +325,34 @@ pub fn asset_pipeline() -> Vec<Tool> {
     out
 }
 
+pub fn coding_cli_remedy(name: &str) -> Option<Remedy> {
+    let package = match name {
+        "claude" => "@anthropic-ai/claude-code",
+        "codex" => "@openai/codex",
+        "gemini" => "@google/gemini-cli",
+        "copilot" => "@github/copilot",
+        "kimi" => "@moonshotai/kimi-cli",
+        _ => return None,
+    };
+    let says = match name {
+        "claude" => "the studio spawns every worker through this; it is the one CLI the crew runs on",
+        "codex" => "the art crew draws sprites and textures with this; sign in with `codex login` afterwards",
+        _ => "installs the CLI, but the studio cannot drive it yet",
+    };
+    Some(Remedy::runnable(says, &["npm", "install", "-g", package]))
+}
+
 fn probe_command(name: &str, label: &str, kind: Kind) -> Tool {
-    match which(name) {
+    let found = match which(name) {
         Some(path) => Tool::found(name, label, kind, version_of(&path)),
         None => Tool::absent(name, label, kind),
+    };
+    if kind != Kind::CodingCli || found.present {
+        return found;
+    }
+    match coding_cli_remedy(name) {
+        Some(remedy) => found.fixed_by(remedy),
+        None => found,
     }
 }
 

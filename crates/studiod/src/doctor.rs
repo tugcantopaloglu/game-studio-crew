@@ -10,6 +10,14 @@ pub fn report() -> anyhow::Result<()> {
         return fix();
     }
     let found = health::probe();
+    if std::env::args().any(|a| a == "--porcelain") {
+        print!("{}", porcelain(&found));
+        let code = exit_code(&found);
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
+    }
     print!("{}", render(&found));
     let code = exit_code(&found);
     if code != 0 {
@@ -126,6 +134,58 @@ fn render(found: &Requirements) -> String {
 
     out.push_str("anything else reported absent above is optional; the studio runs without it.\n");
     out.push_str(&asset_advice(found));
+    out
+}
+
+fn recommended(name: &str) -> bool {
+    matches!(name, "claude" | "codex")
+}
+
+fn porcelain_field(text: &str) -> String {
+    text.replace(['\t', '\r', '\n'], " ").trim().to_string()
+}
+
+pub fn porcelain(found: &Requirements) -> String {
+    let mut out = String::new();
+    for kind in Kind::ALL {
+        for tool in found.tools.iter().filter(|t| t.kind == kind) {
+            let state = match (tool.present, tool.kind, tool.drivable) {
+                (false, _, _) => "absent",
+                (true, Kind::CodingCli, false) => "unusable",
+                (true, _, _) => "ok",
+            };
+            let detail = match (tool.present, &tool.version, &tool.cannot_drive) {
+                (_, _, Some(why)) => actionable_clause(why),
+                (true, Some(v), None) => v.clone(),
+                (true, None, None) => "present".into(),
+                (false, _, None) => String::new(),
+            };
+            let fix = tool
+                .install
+                .as_ref()
+                .and_then(|r| r.run.as_ref())
+                .map(|run| run.join(" "))
+                .unwrap_or_default();
+            let advice = tool
+                .install
+                .as_ref()
+                .map(|r| r.says.clone())
+                .unwrap_or_default();
+
+            let ticked = if recommended(&tool.name) { "on" } else { "off" };
+
+            out.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                kind.key(),
+                porcelain_field(&tool.label),
+                state,
+                porcelain_field(&detail),
+                porcelain_field(&fix),
+                porcelain_field(&advice),
+                ticked,
+            ));
+        }
+    }
     out
 }
 
