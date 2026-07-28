@@ -62,6 +62,20 @@ PLIST
     cp "$ROOT/README.md" "$STAGE/"
     cp "$ROOT/LICENSE" "$STAGE/" 2>/dev/null || true
     (cd "$ROOT/.package" && tar czf "$DIST/$NAME.tar.gz" "$NAME")
+
+    if command -v hdiutil >/dev/null 2>&1; then
+      DMG_ROOT="$ROOT/.package/dmg-$LABEL"
+      rm -rf "$DMG_ROOT"
+      mkdir -p "$DMG_ROOT"
+      cp -R "$APP" "$DMG_ROOT/"
+      ln -s /Applications "$DMG_ROOT/Applications"
+      cp "$ROOT/README.md" "$DMG_ROOT/"
+      hdiutil create \
+        -volname "Game Studio Crew" \
+        -srcfolder "$DMG_ROOT" \
+        -ov -format UDZO \
+        "$DIST/$NAME.dmg" >/dev/null
+    fi
     ;;
 
   linux-*)

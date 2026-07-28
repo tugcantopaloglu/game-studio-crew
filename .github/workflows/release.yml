@@ -55,6 +55,26 @@ jobs:
         working-directory: desktop
         run: cargo build --release --target ${{ matrix.target }}
 
+      - name: Build the Windows setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe","${env:ProgramFiles}\Inno Setup 6\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $iscc) {
+            winget install --id JRSoftware.InnoSetup --accept-package-agreements --accept-source-agreements --silent
+            $iscc = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe","${env:ProgramFiles}\Inno Setup 6\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+          if (-not $iscc) { throw 'Inno Setup 6 is not available on this runner' }
+
+          & $iscc.FullName `
+            "/DDaemonDir=..\target\${{ matrix.target }}\release" `
+            "/DShellDir=..\desktop\target\${{ matrix.target }}\release" `
+            installer\game-studio-crew.iss
+          if ($LASTEXITCODE -ne 0) { throw 'the installer failed to compile' }
+
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item installer\out\*.exe dist\
+
       - name: Package
         shell: bash
         run: bash packaging/package.sh "${{ matrix.label }}" "${{ matrix.target }}"
@@ -79,6 +99,9 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: Add the one-line installers
+        run: cp scripts/install.sh scripts/install.ps1 dist/
 
       - name: Publish the release
         env:

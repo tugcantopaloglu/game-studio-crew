@@ -7,6 +7,13 @@
 #define DaemonPdb "studiod.pdb"
 #define WebView2Client "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 
+#ifndef DaemonDir
+  #define DaemonDir "..\target\release"
+#endif
+#ifndef ShellDir
+  #define ShellDir "..\desktop\target\release"
+#endif
+
 [Setup]
 AppId={{4C9E0B8A-6D3F-4E21-9C77-2A5E1D0F8B34}
 AppName={#AppName}
@@ -39,9 +46,9 @@ ChangesAssociations=no
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-Source: "..\desktop\target\release\{#ShellExe}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\{#DaemonExe}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\{#DaemonPdb}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ShellDir}\{#ShellExe}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#DaemonDir}\{#DaemonExe}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#DaemonDir}\{#DaemonPdb}"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#ShellExe}"; Comment: "Open the studio floor"

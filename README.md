@@ -74,36 +74,31 @@ Every role has a **frozen charter** — a byte-identical system prompt that neve
 
 ## Quick start
 
-Runs on **Windows, macOS and Linux**. Grab a build from [Releases](../../releases), or build from source.
+Runs on **Windows, macOS and Linux**. One line each:
 
-### Windows
-
-Unzip and run `game-studio.exe`. For a Start Menu entry and a proper uninstaller:
-
+**Windows** (PowerShell)
 ```powershell
-powershell -ExecutionPolicy Bypass -File installer\build.ps1
+irm https://raw.githubusercontent.com/tugcantopaloglu/game-studio-crew/main/scripts/install.ps1 | iex
 ```
 
-That compiles the daemon, the native shell and a per-user installer in one command. The installer needs **no admin rights** and touches neither `PATH` nor any service. On uninstall it asks before removing the studio's own data — your project folders live where you put them and are never touched.
-
-### macOS
-
+**macOS and Linux**
 ```bash
-tar xzf game-studio-crew-1.0.0-macos-aarch64.tar.gz
-mv "Game Studio Crew.app" /Applications/
+curl -fsSL https://raw.githubusercontent.com/tugcantopaloglu/game-studio-crew/main/scripts/install.sh | sh
 ```
 
-The build is unsigned, so the first launch needs right-click → **Open**.
+Each script picks the right build for your platform, downloads it from the latest release and installs it — no admin or root needed. Add `-Portable` on Windows to unpack without running the installer, or set `PREFIX=/usr/local` on Linux to install system-wide.
 
-### Linux
+### Or install by hand
 
-```bash
-tar xzf game-studio-crew-1.0.0-linux-x86_64.tar.gz
-cd game-studio-crew-1.0.0-linux-x86_64
-./install.sh          # installs to ~/.local by default, no root
-```
+Every release ships an installer as well as an archive: a `-setup.exe` for Windows, a `.dmg` for macOS, and a tarball with its own `install.sh` for Linux. See [Releases](../../releases).
 
-The desktop shell needs `libwebkit2gtk-4.1`; the daemon alone has no such dependency.
+| Platform | Installer | Archive |
+|---|---|---|
+| Windows | `game-studio-crew-1.0.0-setup.exe` | `...-windows-x86_64.zip` |
+| macOS | `...-macos-aarch64.dmg` / `...-macos-x86_64.dmg` | `...tar.gz` |
+| Linux | `install.sh` inside the tarball | `...-linux-x86_64.tar.gz` |
+
+The Windows installer needs **no admin rights** and touches neither `PATH` nor any service; on uninstall it asks before removing the studio's own data — your project folders live where you put them and are never touched. The macOS build is unsigned, so the first launch needs right-click → **Open**. The Linux desktop shell needs `libwebkit2gtk-4.1`; the daemon alone has no such dependency.
 
 ### From source
 

@@ -4,17 +4,31 @@ A game studio that runs itself. Thirteen AI specialists working a real project i
 
 No API keys — everything runs through the coding CLI subscription you already have.
 
+## Install in one line
+
+**Windows** (PowerShell)
+```powershell
+irm https://raw.githubusercontent.com/tugcantopaloglu/game-studio-crew/main/scripts/install.ps1 | iex
+```
+
+**macOS and Linux**
+```bash
+curl -fsSL https://raw.githubusercontent.com/tugcantopaloglu/game-studio-crew/main/scripts/install.sh | sh
+```
+
+Each script detects your platform, pulls the matching build from this release and installs it without admin or root. `install.ps1 -Portable` unpacks instead of installing; `PREFIX=/usr/local` installs system-wide on Linux.
+
 ## Downloads
 
-| Platform | File |
-|---|---|
-| Windows (x86_64) | `game-studio-crew-1.0.0-windows-x86_64.zip` |
-| macOS (Apple Silicon) | `game-studio-crew-1.0.0-macos-aarch64.tar.gz` |
-| macOS (Intel) | `game-studio-crew-1.0.0-macos-x86_64.tar.gz` |
-| Linux (x86_64) | `game-studio-crew-1.0.0-linux-x86_64.tar.gz` |
+| Platform | Installer | Archive |
+|---|---|---|
+| Windows (x86_64) | `game-studio-crew-1.0.0-setup.exe` | `game-studio-crew-1.0.0-windows-x86_64.zip` |
+| macOS (Apple Silicon) | `game-studio-crew-1.0.0-macos-aarch64.dmg` | `game-studio-crew-1.0.0-macos-aarch64.tar.gz` |
+| macOS (Intel) | `game-studio-crew-1.0.0-macos-x86_64.dmg` | `game-studio-crew-1.0.0-macos-x86_64.tar.gz` |
+| Linux (x86_64) | `install.sh` inside the tarball | `game-studio-crew-1.0.0-linux-x86_64.tar.gz` |
 
-**Windows** — unzip and run `game-studio.exe`, or build the installer with `installer\build.ps1` for a Start Menu entry.
-**macOS** — unpack and move `Game Studio Crew.app` to Applications. The build is unsigned, so the first launch needs right-click → Open.
+**Windows** — the setup is per-user: no admin rights, no `PATH` changes, no service. On uninstall it asks before removing the studio's own data.
+**macOS** — open the `.dmg` and drag the app to Applications. The build is unsigned, so the first launch needs right-click → Open.
 **Linux** — unpack and run `./install.sh` (installs to `~/.local` by default, no root). Needs `libwebkit2gtk-4.1` for the desktop shell; the daemon alone has no such dependency.
 
 Run `studiod doctor` first on any platform. It tells you what is installed and, separately, what can actually spawn a worker.
