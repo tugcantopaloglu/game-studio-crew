@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "game-studio-shell"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "embed-resource",
  "studio-core",
@@ -1927,7 +1927,7 @@ dependencies = [
 
 [[package]]
 name = "studio-context"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "blake3",
  "serde",
@@ -1937,7 +1937,7 @@ dependencies = [
 
 [[package]]
 name = "studio-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1950,7 +1950,7 @@ dependencies = [
 
 [[package]]
 name = "studio-events"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "serde_json",
