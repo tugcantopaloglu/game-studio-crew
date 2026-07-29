@@ -86,7 +86,34 @@ function selectEverywhere(game) {
   select.value = game.id;
 }
 
-function card(game, onRead) {
+async function drop(game, how, refresh) {
+  const asked =
+    how === "forget"
+      ? `Take ${game.name} off the list?\n\nEvery run, capsule and decision it made stays on file, and nothing in ${game.root} is touched. You can adopt the folder again later.`
+      : `Erase ${game.name}?\n\nEvery run, event, capsule and ledger row it made is deleted and cannot be brought back.\n\nThe files in ${game.root} are NOT touched.`;
+  if (!window.confirm(asked)) return;
+
+  try {
+    const gone = await api("/projects/" + how, { body: { id: game.id } });
+    if (project() === game.id) setProject("");
+    const select = document.getElementById("project");
+    if (select) {
+      for (const option of Array.from(select.options)) {
+        if (option.value === game.id) option.remove();
+      }
+    }
+    toast(
+      how === "forget"
+        ? `${gone.name} is off the list; its history is still on file`
+        : `${gone.name} erased: ${gone.tasks} task(s), ${gone.events} event(s), ${gone.capsules} capsule(s). Your files were not touched.`
+    );
+    await refresh();
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+function card(game, onRead, refresh) {
   const node = el("div", { class: "card" });
   const selected = project() === game.id;
   node.style.cursor = "pointer";
@@ -106,6 +133,18 @@ function card(game, onRead) {
     el("div", { class: game.exists ? "k" : "bad", text: historyLine(game) })
   );
   node.append(summaryBlock(game, onRead));
+
+  const forget = el("button", {
+    text: "off the list",
+    title: "stop showing it here; its runs, capsules and decisions stay on file",
+    onclick: () => drop(game, "forget", refresh),
+  });
+  const erase = el("button", {
+    text: "erase",
+    title: "delete everything it ever ran; the folder itself is not touched",
+    onclick: () => drop(game, "purge", refresh),
+  });
+  node.append(el("div", { class: "row" }, el("span", {}), forget, erase));
 
   node.addEventListener("click", (ev) => {
     if (ev.target.tagName === "BUTTON") return;
@@ -208,7 +247,7 @@ export function mount(root) {
       return;
     }
     for (const game of games) {
-      list.append(card(game, (button) => read(game, button)));
+      list.append(card(game, (button) => read(game, button), refresh));
     }
   }
 

@@ -139,43 +139,6 @@ export function mount(root) {
       toast(err.message);
     }
   }
-  const drop = el("select");
-  drop.append(
-    el("option", { value: "", text: "remove this game…" }),
-    el("option", { value: "forget", text: "take it off the list, keep its history" }),
-    el("option", { value: "purge", text: "erase it and everything it ever ran" }),
-  );
-
-  drop.onchange = async () => {
-    const how = drop.value;
-    drop.value = "";
-    const id = picked.value;
-    if (!how) return;
-    if (!id) return toast("pick a game first");
-
-    const label = picked.options[picked.selectedIndex].text;
-    const asked =
-      how === "forget"
-        ? `Take ${label} off the list?\n\nIts runs, capsules and decisions stay on file, and nothing in the folder is touched.`
-        : `Erase ${label}?\n\nEvery run, event, capsule and ledger row it ever made is deleted and cannot be brought back.\n\nThe files in the folder itself are NOT touched.`;
-    if (!window.confirm(asked)) return;
-
-    drop.disabled = true;
-    try {
-      const gone = await api("/projects/" + how, { body: { id } });
-      if (project() === id) setProject("");
-      await drawProjects();
-      toast(
-        how === "forget"
-          ? `${gone.name} is off the list; its history is still on file`
-          : `${gone.name} erased: ${gone.tasks} task(s), ${gone.events} event(s), ${gone.capsules} capsule(s). Your files were not touched.`,
-      );
-    } catch (err) {
-      toast(err.message);
-    }
-    drop.disabled = false;
-  };
-
   picked.onchange = () => setProject(picked.value);
   onProject((id) => {
     if (picked.value !== id) picked.value = id || "";
@@ -419,7 +382,6 @@ export function mount(root) {
   roles.append(
     el("div", { class: "sec", text: "the run" }),
     picked,
-    drop,
     brief,
     el("label", { class: "check" }, confirm, "approve every step"),
     el("div", {
