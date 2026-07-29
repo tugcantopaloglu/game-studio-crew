@@ -166,9 +166,9 @@ pub fn blockers() -> Vec<String> {
     if !script.is_file() {
         out.push(format!(
             "codex's imagegen skill is not installed at {}, so there is no background remover to \
-             run; update codex with `npm i -g @openai/codex` and open it once so it unpacks its \
-             bundled skills",
-            script.display()
+             run; update codex with `{}` and open it once so it unpacks its bundled skills",
+            script.display(),
+            crate::health::codex_install_command()
         ));
     }
     out

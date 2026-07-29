@@ -270,8 +270,9 @@ pub fn blockers(installed: bool, enabled: bool) -> Vec<String> {
     if !installed {
         out.push(format!(
             "{PROGRAM} is not on PATH, so there is nothing to drive; install it with \
-             `npm i -g @openai/codex` and sign in with `{PROGRAM} login`, or switch this off and \
-             the art crew keeps building assets by hand exactly as it does today"
+             `{}` and sign in with `{PROGRAM} login`, or switch this off and \
+             the art crew keeps building assets by hand exactly as it does today",
+            crate::health::codex_install_command()
         ));
     }
     out
@@ -920,7 +921,8 @@ fn run_codex(
     let (program, leading) = spawnable(PROGRAM).ok_or_else(|| {
         format!(
             "{PROGRAM} is on PATH but not in a form this machine can start; reinstall it with \
-             `npm i -g @openai/codex` so a launcher lands on PATH"
+             `{}` so a launcher lands on PATH",
+            crate::health::codex_install_command()
         )
     })?;
 
@@ -2284,7 +2286,12 @@ mod tests {
         let said = blockers(false, true);
         assert_eq!(said.len(), 1, "only the missing binary is wrong here");
         assert!(said[0].contains("not on PATH"));
-        assert!(said[0].contains("npm i -g @openai/codex"));
+        assert!(
+            said[0].contains(&crate::health::codex_install_command()),
+            "the reason has to carry the command that fixes it: {}",
+            said[0]
+        );
+        assert!(!said[0].contains("npm"), "codex ships its own installer: {}", said[0]);
     }
 
     #[test]

@@ -130,7 +130,7 @@ So the doctor reports an **asset pipeline** section beside the coding CLIs, the 
 | Reported | Needed for | If absent |
 |---|---|---|
 | `node` | baking a model into the `.glb` an engine imports, and reading a mixamo clip | `winget install -e --id OpenJS.NodeJS.LTS` |
-| `codex` | drawing sprites and textures, and writing model source | `npm install -g @openai/codex`, then `codex login` |
+| `codex` | drawing sprites and textures, and writing model source | the installer OpenAI publishes for this OS, then `codex login` |
 | `python` with `pillow` | removing the background from a generated sprite | `winget install -e --id Python.Python.3.13`, or `<that python> -m pip install pillow` |
 | codex's imagegen skill | the background remover codex ships beside its own image skill | install or update codex and open it once |
 
@@ -154,6 +154,14 @@ An incomplete art pipeline is **not a broken install**, and none of this may rea
 It never claims to do what it cannot: a tool whose remedy has no runnable command is listed as "nothing to run" with the instruction, and `codex login` is called out separately every time, because a sign-in is the user's to give.
 
 The winget package ids were checked against `winget search` on a real machine rather than recalled, because a confidently wrong package id is worse than no suggestion.
+
+### Nothing is installed through npm that ships its own installer
+
+`claude`, `codex` and `kimi` each publish a standalone build and a one-line installer per operating system, and Copilot publishes one for macOS and Linux and a winget package for Windows. Reaching for `npm i -g` instead would put a node runtime and a `.cmd` shim between the studio and a binary that needs neither — and that shim is not hypothetical, it is the thing `launcher_for` exists to work around, because `CreateProcess` cannot start the extensionless sibling npm drops beside it.
+
+So the remedy is the vendor's own line: `irm …/install.ps1 | iex` on Windows, `curl -fsSL …/install.sh | sh` elsewhere. `gemini` is the exception and still goes through npm, because Google publishes nothing else, and its remedy says so in as many words rather than leaving the odd one out unexplained.
+
+**A piped installer is one argument, not a command line.** The remedy names the shell — `powershell -ExecutionPolicy ByPass -c`, or `sh -c` — and hands it the whole pipeline as a single argv entry, so `doctor --fix` spawns it directly with no shell of its own and no re-parsing. When the same remedy is *printed* — in the report, and in the tab-separated row the Windows installer reads — `command_line()` puts the quotes back around anything holding whitespace or a shell operator, because the installer runs that line through `cmd /C`, where a bare `|` would be cmd's own pipe and `iex` would be started as a program.
 
 ## Where a generated asset lands
 

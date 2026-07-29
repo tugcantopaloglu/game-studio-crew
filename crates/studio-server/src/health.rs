@@ -80,6 +80,49 @@ impl Remedy {
             run: Some(run.iter().map(|s| s.to_string()).collect()),
         }
     }
+
+    pub fn through_a_shell(says: &str, line: &str) -> Self {
+        Self {
+            says: says.into(),
+            run: Some(shell_around(line)),
+        }
+    }
+
+    pub fn command_line(&self) -> Option<String> {
+        self.run.as_ref().map(|run| command_line(run))
+    }
+}
+
+fn shell_around(line: &str) -> Vec<String> {
+    let shell: &[&str] = if cfg!(windows) {
+        &["powershell", "-ExecutionPolicy", "ByPass", "-c"]
+    } else {
+        &["sh", "-c"]
+    };
+    shell
+        .iter()
+        .map(|s| s.to_string())
+        .chain(std::iter::once(line.to_string()))
+        .collect()
+}
+
+pub fn command_line(run: &[String]) -> String {
+    run.iter()
+        .map(|arg| quoted(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn quoted(arg: &str) -> String {
+    let loose = arg.is_empty()
+        || arg
+            .chars()
+            .any(|c| c.is_whitespace() || "|&<>^\"".contains(c));
+    if loose {
+        format!("\"{}\"", arg.replace('"', "\\\""))
+    } else {
+        arg.to_string()
+    }
 }
 
 impl Tool {
@@ -257,11 +300,23 @@ pub fn pillow_remedy(python: &str) -> Remedy {
     )
 }
 
+fn codex_installer() -> &'static str {
+    if cfg!(windows) {
+        "irm https://chatgpt.com/codex/install.ps1 | iex"
+    } else {
+        "curl -fsSL https://chatgpt.com/codex/install.sh | sh"
+    }
+}
+
 pub fn codex_remedy() -> Remedy {
-    Remedy::runnable(
+    Remedy::through_a_shell(
         "install the codex CLI and sign in with `codex login` afterwards",
-        &["npm", "install", "-g", "@openai/codex"],
+        codex_installer(),
     )
+}
+
+pub fn codex_install_command() -> String {
+    codex_remedy().command_line().unwrap_or_default()
 }
 
 pub fn asset_pipeline() -> Vec<Tool> {
@@ -325,21 +380,50 @@ pub fn asset_pipeline() -> Vec<Tool> {
     out
 }
 
-pub fn coding_cli_remedy(name: &str) -> Option<Remedy> {
-    let package = match name {
-        "claude" => "@anthropic-ai/claude-code",
-        "codex" => "@openai/codex",
-        "gemini" => "@google/gemini-cli",
-        "copilot" => "@github/copilot",
-        "kimi" => "@moonshotai/kimi-cli",
+fn native_installer(name: &str) -> Option<&'static str> {
+    Some(match (name, cfg!(windows)) {
+        ("claude", true) => "irm https://claude.ai/install.ps1 | iex",
+        ("claude", false) => "curl -fsSL https://claude.ai/install.sh | bash",
+        ("codex", _) => codex_installer(),
+        ("copilot", false) => "curl -fsSL https://gh.io/copilot-install | bash",
+        ("kimi", true) => "irm https://code.kimi.com/install.ps1 | iex",
+        ("kimi", false) => "curl -LsSf https://code.kimi.com/install.sh | bash",
         _ => return None,
-    };
-    let says = match name {
+    })
+}
+
+fn cli_says(name: &str) -> &'static str {
+    match name {
         "claude" => "the studio spawns every worker through this; it is the one CLI the crew runs on",
         "codex" => "the art crew draws sprites and textures with this; sign in with `codex login` afterwards",
         _ => "installs the CLI, but the studio cannot drive it yet",
-    };
-    Some(Remedy::runnable(says, &["npm", "install", "-g", package]))
+    }
+}
+
+pub fn coding_cli_remedy(name: &str) -> Option<Remedy> {
+    if let Some(installer) = native_installer(name) {
+        return Some(Remedy::through_a_shell(cli_says(name), installer));
+    }
+    match name {
+        "copilot" => Some(Remedy::runnable(
+            cli_says(name),
+            &[
+                "winget",
+                "install",
+                "-e",
+                "--id",
+                "GitHub.Copilot",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+            ],
+        )),
+        "gemini" => Some(Remedy::runnable(
+            "gemini is the one CLI that publishes no installer of its own, so this route goes \
+             through npm and needs node on PATH",
+            &["npm", "install", "-g", "@google/gemini-cli"],
+        )),
+        _ => None,
+    }
 }
 
 fn probe_command(name: &str, label: &str, kind: Kind) -> Tool {
@@ -633,6 +717,105 @@ mod tests {
         );
         assert_eq!(first_useful_line(&text).unwrap(), "probe 9.9");
         drop(child.stderr.take());
+    }
+
+    #[test]
+    fn every_coding_cli_is_installed_the_way_its_own_vendor_ships_it() {
+        for name in CODING_CLIS {
+            let remedy = coding_cli_remedy(name)
+                .unwrap_or_else(|| panic!("{name} is listed but offers no way to install it"));
+            let run = remedy
+                .run
+                .unwrap_or_else(|| panic!("{name} has an installer but nothing to run"));
+
+            if name == "gemini" {
+                assert_eq!(
+                    run.first().map(String::as_str),
+                    Some("npm"),
+                    "gemini is the only one left on npm; if that changed, this table did not"
+                );
+                continue;
+            }
+            assert_ne!(
+                run.first().map(String::as_str),
+                Some("npm"),
+                "{name} publishes a standalone installer, and npm drags node in behind a CLI \
+                 that ships as a binary"
+            );
+        }
+    }
+
+    #[test]
+    fn the_installer_a_remedy_names_is_fetched_over_a_channel_that_cannot_be_rewritten_in_flight() {
+        for name in CODING_CLIS {
+            let Some(line) = native_installer(name) else {
+                continue;
+            };
+            assert!(
+                line.contains("https://"),
+                "{name} would be piped into a shell straight off the wire: {line}"
+            );
+            assert!(!line.contains("http://"), "{name} fetches over http: {line}");
+        }
+    }
+
+    #[test]
+    fn a_piped_installer_stays_one_argument_so_the_shell_it_names_is_the_one_reading_the_pipe() {
+        let remedy = Remedy::through_a_shell("says", "irm https://studio.test/install.ps1 | iex");
+        let run = remedy.run.clone().expect("a shelled remedy always runs");
+
+        assert_eq!(
+            run.last().map(String::as_str),
+            Some("irm https://studio.test/install.ps1 | iex"),
+            "splitting the pipeline into argv would hand `iex` to the caller as a program"
+        );
+        let line = remedy.command_line().expect("a shelled remedy renders a line");
+        assert!(
+            line.ends_with("\"irm https://studio.test/install.ps1 | iex\""),
+            "an unquoted pipe is read by whatever shell runs the printed line rather than by \
+             the one the remedy names: {line}"
+        );
+    }
+
+    #[test]
+    fn a_rendered_command_quotes_what_would_otherwise_split_and_leaves_the_rest_alone() {
+        let plain = ["winget".to_string(), "install".to_string(), "-e".to_string()];
+        assert_eq!(command_line(&plain), "winget install -e");
+
+        let spaced = [
+            r"C:\Program Files\Python313\python.exe".to_string(),
+            "-m".to_string(),
+            "pip".to_string(),
+        ];
+        assert_eq!(
+            command_line(&spaced),
+            r#""C:\Program Files\Python313\python.exe" -m pip"#,
+            "an interpreter under Program Files is the common case, not the exotic one"
+        );
+    }
+
+    #[test]
+    fn every_remedy_names_a_program_that_can_be_started_without_a_shell_in_front_of_it() {
+        let remedies = CODING_CLIS
+            .iter()
+            .filter_map(|name| coding_cli_remedy(name))
+            .chain([
+                codex_remedy(),
+                node_remedy(),
+                python_remedy(),
+                pillow_remedy("python"),
+            ]);
+        for remedy in remedies {
+            let Some(run) = remedy.run else {
+                continue;
+            };
+            let program = run.first().expect("a runnable remedy has a program");
+            assert!(
+                !program.contains(' ') && !program.contains('|'),
+                "doctor --fix spawns this directly, so `{program}` would be looked up on PATH \
+                 as one whole name"
+            );
+        }
     }
 
     #[test]

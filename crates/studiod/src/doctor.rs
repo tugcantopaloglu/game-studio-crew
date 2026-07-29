@@ -163,8 +163,7 @@ pub fn porcelain(found: &Requirements) -> String {
             let fix = tool
                 .install
                 .as_ref()
-                .and_then(|r| r.run.as_ref())
-                .map(|run| run.join(" "))
+                .and_then(|r| r.command_line())
                 .unwrap_or_default();
             let advice = tool
                 .install
@@ -217,8 +216,8 @@ fn asset_advice(found: &Requirements) -> String {
         }
         if let Some(remedy) = &tool.install {
             out.push_str(&format!("\n     {}", remedy.says));
-            if let Some(run) = &remedy.run {
-                out.push_str(&format!("\n     run: {}", run.join(" ")));
+            if let Some(line) = remedy.command_line() {
+                out.push_str(&format!("\n     run: {line}"));
             }
         }
         out.push('\n');
@@ -254,8 +253,8 @@ pub fn fix() -> anyhow::Result<()> {
 
     println!("this will change what is installed on this machine:\n");
     for tool in &missing {
-        match tool.install.as_ref().and_then(|r| r.run.as_ref()) {
-            Some(run) => println!("  {:<22} {}", tool.label, run.join(" ")),
+        match tool.install.as_ref().and_then(|r| r.command_line()) {
+            Some(line) => println!("  {:<22} {}", tool.label, line),
             None => println!(
                 "  {:<22} nothing to run: {}",
                 tool.label,
@@ -286,8 +285,9 @@ pub fn fix() -> anyhow::Result<()> {
             continue;
         };
 
+        let line = health::command_line(run);
         println!("\n{} is missing.", tool.label);
-        println!("  running: {}", run.join(" "));
+        println!("  running: {line}");
         let said = studio_core::command(program).args(args).status();
         match said {
             Ok(status) if status.success() => {
@@ -297,7 +297,7 @@ pub fn fix() -> anyhow::Result<()> {
             Ok(status) => left.push(format!(
                 "{}: `{}` exited {}",
                 tool.label,
-                run.join(" "),
+                line,
                 status.code().unwrap_or(-1)
             )),
             Err(e) => left.push(format!("{}: could not run {program} ({e})", tool.label)),
@@ -366,6 +366,29 @@ mod tests {
         assert!(
             said.contains("the studio works without any of them"),
             "an optional pipeline must never read as a broken install"
+        );
+    }
+
+    #[test]
+    fn the_command_the_installer_runs_keeps_a_pipeline_inside_the_quotes_that_own_it() {
+        let found = Requirements::new(vec![Tool::absent("codex", "codex", Kind::CodingCli)
+            .fixed_by(health::codex_remedy())]);
+        let row = porcelain(&found);
+        let fix = row
+            .trim_end()
+            .split('\t')
+            .nth(4)
+            .expect("the fifth column is the command the installer runs");
+
+        let (ahead, _) = fix
+            .split_once('|')
+            .unwrap_or_else(|| panic!("codex installs by fetching a script into a shell: {fix}"));
+        assert_eq!(
+            ahead.matches('"').count() % 2,
+            1,
+            "the installer hands this line to cmd /C, which reads an unquoted pipe as its own \
+             and would start `iex` as a program instead of letting it reach the shell the \
+             remedy names: {fix}"
         );
     }
 
