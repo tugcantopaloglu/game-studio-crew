@@ -87,12 +87,9 @@ pub fn usd_mirror(model: Model, u: Usage) -> f64 {
         / 1_000_000.0
 }
 
-pub fn billable_tokens(u: Usage) -> u64 {
-    (u.input as f64
-        + u.output as f64
-        + u.cache_read as f64 * CACHE_READ_MULTIPLIER
-        + u.cache_creation as f64 * CACHE_WRITE_MULTIPLIER)
-        .round() as u64
+pub fn charged_tokens(u: Usage) -> u64 {
+    (u.input as f64 + u.output as f64 + u.cache_creation as f64 * CACHE_WRITE_MULTIPLIER).round()
+        as u64
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -160,7 +157,7 @@ impl Projection {
     }
 
     pub fn total(&self) -> u64 {
-        billable_tokens(self.opening_turn()).max(self.node_reserve)
+        charged_tokens(self.opening_turn()).max(self.node_reserve)
     }
 
     pub fn projected_usd(&self, model: Model) -> f64 {
@@ -315,12 +312,12 @@ mod tests {
         let cold = proj(100_000, 500, 2_000, false);
         let warm = proj(100_000, 500, 2_000, true);
 
-        assert_eq!(cold.total(), billable_tokens(cold.opening_turn()));
-        assert_eq!(warm.total(), billable_tokens(warm.opening_turn()));
+        assert_eq!(cold.total(), charged_tokens(cold.opening_turn()));
+        assert_eq!(warm.total(), charged_tokens(warm.opening_turn()));
         assert!(
             cold.total() > warm.total(),
-            "the same prefix is a cache write at {CACHE_WRITE_MULTIPLIER}x cold and a read at \
-             {CACHE_READ_MULTIPLIER}x warm; adding raw token counts prices both at 1x and cannot \
+            "the same prefix is a cache write at {CACHE_WRITE_MULTIPLIER}x cold and a re-read of \
+             tokens already paid for warm; adding raw token counts prices both at 1x and cannot \
              tell the expensive spawn from the cheap one"
         );
     }
@@ -623,15 +620,21 @@ mod tests {
 }
 
 #[cfg(test)]
-mod billable_tests {
+mod charged_tests {
     use super::*;
 
     #[test]
-    fn a_cache_read_costs_a_tenth_of_a_fresh_input_token() {
+    fn a_cache_read_costs_the_ceiling_nothing_because_the_run_already_paid_for_it() {
         let cached = Usage { input: 0, output: 0, cache_read: 1000, cache_creation: 0 };
         let fresh = Usage { input: 1000, output: 0, cache_read: 0, cache_creation: 0 };
-        assert_eq!(billable_tokens(cached), 100);
-        assert_eq!(billable_tokens(fresh), 1000);
+        assert_eq!(charged_tokens(cached), 0);
+        assert_eq!(charged_tokens(fresh), 1000);
+    }
+
+    #[test]
+    fn a_cache_write_still_carries_its_full_premium() {
+        let cold = Usage { input: 500, output: 800, cache_read: 0, cache_creation: 30_000 };
+        assert_eq!(charged_tokens(cold), 61_300);
     }
 
     #[test]
@@ -640,23 +643,39 @@ mod billable_tests {
         let cold = Usage { input: 500, output: 800, cache_read: 0, cache_creation: 30_000 };
 
         assert!(
-            billable_tokens(warm) * 10 < billable_tokens(cold),
+            charged_tokens(warm) * 10 < charged_tokens(cold),
             "warm {} should be an order of magnitude under cold {}",
-            billable_tokens(warm),
-            billable_tokens(cold)
+            charged_tokens(warm),
+            charged_tokens(cold)
         );
     }
 
     #[test]
-    fn billing_tracks_the_dollar_mirror_rather_than_raw_token_count() {
-        let u = Usage { input: 1000, output: 0, cache_read: 100_000, cache_creation: 0 };
-        let raw = u.input + u.output + u.cache_read + u.cache_creation;
+    fn re_reading_a_prefix_every_turn_cannot_walk_a_node_past_its_own_budget() {
+        let long_session = Usage {
+            input: 5_409,
+            output: 15_000,
+            cache_read: 2_741_680,
+            cache_creation: 0,
+        };
 
-        assert_eq!(raw, 101_000);
-        assert_eq!(billable_tokens(u), 11_000);
+        assert_eq!(charged_tokens(long_session), 20_409);
         assert!(
-            billable_tokens(u) < raw / 5,
-            "charging cache reads at face value is what starved the run"
+            charged_tokens(long_session) < 120_000,
+            "this is the game_designer node that ended a twelve-task build at step five: 20,409 \
+             tokens of real traffic charged as 294,577 because every turn re-read the history the \
+             last one grew, so one node ate 2.45x the 120,000 its plan gave it while the dollar \
+             meter still read $1.88 of $25"
+        );
+    }
+
+    #[test]
+    fn the_dollar_mirror_still_prices_every_cache_read_it_is_charged_for() {
+        let u = Usage { input: 0, output: 0, cache_read: 1_000_000, cache_creation: 0 };
+        assert_eq!(charged_tokens(u), 0);
+        assert!(
+            usd_mirror(Model::Opus, u) > 0.0,
+            "the ceiling stops counting re-reads; the price of them is still real and still shown"
         );
     }
 }

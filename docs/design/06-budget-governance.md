@@ -36,7 +36,7 @@ So the ceiling is checked before the human is. A run with nothing left is told w
 
 The same run overshot its ceiling by 43%, and the ordering fix above does not explain that — a gate cannot stop what it never saw coming. The pre-spawn projection was wrong by two orders of magnitude: 3,173 tokens projected against nodes settling near 300,000 billed. Two separate mistakes produced that.
 
-**The projection was counted in raw tokens while the ledger charges in weighted ones.** `billable_tokens` prices a cache write at `CACHE_WRITE_MULTIPLIER` and a read at `CACHE_READ_MULTIPLIER`; `Projection::total` added its three fields at 1x, so it could not tell an expensive cold spawn from a cheap warm one — a distinction `projected_usd` was already making one function away, from the same fields. `total()` now builds the same `Usage` that `projected_usd` builds and hands it to `billable_tokens`: one description of the opening turn, read once as tokens and once as dollars, never diverging again.
+**The projection was counted in raw tokens while the ledger charges in weighted ones.** `charged_tokens` prices a cache write at `CACHE_WRITE_MULTIPLIER`; `Projection::total` added its three fields at 1x, so it could not tell an expensive cold spawn from a cheap warm one — a distinction `projected_usd` was already making one function away, from the same fields. `total()` now builds the same `Usage` that `projected_usd` builds and hands it to `charged_tokens`, so the gate weighs an opening turn the way the ledger will charge it.
 
 **And the opening turn is not the unit being admitted.** A node is a worker session of many turns, each re-reading the history the last one grew — on the run above, one node read 737,086 cached tokens and wrote 208,752. No arithmetic over the first prompt reaches that number, so the projection now carries a `node_reserve` floor: what the plan itself said the node was worth (`budget_tokens`, 120,000 a step), raised to what nodes have actually been costing in this run once any have finished. The gate asks "do I have room for a node?" instead of "do I have room for a greeting?".
 
@@ -47,6 +47,18 @@ That makes admission stateful, and the contract moves with it: an `admit` never 
 **A refusal stays terminal, and here that is right.** Refusing on reservations rather than on spend could in principle stop a run that is only briefly saturated. Reaching that state needs a wave's reservations to exceed the remainder while the ceiling is otherwise ample, which a run with room to spare never does; when it does happen, the run cannot fit its own plan, and `HardStop` with a message naming `budget.tokens` is the honest answer rather than a retry loop.
 
 **What remains: one node can still exceed its own reservation.** Nothing kills a worker mid-session, so a node admitted against a 228,557-token estimate that goes on to spend 529,351 is stopped only when the next node asks. The residual is bounded by one node instead of a whole wave, and that is the honest claim — in-flight enforcement ([13](13-risks.md)) is what would close it.
+
+### The ceiling counts new tokens, not re-read ones
+
+Weighting the meter correctly is not the same as pointing it at the right quantity, and the first run after the fixes above proved it. A twelve-task build stopped at `t5` with `projected 294577 tokens exceeds the 261692 left in the sprint budget`, having spent **$1.88 of its $25** — 7.5% of the money and 100% of the tokens. Eleven of twelve steps never ran, and the run could not be resumed into the same ceiling.
+
+One node caused all of it. `game_designer` moved 5,409 input and 15,000 output tokens across its session and re-read **2,741,680** cached ones, because a worker session of many turns re-reads the history the last turn grew. At `CACHE_READ_MULTIPLIER` that re-reading alone charged 274,168 tokens, so a node worth 20,409 tokens of real traffic was charged 294,577 — **2.45× the 120,000 its plan gave it**, and 2.45× what every node after it then reserved, because `what_a_node_has_been_costing` propagates the average. Three in-flight nodes held 883,731 between them and `t5` was refused against a remainder that was never really gone.
+
+**A cache read is a token the run has already paid for.** It is charged on write, at a 2.0× premium, precisely so the re-reads are cheap; charging 10% of each one again makes a node's ceiling cost grow with the square of its turn count and makes the whole architecture's success — a warm prefix read forty times — read as budget pressure. So `charged_tokens` counts input, output and cache writes, and stops counting cache reads. `re_reading_a_prefix_every_turn_cannot_walk_a_node_past_its_own_budget` pins that node's real numbers against the 120,000 it was given.
+
+This is the one place the token ledger and the USD mirror deliberately diverge, and the direction matters: **USD still prices every cache read** at `CACHE_READ_MULTIPLIER`, so nothing about the cost the run reports or the `budget.usd` ceiling changes. Only what the token ceiling counts does. The two numbers answer different questions — what did this run cost, and how much more of the plan can it still afford — and re-read tokens belong in the first answer and not the second.
+
+The console line lagged the same distinction: it printed `input + output` while the enforcer charged the weighted number, so the refusal that followed cited a figure no line of the log contained. It now prints what was charged.
 
 ### In-flight enforcement reads real numbers
 

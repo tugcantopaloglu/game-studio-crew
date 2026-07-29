@@ -623,7 +623,7 @@ fn run_worker_body(
     } else {
         studio_budget::usd_mirror(seat.model, priced)
     };
-    spend.billed_tokens = studio_budget::billable_tokens(priced);
+    spend.billed_tokens = studio_budget::charged_tokens(priced);
     spend.cost_usd = cost_usd;
 
     em.store.record_usage(
@@ -704,10 +704,7 @@ fn run_worker_body(
 
     println!(
         "  {:<20} {:?} {} tokens ${:.4}",
-        role.id,
-        report.outcome,
-        usage.input + usage.output,
-        cost_usd
+        role.id, report.outcome, spend.billed_tokens, cost_usd
     );
 
     if report.outcome != Outcome::Completed {
