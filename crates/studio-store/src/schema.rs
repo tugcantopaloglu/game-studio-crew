@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 pub const BUSY_TIMEOUT_MS: u32 = 5_000;
 
@@ -39,6 +39,9 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
     if current < 3 {
         apply_step(conn, 3, V3)?;
+    }
+    if current < 4 {
+        apply_step(conn, 4, V4)?;
     }
 
     Ok(())
@@ -217,6 +220,11 @@ CREATE INDEX projects_last_used ON projects(last_used DESC);
 
 ALTER TABLE tasks ADD COLUMN project TEXT REFERENCES projects(id);
 CREATE INDEX tasks_project ON tasks(project);
+"#;
+
+const V4: &str = r#"
+ALTER TABLE projects ADD COLUMN forgotten_ts TEXT;
+CREATE INDEX projects_forgotten ON projects(forgotten_ts);
 "#;
 
 #[cfg(test)]

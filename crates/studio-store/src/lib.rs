@@ -40,6 +40,14 @@ pub struct ProjectRow {
     pub git: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Purged {
+    pub tasks: usize,
+    pub events: usize,
+    pub capsules: usize,
+    pub ledger_rows: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoleRow {
     pub id: String,
@@ -59,6 +67,7 @@ pub struct TaskRow {
     pub workflow_node: Option<String>,
     pub state: WorkerState,
     pub outcome: Option<Outcome>,
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -132,6 +141,8 @@ enum Cmd {
     UpsertRole(RoleRow, Reply<()>),
     InsertProject(ProjectRow, String, Reply<()>),
     TouchProject(String, String, Reply<()>),
+    ForgetProject(String, String, Reply<bool>),
+    PurgeProject(String, Reply<Purged>),
     InsertCapsule(CapsuleRow, String, Reply<()>),
     InsertDecision(DecisionRow, String, Reply<()>),
     InsertTask(TaskRow, String, Reply<()>),
@@ -257,10 +268,21 @@ impl Store {
         let conn = self.reader()?;
         let mut stmt = conn.prepare(
             "SELECT id, name, root, engine, git FROM projects
+             WHERE forgotten_ts IS NULL
              ORDER BY last_used DESC NULLS LAST, created_ts DESC",
         )?;
         let rows = stmt.query_map([], project_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn forget_project(&self, id: impl Into<String>, ts: impl Into<String>) -> Result<bool> {
+        let (id, ts) = (id.into(), ts.into());
+        self.send(|r| Cmd::ForgetProject(id, ts, r))
+    }
+
+    pub fn purge_project(&self, id: impl Into<String>) -> Result<Purged> {
+        let id = id.into();
+        self.send(|r| Cmd::PurgeProject(id, r))
     }
 
     pub fn project(&self, id: &str) -> Result<Option<ProjectRow>> {
@@ -520,6 +542,7 @@ impl Store {
                 workflow_node: r.get(4)?,
                 state: serde_json::from_str(&format!("\"{state}\"")).unwrap_or(WorkerState::Queued),
                 outcome: None,
+                project: None,
             };
             let session = match r.get::<_, Option<String>>(6)? {
                 Some(session_id) => Some(SessionRow {
@@ -576,6 +599,65 @@ fn outcome_tag(o: Outcome) -> String {
         .unwrap_or_default()
 }
 
+fn purge_project(conn: &Connection, id: &str) -> Result<Purged> {
+    conn.execute_batch("PRAGMA defer_foreign_keys = ON; BEGIN IMMEDIATE")?;
+    let purged = cascade(conn, id);
+    match purged {
+        Ok(counted) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(counted)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+fn cascade(conn: &Connection, id: &str) -> Result<Purged> {
+    let tasks: Vec<String> = conn
+        .prepare("SELECT id FROM tasks WHERE project = ?1")?
+        .query_map(params![id], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let runs: Vec<String> = conn
+        .prepare(
+            "SELECT DISTINCT run FROM tasks WHERE project = ?1
+             AND run NOT IN (SELECT run FROM tasks WHERE project IS NOT ?1)",
+        )?
+        .query_map(params![id], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut counted = Purged::default();
+    for task in &tasks {
+        conn.execute(
+            "DELETE FROM artifacts WHERE capsule IN (SELECT id FROM capsules WHERE task = ?1)",
+            params![task],
+        )?;
+        conn.execute(
+            "DELETE FROM decisions WHERE origin_capsule IN
+             (SELECT id FROM capsules WHERE task = ?1)",
+            params![task],
+        )?;
+        counted.capsules += conn.execute("DELETE FROM capsules WHERE task = ?1", params![task])?;
+        counted.ledger_rows +=
+            conn.execute("DELETE FROM token_ledger WHERE task = ?1", params![task])?;
+        conn.execute("DELETE FROM sessions WHERE task = ?1", params![task])?;
+    }
+
+    for run in &runs {
+        counted.events += conn.execute("DELETE FROM events WHERE run = ?1", params![run])?;
+        conn.execute(
+            "DELETE FROM budgets WHERE scope_kind = 'run' AND scope_id = ?1",
+            params![run],
+        )?;
+    }
+
+    counted.tasks = conn.execute("DELETE FROM tasks WHERE project = ?1", params![id])?;
+    conn.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
+    Ok(counted)
+}
+
 fn project_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
     Ok(ProjectRow {
         id: r.get(0)?,
@@ -618,6 +700,22 @@ fn handle_cmd(conn: &Connection, seq_by_run: &mut HashMap<String, u64>, cmd: Cmd
                 .map(|_| ())
                 .map_err(StoreError::from);
             let _ = reply.send(res);
+        }
+
+        Cmd::ForgetProject(id, ts, reply) => {
+            let res = conn
+                .execute(
+                    "UPDATE projects SET forgotten_ts = ?2
+                     WHERE id = ?1 AND forgotten_ts IS NULL",
+                    params![id, ts],
+                )
+                .map(|changed| changed > 0)
+                .map_err(StoreError::from);
+            let _ = reply.send(res);
+        }
+
+        Cmd::PurgeProject(id, reply) => {
+            let _ = reply.send(purge_project(conn, &id));
         }
 
         Cmd::UpsertRole(role, reply) => {
@@ -676,8 +774,8 @@ fn handle_cmd(conn: &Connection, seq_by_run: &mut HashMap<String, u64>, cmd: Cmd
             let res = conn
                 .execute(
                     "INSERT INTO tasks
-                       (id, run, role, parent_task, workflow_node, state, outcome, created_ts, updated_ts)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?7)",
+                       (id, run, role, parent_task, workflow_node, state, outcome, created_ts, updated_ts, project)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?7, ?8)",
                     params![
                         task.id,
                         task.run,
@@ -685,7 +783,8 @@ fn handle_cmd(conn: &Connection, seq_by_run: &mut HashMap<String, u64>, cmd: Cmd
                         task.parent_task,
                         task.workflow_node,
                         state_tag(task.state),
-                        ts
+                        ts,
+                        task.project
                     ],
                 )
                 .map(|_| ())
@@ -823,10 +922,110 @@ mod tests {
                 workflow_node: None,
                 state: WorkerState::Queued,
                 outcome: None,
+                project: None,
             },
             "2026-07-20T00:00:00Z",
         )
         .unwrap();
+    }
+
+    fn game(s: &Store, id: &str) {
+        s.insert_project(
+            ProjectRow {
+                id: id.into(),
+                name: id.into(),
+                root: format!("C:/games/{id}"),
+                engine: "godot".into(),
+                git: false,
+            },
+            "2026-07-20T00:00:00Z",
+        )
+        .unwrap();
+    }
+
+    fn task_of(s: &Store, id: &str, run: &str, project: &str) {
+        s.insert_task(
+            TaskRow {
+                id: id.into(),
+                run: run.into(),
+                role: "gameplay_engineer".into(),
+                parent_task: None,
+                workflow_node: None,
+                state: WorkerState::Queued,
+                outcome: None,
+                project: Some(project.into()),
+            },
+            "2026-07-20T00:00:00Z",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_forgotten_game_leaves_the_list_with_everything_it_ran_still_on_file() {
+        let (_d, s) = store();
+        game(&s, "proj_a");
+        task_of(&s, "task_a", "run_a", "proj_a");
+        s.append_event("run_a", "ts", "daemon", EventType::ToolCall, Scene::daemon(), serde_json::json!({}))
+            .unwrap();
+
+        assert!(s.forget_project("proj_a", "2026-07-29T00:00:00Z").unwrap());
+        assert!(s.projects().unwrap().is_empty(), "the list is what forgetting changes");
+        assert!(
+            s.project("proj_a").unwrap().is_some(),
+            "a run that resumes still has to find the project it belonged to"
+        );
+        assert_eq!(s.events_since("run_a", 0).unwrap().len(), 1);
+        assert!(
+            !s.forget_project("proj_a", "2026-07-29T00:00:00Z").unwrap(),
+            "forgetting twice is not an error to shout about, it is a no-op to report"
+        );
+    }
+
+    #[test]
+    fn erasing_a_game_takes_its_whole_history_and_leaves_its_neighbour_untouched() {
+        let (_d, s) = store();
+        game(&s, "proj_gone");
+        game(&s, "proj_kept");
+        task_of(&s, "task_gone", "run_gone", "proj_gone");
+        task_of(&s, "task_kept", "run_kept", "proj_kept");
+
+        for task in ["task_gone", "task_kept"] {
+            s.insert_capsule(
+                CapsuleRow {
+                    id: format!("cap_{task}"),
+                    task: task.into(),
+                    kind: "task_return".into(),
+                    from_role: "gameplay_engineer".into(),
+                    outcome: "done".into(),
+                    rendered_tokens: 10,
+                    truncated: false,
+                    body_json: "{}".into(),
+                },
+                "ts",
+            )
+            .unwrap();
+            s.record_usage(ledger(task, false, 1, 1, 0, 0, 0.1), "ts").unwrap();
+        }
+        for run in ["run_gone", "run_kept"] {
+            s.append_event(run, "ts", "daemon", EventType::ToolCall, Scene::daemon(), serde_json::json!({}))
+                .unwrap();
+        }
+
+        let gone = s.purge_project("proj_gone").unwrap();
+        assert_eq!(gone.tasks, 1);
+        assert_eq!(gone.events, 1);
+        assert_eq!(gone.capsules, 1);
+        assert_eq!(gone.ledger_rows, 1);
+
+        assert_eq!(s.projects().unwrap().len(), 1, "only the neighbour is left");
+        assert!(s.events_since("run_gone", 0).unwrap().is_empty());
+        assert_eq!(
+            s.events_since("run_kept", 0).unwrap().len(),
+            1,
+            "erasing one game must not touch the events of another"
+        );
+        assert_eq!(s.capsules_for_task("task_kept").unwrap().len(), 1);
+        assert!(s.capsules_for_task("task_gone").unwrap().is_empty());
     }
 
     fn ledger(task: &str, estimate: bool, input: u64, output: u64, read: u64, write: u64, usd: f64) -> LedgerEntry {
@@ -1214,6 +1413,7 @@ mod tests {
                 workflow_node: None,
                 state: WorkerState::Queued,
                 outcome: None,
+                project: None,
             },
             "t",
         );
@@ -1377,6 +1577,7 @@ mod adr_tests {
                 workflow_node: None,
                 state: WorkerState::Queued,
                 outcome: None,
+                project: None,
             },
             "ts",
         )

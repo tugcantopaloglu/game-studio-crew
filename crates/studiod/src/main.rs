@@ -129,6 +129,7 @@ fn run_one(
             workflow_node: None,
             state: WorkerState::Queued,
             outcome: None,
+            project: None,
         },
         now(),
     )?;
@@ -475,6 +476,7 @@ fn m2_proof() -> Result<()> {
             workflow_node: None,
             state: WorkerState::Running,
             outcome: None,
+            project: None,
         },
         now(),
     )?;

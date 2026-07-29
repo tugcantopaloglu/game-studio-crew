@@ -504,6 +504,7 @@ fn run_worker_body(
             workflow_node: None,
             state: WorkerState::Queued,
             outcome: None,
+            project: em.project_id.clone(),
         },
         crate::now(),
     )?;
@@ -1067,6 +1068,7 @@ mod desk_tests {
                     workflow_node: None,
                     state: WorkerState::Queued,
                     outcome: None,
+                    project: em.project_id.clone(),
                 },
                 crate::now(),
             )

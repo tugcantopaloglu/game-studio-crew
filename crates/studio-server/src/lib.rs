@@ -381,6 +381,8 @@ pub fn router(state: AppState) -> Router {
         .route("/meeting", post(convene_meeting))
         .route("/roles", get(roles))
         .route("/projects", get(projects).post(create_project))
+        .route("/projects/forget", post(forget_project))
+        .route("/projects/purge", post(purge_project))
         .route("/approve", post(approve))
         .route("/workflows", get(workflows))
         .route("/workflow", post(start_workflow))
@@ -900,6 +902,65 @@ async fn play(
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "the launch thread died".to_string(),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct DropProject {
+    pub id: String,
+}
+
+async fn forget_project(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<DropProject>,
+) -> Response {
+    let Ok(Some(project)) = state.store.project(&req.id) else {
+        return (StatusCode::NOT_FOUND, "no such project".to_string()).into_response();
+    };
+    match state.store.forget_project(&req.id, now_rfc3339()) {
+        Ok(true) => axum::Json(serde_json::json!({
+            "id": project.id,
+            "name": project.name,
+            "kept": "every run, capsule and decision this project made is still on file",
+        }))
+        .into_response(),
+        Ok(false) => (
+            StatusCode::CONFLICT,
+            format!("{} is already off the list", project.name),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not take {} off the list: {e}", project.name),
+        )
+            .into_response(),
+    }
+}
+
+async fn purge_project(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<DropProject>,
+) -> Response {
+    let Ok(Some(project)) = state.store.project(&req.id) else {
+        return (StatusCode::NOT_FOUND, "no such project".to_string()).into_response();
+    };
+    match state.store.purge_project(&req.id) {
+        Ok(gone) => axum::Json(serde_json::json!({
+            "id": project.id,
+            "name": project.name,
+            "root": project.root,
+            "tasks": gone.tasks,
+            "events": gone.events,
+            "capsules": gone.capsules,
+            "ledger_rows": gone.ledger_rows,
+            "files": "untouched; the studio never deletes what lives in your project folder",
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not erase {}: {e}", project.name),
         )
             .into_response(),
     }
