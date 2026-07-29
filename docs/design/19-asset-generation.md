@@ -138,6 +138,10 @@ So the doctor reports an **asset pipeline** section beside the coding CLIs, the 
 
 **The report names the interpreter it means.** The first draft of this printed `python3.exe -m pip install pillow` — pointing at Windows' Store shortcut, the same non-interpreter that broke the first real sprite run, so the command it told the user to run would have done nothing. `interpreter_without_pillow()` returns the candidate that actually *starts* and lacks pillow, and the remedy targets that. Presence is not capability, for the fourth time in this document.
 
+**And "actually starts" has to be established by starting it.** The first fix asked the shortcut what it thought of itself: it matched the words *was not found* and *Microsoft Store* in the output. That works on exactly one Windows — an English one. The shortcut announces itself in the machine's own language, so on a Turkish install it says `Python bulunamadı`, the match fails, and the shim is filed as a real interpreter that happens to be missing pillow. The remedy then points `pip install pillow` at a stub that installs nothing and exits 9009, and the real interpreter — second in the `["python3", "python", "py"]` order, one line further down the same PATH — is never named. The localised case is not exotic: it is every Windows outside the English ones.
+
+`runs_python()` decides it by running `-c "import sys"` instead. A genuine interpreter missing pillow still executes that; a stub fails it, in every language. `import PIL` failing only means "pillow is missing" once the thing has proved it runs python at all — so the cheap trivial program is what separates the two, and the message text is never read for a verdict again.
+
 ### Optional has to stay optional
 
 An incomplete art pipeline is **not a broken install**, and none of this may read as one:

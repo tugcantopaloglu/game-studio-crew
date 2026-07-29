@@ -52,8 +52,12 @@ pub fn candidates() -> Vec<PathBuf> {
     INTERPRETERS.into_iter().filter_map(on_path).collect()
 }
 
-pub fn shortcut_not_an_interpreter(said: &str) -> bool {
-    said.contains("was not found") && said.contains("Microsoft Store")
+pub fn runs_python(candidate: &Path) -> bool {
+    studio_core::command(candidate)
+        .args(["-c", "import sys"])
+        .output()
+        .map(|said| said.status.success())
+        .unwrap_or(false)
 }
 
 fn interrogate(found: &[PathBuf]) -> Result<PathBuf, String> {
@@ -66,7 +70,7 @@ fn interrogate(found: &[PathBuf]) -> Result<PathBuf, String> {
         );
     }
 
-    let mut shortcut = false;
+    let mut not_an_interpreter = None;
     let mut without_pillow = None;
     for candidate in found {
         let said = match studio_core::command(candidate)
@@ -79,13 +83,10 @@ fn interrogate(found: &[PathBuf]) -> Result<PathBuf, String> {
         if said.status.success() {
             return Ok(candidate.clone());
         }
-        let recorded = format!(
-            "{}{}",
-            String::from_utf8_lossy(&said.stdout),
-            String::from_utf8_lossy(&said.stderr)
-        );
-        if shortcut_not_an_interpreter(&recorded) {
-            shortcut = true;
+        if !runs_python(candidate) {
+            if not_an_interpreter.is_none() {
+                not_an_interpreter = Some(candidate.clone());
+            }
             continue;
         }
         if without_pillow.is_none() {
@@ -102,13 +103,13 @@ fn interrogate(found: &[PathBuf]) -> Result<PathBuf, String> {
             bare.display()
         ));
     }
-    if shortcut {
-        return Err(
-            "the only python on PATH is Windows' Microsoft Store shortcut, which is not an \
-             interpreter and exits without running anything; install python 3.10 or newer, or \
-             turn the alias off in Settings > Apps > Advanced app settings > App execution aliases"
-                .to_string(),
-        );
+    if let Some(fake) = not_an_interpreter {
+        return Err(format!(
+            "the only python on PATH is {}, which runs no python at all; on Windows that is \
+             usually the Microsoft Store shortcut. Install python 3.10 or newer, or turn the \
+             alias off in Settings > Apps > Advanced app settings > App execution aliases",
+            fake.display()
+        ));
     }
     Err(format!(
         "none of the {} interpreters on PATH would start, so a generated image cannot have its \
@@ -128,12 +129,7 @@ pub fn interpreter_without_pillow() -> Option<PathBuf> {
         if said.status.success() {
             return None;
         }
-        let recorded = format!(
-            "{}{}",
-            String::from_utf8_lossy(&said.stdout),
-            String::from_utf8_lossy(&said.stderr)
-        );
-        if shortcut_not_an_interpreter(&recorded) {
+        if !runs_python(&candidate) {
             continue;
         }
         return Some(candidate);
@@ -375,11 +371,11 @@ pub fn cut_out(python: &Path, input: &Path, out: &Path, key: &str) -> Result<Str
                 python.display()
             ));
         }
-        if shortcut_not_an_interpreter(&recorded) {
+        if !runs_python(python) {
             return Err(format!(
-                "{} is Windows' Microsoft Store shortcut rather than an interpreter, so it ran \
-                 nothing; install python 3.10 or newer, or turn the alias off in Settings > Apps \
-                 > Advanced app settings > App execution aliases",
+                "{} runs no python at all, so the background remover ran nothing; on Windows that \
+                 is usually the Microsoft Store shortcut. Install python 3.10 or newer, or turn \
+                 the alias off in Settings > Apps > Advanced app settings > App execution aliases",
                 python.display()
             ));
         }
@@ -668,17 +664,38 @@ mod tests {
     }
 
     #[test]
-    fn windows_store_shortcut_is_recognised_as_the_non_interpreter_it_is() {
-        let said = "Python was not found; run without arguments to install from the Microsoft \
-                    Store, or disable this shortcut from Settings > Apps > Advanced app settings \
-                    > App execution aliases.";
+    fn a_non_interpreter_is_told_apart_by_running_it_rather_than_by_reading_its_complaint() {
         assert!(
-            shortcut_not_an_interpreter(said),
-            "this exact string cost a real generation, because the shortcut is on PATH as \
-             python3 and exits 49 without running anything"
+            !runs_python(Path::new("studio-no-such-python-anywhere")),
+            "a name that starts nothing is not an interpreter"
         );
-        assert!(!shortcut_not_an_interpreter("Python 3.13.1"));
-        assert!(!shortcut_not_an_interpreter("ModuleNotFoundError: No module named 'PIL'"));
+
+        let Some(real) = candidates().into_iter().find(|c| runs_python(c)) else {
+            return;
+        };
+        assert!(
+            studio_core::command(&real)
+                .args(["-c", "import sys"])
+                .output()
+                .map(|s| s.status.success())
+                .unwrap_or(false),
+            "{} was accepted as an interpreter but cannot run the simplest program there is",
+            real.display()
+        );
+    }
+
+    #[test]
+    fn the_interpreter_the_pillow_remedy_names_is_always_one_that_actually_runs_python() {
+        let Some(named) = interpreter_without_pillow() else {
+            return;
+        };
+        assert!(
+            runs_python(&named),
+            "the remedy points `pip install pillow` at {}, which runs no python; the Store \
+             shortcut sits on PATH as python3 and announces itself in the machine's own language, \
+             so a check that reads its English wording lets it through on every localised Windows",
+            named.display()
+        );
     }
 
     #[test]
