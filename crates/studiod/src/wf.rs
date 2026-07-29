@@ -49,6 +49,7 @@ pub struct Host<'a> {
     pub unfinished: Option<Mutex<studio_server::resume::Unfinished>>,
     pub ceiling_usd: f64,
     pub nodes_charged: AtomicUsize,
+    pub held: Mutex<std::collections::BTreeMap<String, u64>>,
 }
 
 pub const DEFAULT_RUN_CEILING_USD: f64 = 25.0;
@@ -265,6 +266,27 @@ impl<'a> Host<'a> {
         node.budget_tokens.max(self.what_a_node_has_been_costing())
     }
 
+    fn hold_for(&self, node: &Node, tokens: u64) {
+        self.held
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .insert(node.id.clone(), tokens);
+    }
+
+    fn release_hold(&self, node: &Node) {
+        let held = self
+            .held
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .remove(&node.id);
+        if let Some(tokens) = held {
+            self.budget
+                .lock()
+                .unwrap_or_else(|held| held.into_inner())
+                .release(tokens);
+        }
+    }
+
     fn spend_approved(&self, node: &Node) -> Result<(), String> {
         let step = match self.ask_above {
             Some(step) if step > 0 => step,
@@ -392,8 +414,12 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
             node_reserve: self.reserve_for(node),
         };
         match self.budget.lock().unwrap_or_else(|held| held.into_inner()).admit(projection) {
-            studio_budget::Admission::Admit => Admission::Admit,
+            studio_budget::Admission::Admit => {
+                self.hold_for(node, projection.total());
+                Admission::Admit
+            }
             studio_budget::Admission::Degrade { step, reason } => {
+                self.hold_for(node, projection.total());
                 let _ = self.em.emit(
                     "daemon",
                     EventType::DegradationApplied,
@@ -441,6 +467,7 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
         let degrade = self.applied_step();
         match crate::m4::run_worker_metered_uncommitted(self.em, r, &brief, seq, acts(r), degrade) {
             Ok(m) => {
+                self.release_hold(node);
                 self.charge(m.billed_tokens, m.cost_usd);
                 if let Some((hash, _)) = self.prefix_of(node) {
                     self.mark_warm(hash);
@@ -448,6 +475,7 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
                 NodeOutcome::Completed { capsule: format!("cap_{}", node.id) }
             }
             Err(e) => {
+                self.release_hold(node);
                 self.charge(e.spend.billed_tokens, e.spend.cost_usd);
                 NodeOutcome::Failed { reason: e.to_string() }
             }
@@ -797,6 +825,7 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
     }
 
     fn skip(&self, node: &Node) {
+        self.release_hold(node);
         let _ = self.em.emit(
             "daemon",
             EventType::NodeEntered,
@@ -971,6 +1000,7 @@ pub fn run_planned(
         unfinished: unfinished.map(Mutex::new),
         ceiling_usd,
         nodes_charged: AtomicUsize::new(0),
+        held: Mutex::new(std::collections::BTreeMap::new()),
     };
 
     if step_confirm {

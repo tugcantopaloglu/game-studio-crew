@@ -180,6 +180,7 @@ pub struct Enforcer {
     pub task: Budget,
     pub sprint: Budget,
     pub applied: Option<Step>,
+    pub reserved: u64,
 }
 
 impl Enforcer {
@@ -188,6 +189,7 @@ impl Enforcer {
             task: Budget::new(task_limit),
             sprint: Budget::new(sprint_limit),
             applied: None,
+            reserved: 0,
         }
     }
 
@@ -218,34 +220,35 @@ impl Enforcer {
             };
         }
 
-        if need > self.sprint.remaining() {
+        if need > self.unreserved(self.sprint) {
             self.applied = Some(Step::HardStop);
             return Admission::Refuse {
                 reason: format!(
                     "projected {need} tokens exceeds the {} left in the sprint budget",
-                    self.sprint.remaining()
+                    self.unreserved(self.sprint)
                 ),
             };
         }
 
-        if need > self.task.remaining() {
+        if need > self.unreserved(self.task) {
             self.applied = Some(Step::HardStop);
             return Admission::Refuse {
                 reason: format!(
                     "projected {need} tokens exceeds the {} left in the task budget",
-                    self.task.remaining()
+                    self.unreserved(self.task)
                 ),
             };
         }
 
         let (scope, b) = self.tightest();
-        let after = (b.spent + need) as f64 / b.limit.max(1) as f64;
+        let after = (b.spent + self.reserved + need) as f64 / b.limit.max(1) as f64;
         if after >= WARN_AT {
             let step = match self.applied {
                 None => step_for_pressure(after),
                 Some(held) => held.max(step_for_pressure(after)),
             };
             self.applied = Some(step);
+            self.reserved += need;
             return Admission::Degrade {
                 step,
                 reason: format!(
@@ -256,7 +259,16 @@ impl Enforcer {
             };
         }
 
+        self.reserved += need;
         Admission::Admit
+    }
+
+    fn unreserved(&self, b: Budget) -> u64 {
+        b.remaining().saturating_sub(self.reserved)
+    }
+
+    pub fn release(&mut self, tokens: u64) {
+        self.reserved = self.reserved.saturating_sub(tokens);
     }
 }
 
@@ -336,6 +348,44 @@ mod tests {
             hungry.total() > 1_000,
             "the reserve is a floor under the estimate, never a cap on it"
         );
+    }
+
+    #[test]
+    fn a_whole_wave_admitted_at_once_cannot_all_spend_the_same_remaining_budget() {
+        let mut e = Enforcer::new(1_440_000, 1_440_000);
+        let node = Projection { node_reserve: 400_000, ..proj(1_000, 200, 2_000, true) };
+
+        let wave: Vec<Admission> = (0..4).map(|_| e.admit(node)).collect();
+        assert!(
+            matches!(wave[3], Admission::Refuse { .. }),
+            "four workers run at once and are admitted before any of them charges, so the fourth \
+             has to be told there is no room: {:?}",
+            wave[3]
+        );
+
+        assert_eq!(
+            e.reserved, 1_200_000,
+            "the three that were let through are holding their reservations; only the refused \
+             one took nothing"
+        );
+        assert_eq!(
+            e.applied,
+            Some(Step::HardStop),
+            "a wave that does not fit is a run that cannot finish its plan, not a queue to retry"
+        );
+    }
+
+    #[test]
+    fn a_reservation_is_given_back_at_what_it_was_held_for_not_at_what_was_spent() {
+        let mut e = Enforcer::new(1_000_000, 1_000_000);
+        let node = Projection { node_reserve: 300_000, ..proj(0, 0, 0, true) };
+        assert!(matches!(e.admit(node), Admission::Admit));
+        assert_eq!(e.reserved, 300_000);
+
+        e.release(300_000);
+        e.record(450_000);
+        assert_eq!(e.reserved, 0, "the hold is released whole; the overspend lands in spent");
+        assert_eq!(e.sprint.remaining(), 550_000);
     }
 
     #[test]
@@ -457,7 +507,8 @@ mod tests {
         }
 
         for _ in 0..20 {
-            match e.admit(proj(1000, 500, 500, true)) {
+            let one = proj(1000, 500, 500, true);
+            match e.admit(one) {
                 Admission::Degrade { step, .. } => assert_eq!(
                     step,
                     Step::EffortDownshift,
@@ -466,6 +517,7 @@ mod tests {
                 ),
                 other => panic!("expected a degrade, got {other:?}"),
             }
+            e.release(one.total());
         }
         assert_eq!(e.state(), BudgetState::Degrading);
     }
@@ -485,10 +537,12 @@ mod tests {
         let mut e = Enforcer::new(100_000, 1_000_000);
         e.record(80_000);
         for _ in 0..50 {
+            let one = proj(1000, 500, 500, true);
             assert!(
-                !matches!(e.admit(proj(1000, 500, 500, true)), Admission::Refuse { .. }),
+                !matches!(e.admit(one), Admission::Refuse { .. }),
                 "a hard stop must mean the budget is out, not that it degraded five times"
             );
+            e.release(one.total());
         }
         assert_ne!(e.applied, Some(Step::HardStop));
     }
