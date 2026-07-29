@@ -48,6 +48,7 @@ pub struct Host<'a> {
     pub redos_at_step: AtomicUsize,
     pub unfinished: Option<Mutex<studio_server::resume::Unfinished>>,
     pub ceiling_usd: f64,
+    pub nodes_charged: AtomicUsize,
 }
 
 pub const DEFAULT_RUN_CEILING_USD: f64 = 25.0;
@@ -66,6 +67,17 @@ pub fn ceiling_for(studio_dir: &std::path::Path, workflow: &Workflow) -> (u64, f
         _ => DEFAULT_RUN_CEILING_USD,
     };
     (tokens, usd)
+}
+
+fn over_the_token_ceiling(tightest: studio_budget::Budget) -> Option<String> {
+    if tightest.remaining() > 0 {
+        return None;
+    }
+    Some(format!(
+        "this run has spent {} of its {} billed tokens; raise budget.tokens in settings and pick \
+         the run up again",
+        tightest.spent, tightest.limit
+    ))
 }
 
 pub fn capsule_name(node_id: &str) -> String {
@@ -237,6 +249,20 @@ impl<'a> Host<'a> {
         }
         self.budget.lock().unwrap_or_else(|held| held.into_inner()).record(billed_tokens);
         *self.spent_usd.lock().unwrap_or_else(|held| held.into_inner()) += cost_usd;
+        self.nodes_charged.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn what_a_node_has_been_costing(&self) -> u64 {
+        let charged = self.nodes_charged.load(Ordering::Relaxed) as u64;
+        if charged == 0 {
+            return 0;
+        }
+        let spent = self.budget.lock().unwrap_or_else(|held| held.into_inner()).task.spent;
+        spent / charged
+    }
+
+    fn reserve_for(&self, node: &Node) -> u64 {
+        node.budget_tokens.max(self.what_a_node_has_been_costing())
     }
 
     fn spend_approved(&self, node: &Node) -> Result<(), String> {
@@ -298,6 +324,28 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
     }
 
     fn admit(&self, node: &Node) -> Admission {
+        let tightest = self
+            .budget
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .tightest()
+            .1;
+        if let Some(reason) = over_the_token_ceiling(tightest) {
+            let _ = self.em.emit(
+                "daemon",
+                EventType::BudgetExhausted,
+                Scene::daemon(),
+                serde_json::json!({
+                    "scope": "run",
+                    "reason": reason,
+                    "node": node.id,
+                    "spent": tightest.spent,
+                    "ceiling": tightest.limit,
+                }),
+            );
+            return Admission::Refuse { reason };
+        }
+
         if let Err(reason) = self.spend_approved(node) {
             return Admission::Refuse { reason };
         }
@@ -341,6 +389,7 @@ impl<'a> ParallelWorkflowHost for Host<'a> {
             brief_tokens,
             output_reserve: 2_000,
             prefix_is_warm,
+            node_reserve: self.reserve_for(node),
         };
         match self.budget.lock().unwrap_or_else(|held| held.into_inner()).admit(projection) {
             studio_budget::Admission::Admit => Admission::Admit,
@@ -921,6 +970,7 @@ pub fn run_planned(
         redos_at_step: AtomicUsize::new(0),
         unfinished: unfinished.map(Mutex::new),
         ceiling_usd,
+        nodes_charged: AtomicUsize::new(0),
     };
 
     if step_confirm {
@@ -1237,10 +1287,69 @@ mod ceiling_tests {
             brief_tokens: 500,
             output_reserve: 2_000,
             prefix_is_warm: false,
+            node_reserve: 0,
         };
         assert!(
             matches!(e.admit(projection), studio_budget::Admission::Refuse { .. }),
             "the ladder the budget crate ships was unreachable while the limit was u64::MAX"
+        );
+    }
+
+    #[test]
+    fn a_node_reserves_the_budget_its_own_plan_gave_it_rather_than_the_size_of_its_first_prompt() {
+        let workflow = eleven_nodes();
+        let node = workflow.nodes.first().expect("eleven nodes is not empty");
+        assert!(
+            node.budget_tokens > 10_000,
+            "a planned node is worth far more than an opening prompt: {}",
+            node.budget_tokens
+        );
+
+        let opening = Projection {
+            prefix_tokens: 1_000,
+            brief_tokens: 173,
+            output_reserve: 2_000,
+            prefix_is_warm: true,
+            node_reserve: node.budget_tokens,
+        };
+        assert_eq!(
+            opening.total(),
+            node.budget_tokens,
+            "the gate has to hold room for the whole worker session, not for its first turn"
+        );
+    }
+
+    #[test]
+    fn a_run_that_has_already_outspent_its_ceiling_is_told_so_rather_than_asked_to_approve_more() {
+        let mut spent_out = Enforcer::new(1_440_000, 1_440_000);
+        spent_out.record(2_061_867);
+        let reason = over_the_token_ceiling(spent_out.tightest().1)
+            .expect("a run past its ceiling has nothing left to admit");
+        assert!(reason.contains("2061867"), "the spend has to be named: {reason}");
+        assert!(reason.contains("1440000"), "the ceiling has to be named: {reason}");
+        assert!(
+            reason.contains("budget.tokens"),
+            "the message has to name the setting that lifts it: {reason}"
+        );
+
+        let mut healthy = Enforcer::new(1_440_000, 1_440_000);
+        healthy.record(400_000);
+        assert_eq!(over_the_token_ceiling(healthy.tightest().1), None);
+    }
+
+    #[test]
+    fn the_ceiling_is_checked_before_the_human_is_asked_to_approve_more_spend() {
+        let source = include_str!("wf.rs");
+        let body = source
+            .split("fn admit(&self, node: &Node) -> Admission {")
+            .nth(1)
+            .expect("Host::admit is where both gates live");
+        let ceiling = body.find("over_the_token_ceiling").expect("the ceiling gate is gone");
+        let ask = body.find("spend_approved").expect("the approval gate is gone");
+        assert!(
+            ceiling < ask,
+            "asking first means a run whose ceiling is already spent gets a `continue?` prompt \
+             that cannot lead anywhere: whatever the human answers, the very next gate refuses it"
         );
     }
 }

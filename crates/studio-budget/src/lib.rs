@@ -137,15 +137,12 @@ pub struct Projection {
     pub brief_tokens: u64,
     pub output_reserve: u64,
     pub prefix_is_warm: bool,
+    pub node_reserve: u64,
 }
 
 impl Projection {
-    pub fn total(&self) -> u64 {
-        self.prefix_tokens + self.brief_tokens + self.output_reserve
-    }
-
-    pub fn projected_usd(&self, model: Model) -> f64 {
-        let u = if self.prefix_is_warm {
+    pub fn opening_turn(&self) -> Usage {
+        if self.prefix_is_warm {
             Usage {
                 input: self.brief_tokens,
                 output: self.output_reserve,
@@ -159,8 +156,15 @@ impl Projection {
                 cache_read: 0,
                 cache_creation: self.prefix_tokens,
             }
-        };
-        usd_mirror(model, u)
+        }
+    }
+
+    pub fn total(&self) -> u64 {
+        billable_tokens(self.opening_turn()).max(self.node_reserve)
+    }
+
+    pub fn projected_usd(&self, model: Model) -> f64 {
+        usd_mirror(model, self.opening_turn())
     }
 }
 
@@ -290,7 +294,48 @@ mod tests {
             brief_tokens: brief,
             output_reserve: reserve,
             prefix_is_warm: warm,
+            node_reserve: 0,
         }
+    }
+
+    #[test]
+    fn a_projection_is_counted_the_way_the_ledger_will_charge_it() {
+        let cold = proj(100_000, 500, 2_000, false);
+        let warm = proj(100_000, 500, 2_000, true);
+
+        assert_eq!(cold.total(), billable_tokens(cold.opening_turn()));
+        assert_eq!(warm.total(), billable_tokens(warm.opening_turn()));
+        assert!(
+            cold.total() > warm.total(),
+            "the same prefix is a cache write at {CACHE_WRITE_MULTIPLIER}x cold and a read at \
+             {CACHE_READ_MULTIPLIER}x warm; adding raw token counts prices both at 1x and cannot \
+             tell the expensive spawn from the cheap one"
+        );
+    }
+
+    #[test]
+    fn a_node_reserves_what_it_will_spend_rather_than_what_its_first_turn_costs() {
+        let mut opening = proj(1_000, 173, 2_000, true);
+        assert!(
+            opening.total() < 10_000,
+            "an opening turn against a warm prefix is small: {}",
+            opening.total()
+        );
+
+        opening.node_reserve = 120_000;
+        assert_eq!(
+            opening.total(),
+            120_000,
+            "a node is a worker session of many turns and every turn re-reads the history it has \
+             piled up; a run that reserved only the opening prompt settled 43% past its ceiling \
+             before any gate refused it"
+        );
+
+        let hungry = Projection { node_reserve: 1_000, ..proj(400_000, 500, 2_000, false) };
+        assert!(
+            hungry.total() > 1_000,
+            "the reserve is a floor under the estimate, never a cap on it"
+        );
     }
 
     #[test]

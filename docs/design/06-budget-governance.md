@@ -24,6 +24,26 @@ Two scopes, both in the `budgets` table ([03](03-state-store.md)):
 | **In-flight** | Interim `token_usage` estimates (or EMA fallback, see below) crossing a soft threshold | Emit `budget_warning`; arm the degradation ladder |
 | **Capsule time** | On `capsule_submit`, the now-known task spend against the task budget | Apply the next ladder step for the next task in scope |
 
+### An approval prompt is not a gate
+
+Pre-spawn holds two independent things: the spend check that pauses and asks the human (`budget.askAbove`), and the ceiling that refuses outright (`budget.tokens`, or the plan's own total when that setting is left off). They are different numbers measuring different sides of the same run — the ask fires on cumulative spend, the ceiling on what is left — so nothing keeps them in step, and a run can be past its ceiling well before it is due to ask.
+
+Asked first, the prompt becomes a dead end. A real run made the case: a 1,440,000-token ceiling, 2,061,867 spent by `t4`, and the studio stopped to ask *may I continue?* — a question with no answer that helps, because whichever the human picks the very next gate refuses the node with `0 left in the sprint budget`. From the floor it reads as the app hanging on its own prompt.
+
+So the ceiling is checked before the human is. A run with nothing left is told what it spent, what its ceiling was, and which setting lifts it, and is never asked to approve spending it cannot do. `the_ceiling_is_checked_before_the_human_is_asked_to_approve_more_spend` pins the order by reading the source, because call order is exactly the property no test of either gate on its own can hold.
+
+### The gate reserves what a node spends, not what its first prompt costs
+
+The same run overshot its ceiling by 43%, and the ordering fix above does not explain that — a gate cannot stop what it never saw coming. The pre-spawn projection was wrong by two orders of magnitude: 3,173 tokens projected against nodes settling near 300,000 billed. Two separate mistakes produced that.
+
+**The projection was counted in raw tokens while the ledger charges in weighted ones.** `billable_tokens` prices a cache write at `CACHE_WRITE_MULTIPLIER` and a read at `CACHE_READ_MULTIPLIER`; `Projection::total` added its three fields at 1x, so it could not tell an expensive cold spawn from a cheap warm one — a distinction `projected_usd` was already making one function away, from the same fields. `total()` now builds the same `Usage` that `projected_usd` builds and hands it to `billable_tokens`: one description of the opening turn, read once as tokens and once as dollars, never diverging again.
+
+**And the opening turn is not the unit being admitted.** A node is a worker session of many turns, each re-reading the history the last one grew — on the run above, one node read 737,086 cached tokens and wrote 208,752. No arithmetic over the first prompt reaches that number, so the projection now carries a `node_reserve` floor: what the plan itself said the node was worth (`budget_tokens`, 120,000 a step), raised to what nodes have actually been costing in this run once any have finished. The gate asks "do I have room for a node?" instead of "do I have room for a greeting?".
+
+Replayed against that run's ledger, the overrun falls from 621,867 tokens to 3,581 — it refuses before spawning the sixth node instead of finishing the seventh and discovering the ceiling afterwards.
+
+**What remains: one node can still exceed its own reservation.** Nothing kills a worker mid-session, so a node admitted against a 228,557-token estimate that goes on to spend 529,351 is stopped only when the next node asks. The residual is bounded by one node instead of a whole run, and that is the honest claim — in-flight enforcement ([13](13-risks.md)) is what would close it.
+
 ### In-flight enforcement reads real numbers
 
 M1 settled this: **streamed events do carry `usage`** ([00](00-overview.md)). `stream_event`/`message_start` arrives with a full block (`input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens`), and four pre-`result` events carried usage in a short probe turn. Input-side numbers are therefore **exact from the first streamed event**, before any output is generated, which is precisely what the pre-spawn projection wanted to confirm.
