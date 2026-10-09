@@ -288,7 +288,7 @@ impl AppState {
     }
 }
 
-pub async fn off_the_runtime<T, F>(work: F) -> Result<T, Response>
+pub async fn off_the_runtime<T, F>(work: F) -> Result<T, (StatusCode, String)>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -298,7 +298,6 @@ where
             StatusCode::INTERNAL_SERVER_ERROR,
             "the thread doing that work died".to_string(),
         )
-            .into_response()
     })
 }
 

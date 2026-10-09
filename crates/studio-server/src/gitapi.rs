@@ -156,7 +156,7 @@ async fn remote(
     let url = req.url.clone();
     let set = match crate::off_the_runtime(move || git::set_remote(&root, &url)).await {
         Ok(done) => done,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     match set {
         Ok(()) => {
@@ -183,7 +183,7 @@ async fn create(
     let made = match crate::off_the_runtime(move || git::create_remote(&root, &name, private)).await
     {
         Ok(done) => done,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     match made {
         Ok(url) => {
@@ -240,7 +240,7 @@ async fn rollback(
     .await;
     let did = match did {
         Ok(done) => done,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
 
     let did = match did {

@@ -257,7 +257,7 @@ async fn model_catalogue(State(state): State<AppState>) -> Response {
     .await;
     let rows = match read {
         Ok(rows) => rows,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
 
     axum::Json(serde_json::json!({
@@ -676,7 +676,7 @@ async fn limits(State(state): State<AppState>) -> Response {
 
     let account = match crate::off_the_runtime(read_account).await {
         Ok(said) => said,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
 
     axum::Json(serde_json::json!({
