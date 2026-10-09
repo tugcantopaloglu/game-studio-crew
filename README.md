@@ -342,6 +342,28 @@ studiod m4   the studio floor driven by a real five-worker cast
 
 ## Repository layout
 
+### Building and validating changes
+
+Source builds require Rust 1.88 or later. The locked dependency graph includes
+`time` packages requiring Rust 1.88, so the earlier Rust 1.82 minimum did not
+match the dependencies. Keep both Cargo lockfiles when building.
+
+```text
+cargo build --workspace --all-targets --locked
+cargo test --workspace --locked
+cargo clippy --workspace --lib --bins --locked -- -D warnings
+cargo build --manifest-path desktop/Cargo.toml --locked
+```
+
+CI builds and tests the workspace, builds the native desktop shell, and enforces
+production lint checks on Windows, macOS and Linux. It also checks the workspace
+against Rust 1.88. Test-only Clippy style warnings are outside the production
+lint gate; tests are still compiled and executed in full. Engine and coding CLI
+integration requires the corresponding installed tools and local authentication.
+The existing status limitations below remain relevant to those integrations.
+
+### Directories
+
 ```
 crates/           the Rust workspace: daemon, engine, store, floor
 desktop/          the native shell (Windows, macOS, Linux)

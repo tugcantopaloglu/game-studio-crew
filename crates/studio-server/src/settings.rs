@@ -191,9 +191,7 @@ const CATALOGUE_TTL: Duration = Duration::from_secs(60);
 
 pub fn read_catalogue(provider: Provider) -> Option<String> {
     let argv = models::catalogue_argv(provider.id())?;
-    if on_path(provider.program()).is_none() {
-        return None;
-    }
+    on_path(provider.program())?;
 
     if let Ok(cached) = CATALOGUES.lock() {
         if let Some((_, at, body)) = cached

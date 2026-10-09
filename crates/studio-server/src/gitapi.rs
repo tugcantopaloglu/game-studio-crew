@@ -63,16 +63,15 @@ pub fn routes() -> Router<AppState> {
         .route("/git/rollback", post(rollback))
 }
 
-fn repo(state: &AppState, project: &str) -> Result<PathBuf, Response> {
+fn repo(state: &AppState, project: &str) -> Result<PathBuf, (StatusCode, String)> {
     if !git::available() {
         return Err((
             StatusCode::CONFLICT,
             "git is not on PATH; install it and restart the studio".to_string(),
-        )
-            .into_response());
+        ));
     }
     let Some(root) = project_root(state, project) else {
-        return Err((StatusCode::NOT_FOUND, "no such project".to_string()).into_response());
+        return Err((StatusCode::NOT_FOUND, "no such project".to_string()));
     };
     if !git::is_repo(&root) {
         return Err((
@@ -81,8 +80,7 @@ fn repo(state: &AppState, project: &str) -> Result<PathBuf, Response> {
                 "{} is not a git repository; create the project with git, or run git init there",
                 root.display()
             ),
-        )
-            .into_response());
+        ));
     }
     Ok(root)
 }
@@ -109,7 +107,7 @@ fn announce(state: &AppState, project: &str, action: &str, ok: bool, detail: &st
 async fn tree(State(state): State<AppState>, Query(q): Query<TreeQuery>) -> Response {
     let root = match repo(&state, &q.project) {
         Ok(root) => root,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
 
     let (skip, limit) = (q.skip, q.limit);
@@ -122,7 +120,7 @@ async fn tree(State(state): State<AppState>, Query(q): Query<TreeQuery>) -> Resp
     .await;
     let (history, dirty, remotes, branch, head) = match read {
         Ok(got) => got,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     let history = match history {
         Ok(h) => h,
@@ -153,7 +151,7 @@ async fn remote(
 ) -> Response {
     let root = match repo(&state, &req.project) {
         Ok(root) => root,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     let url = req.url.clone();
     let set = match crate::off_the_runtime(move || git::set_remote(&root, &url)).await {
@@ -179,7 +177,7 @@ async fn create(
 ) -> Response {
     let root = match repo(&state, &req.project) {
         Ok(root) => root,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     let (name, private) = (req.name.clone(), req.private);
     let made = match crate::off_the_runtime(move || git::create_remote(&root, &name, private)).await
@@ -203,11 +201,11 @@ async fn create(
 async fn push(State(state): State<AppState>, axum::Json(req): axum::Json<PushRequest>) -> Response {
     let root = match repo(&state, &req.project) {
         Ok(root) => root,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     let pushed = match crate::off_the_runtime(move || git::push(&root)).await {
         Ok(done) => done,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     match pushed {
         Ok(said) => {
@@ -227,7 +225,7 @@ async fn rollback(
 ) -> Response {
     let root = match repo(&state, &req.project) {
         Ok(root) => root,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
 
     let sha = req.sha.clone();

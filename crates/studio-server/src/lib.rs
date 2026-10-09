@@ -355,12 +355,12 @@ async fn guard_origin(
                 return Err(StatusCode::FORBIDDEN);
             }
         }
-        None if changes_something(req.method()) => {
-            if req.headers().contains_key("sec-fetch-site")
-                || req.headers().contains_key(header::REFERER)
-            {
-                return Err(StatusCode::FORBIDDEN);
-            }
+        None
+            if changes_something(req.method())
+                && (req.headers().contains_key("sec-fetch-site")
+                    || req.headers().contains_key(header::REFERER)) =>
+        {
+            return Err(StatusCode::FORBIDDEN);
         }
         None => {}
     }

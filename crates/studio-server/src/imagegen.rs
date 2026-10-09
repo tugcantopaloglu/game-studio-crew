@@ -45,7 +45,9 @@ pub fn cutout_script() -> PathBuf {
 
 pub const INTERPRETERS: [&str; 3] = ["python3", "python", "py"];
 
-static RESOLVED: std::sync::RwLock<Option<(Vec<PathBuf>, Result<PathBuf, String>)>> =
+type InterpreterResolution = (Vec<PathBuf>, Result<PathBuf, String>);
+
+static RESOLVED: std::sync::RwLock<Option<InterpreterResolution>> =
     std::sync::RwLock::new(None);
 
 pub fn candidates() -> Vec<PathBuf> {

@@ -805,7 +805,7 @@ fn scaffold_web(root: &Path, name: &str) -> Result<Vec<PathBuf>> {
         return Ok(Vec::new());
     }
 
-    let escaped = name.replace('<', "").replace('>', "").replace('&', "");
+    let escaped = name.replace(['<', '>', '&'], "");
     let index = format!(
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
@@ -898,7 +898,7 @@ fn scaffold_godot(root: &Path, name: &str) -> Result<Vec<PathBuf>> {
         return Ok(Vec::new());
     }
 
-    let escaped = name.replace('\\', "").replace('"', "");
+    let escaped = name.replace(['\\', '"'], "");
     let project = format!(
         "config_version=5\n\n\
          [application]\n\n\

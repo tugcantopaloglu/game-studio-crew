@@ -2,7 +2,7 @@
 name = "game-studio-shell"
 version = "1.0.1"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.88"
 license = "MIT"
 publish = false
 build = "build.rs"

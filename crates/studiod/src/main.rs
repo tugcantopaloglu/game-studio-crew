@@ -14,7 +14,7 @@ mod tools;
 
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use studio_context::{freeze, FrozenPrefix, Model};
 use studio_core::{Effort, SessionMode, Worker, WorkerLimits, WorkerSpec};
 use studio_events::{EventType, Outcome, Scene, WorkerState};
@@ -92,7 +92,7 @@ fn write_charter_into(dir: &std::path::Path, prefix: &FrozenPrefix) -> Result<Pa
     Ok(path)
 }
 
-fn spec_for(charter_path: &PathBuf, session: SessionMode) -> WorkerSpec {
+fn spec_for(charter_path: &Path, session: SessionMode) -> WorkerSpec {
     WorkerSpec {
         system_prompt_file: charter_path.to_string_lossy().into_owned(),
         tools: TOOLS.iter().map(|s| s.to_string()).collect(),
@@ -116,7 +116,7 @@ fn run_one(
     store: &Store,
     run: &str,
     prefix: &FrozenPrefix,
-    charter_path: &PathBuf,
+    charter_path: &Path,
     label: &str,
 ) -> Result<SpawnOutcome> {
     let task_id = id("task");
